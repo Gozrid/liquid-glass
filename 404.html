@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="de" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>404 — Hier ist nur Glas</title>
+  <meta name="robots" content="noindex">
+  <meta name="theme-color" content="#05060f">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='6' y1='3' x2='26' y2='30' gradientUnits='userSpaceOnUse'%3E%3Cstop offset='0' stop-color='%23ffc078'/%3E%3Cstop offset='.42' stop-color='%23ff5d6c'/%3E%3Cstop offset='.8' stop-color='%239a6bff'/%3E%3Cstop offset='1' stop-color='%2345c8ff'/%3E%3C/linearGradient%3E%3C/defs%3E%3Cpath d='M16 2.5s10 9.800 10 17.200a10 10 0 0 1-20 0C6 12.300 16 2.500 16 2.500z' fill='url(%23g)'/%3E%3C/svg%3E">
+  <script>
+    // gleiches Erscheinungsbild wie die Hauptseite
+    try { var t = localStorage.getItem('fable.theme'); if (t) document.documentElement.dataset.theme = JSON.parse(t); } catch (e) {}
+  </script>
+  <!-- Diese Seite wird unter beliebigen Pfaden ausgeliefert, deshalb steckt alles inline -->
+  <style>
+    :root {
+      --bg: #05060f; --fg: #f4f6ff; --fg-2: rgba(244, 246, 255, .7);
+      --fill: rgba(14, 16, 48, .34); --rim: rgba(255, 255, 255, .26); --shade: rgba(0, 0, 0, .45);
+      --b1: #1436c4; --b2: #5a22c6; --b3: #e2486a; --b4: #ffb86b;
+      --grad: linear-gradient(100deg, #ffb65c, #ff5d6c 38%, #a06bff 72%, #45c8ff);
+    }
+    :root[data-theme="light"] {
+      --bg: #e9edfb; --fg: #12142a; --fg-2: rgba(18, 20, 42, .7);
+      --fill: rgba(255, 255, 255, .46); --rim: rgba(255, 255, 255, .9); --shade: rgba(60, 70, 130, .22);
+      --b1: #aecdff; --b2: #d3bcff; --b3: #ffc1b6; --b4: #fff3d6;
+    }
+    * { box-sizing: border-box; margin: 0; }
+    html, body { height: 100%; }
+    body {
+      display: grid; place-items: center; padding: 24px; overflow: hidden;
+      background: var(--bg); color: var(--fg);
+      font: 16px/1.5 ui-sans-serif, system-ui, -apple-system, "SF Pro Text", "Segoe UI", Roboto, sans-serif;
+      -webkit-font-smoothing: antialiased;
+    }
+    .sky { position: fixed; inset: -20%; z-index: -1; filter: blur(70px); }
+    .sky i { position: absolute; border-radius: 50%; opacity: .85; animation: drift 26s ease-in-out infinite alternate; }
+    .sky i:nth-child(1) { left: 8%; top: 12%; width: 46%; height: 52%; background: var(--b1); }
+    .sky i:nth-child(2) { right: 6%; top: 4%; width: 40%; height: 48%; background: var(--b2); animation-delay: -9s; }
+    .sky i:nth-child(3) { left: 30%; bottom: 2%; width: 44%; height: 44%; background: var(--b3); opacity: .6; animation-delay: -17s; }
+    .sky i:nth-child(4) { right: 20%; bottom: 14%; width: 20%; height: 22%; background: var(--b4); opacity: .5; animation-delay: -4s; }
+    @keyframes drift { to { transform: translate(6%, -5%) scale(1.12); } }
+    main {
+      position: relative; width: min(100%, 520px); padding: 40px 36px 34px; text-align: center;
+      border-radius: 34px; background: var(--fill);
+      -webkit-backdrop-filter: blur(26px) saturate(150%); backdrop-filter: blur(26px) saturate(150%);
+      box-shadow: inset 0 0 0 1px var(--rim), inset 0 1px 0 0 rgba(255, 255, 255, .35), 0 30px 80px -20px var(--shade);
+      animation: rise .7s cubic-bezier(.22, 1, .36, 1) both;
+    }
+    main::after {
+      content: ""; position: absolute; inset: 0; border-radius: inherit; pointer-events: none;
+      background: radial-gradient(260px circle at var(--mx, 50%) var(--my, 0%), rgba(255, 255, 255, .2), transparent 70%);
+    }
+    @keyframes rise { from { opacity: 0; transform: translateY(18px) scale(.97); } }
+    .drop { width: 54px; height: 54px; filter: drop-shadow(0 10px 22px rgba(255, 93, 108, .45)); animation: bob 3.2s ease-in-out infinite; }
+    @keyframes bob { 50% { transform: translateY(-7px); } }
+    h1 {
+      margin-top: 6px; font-size: clamp(84px, 26vw, 132px); line-height: 1; font-weight: 800; letter-spacing: -.05em;
+      background: var(--grad); -webkit-background-clip: text; background-clip: text; color: transparent;
+    }
+    h2 { margin-top: 4px; font-size: 22px; letter-spacing: -.02em; }
+    p { margin: 10px auto 0; max-width: 34ch; color: var(--fg-2); }
+    nav { display: flex; flex-wrap: wrap; justify-content: center; gap: 10px; margin-top: 26px; }
+    a {
+      padding: 11px 20px; border-radius: 999px; color: var(--fg); font-weight: 600; text-decoration: none;
+      box-shadow: inset 0 0 0 1px var(--rim); transition: transform .25s cubic-bezier(.3, 1.6, .5, 1), background .2s;
+    }
+    a:hover { transform: translateY(-2px) scale(1.03); background: rgba(255, 255, 255, .12); }
+    a:active { transform: scale(.97); }
+    a:focus-visible { outline: 2px solid #ff6a3d; outline-offset: 3px; }
+    a.primary { background: var(--grad); color: #fff; box-shadow: 0 10px 26px -10px rgba(255, 93, 108, .8); }
+    a.primary:hover { background: var(--grad); }
+    @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
+  </style>
+</head>
+<body>
+  <div class="sky" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
+  <main id="card">
+    <svg class="drop" viewBox="0 0 32 32" aria-hidden="true">
+      <defs><linearGradient id="g" x1="6" y1="3" x2="26" y2="30" gradientUnits="userSpaceOnUse">
+        <stop offset="0" stop-color="#ffc078"/><stop offset=".42" stop-color="#ff5d6c"/><stop offset=".8" stop-color="#9a6bff"/><stop offset="1" stop-color="#45c8ff"/>
+      </linearGradient></defs>
+      <path d="M16 2.5s10 9.8 10 17.2a10 10 0 0 1-20 0C6 12.3 16 2.5 16 2.5z" fill="url(#g)"/>
+    </svg>
+    <h1>404</h1>
+    <h2>Hier ist nur Glas.</h2>
+    <p>Diese Seite gibt es nicht – oder sie ist so durchsichtig, dass man sie nicht mehr findet.</p>
+    <nav>
+      <a class="primary" id="home" href="./">Zur Startseite</a>
+      <a id="os" href="os.html">fableOS starten</a>
+    </nav>
+  </main>
+  <script>
+    // Lichtfleck folgt dem Zeiger
+    var card = document.getElementById('card');
+    addEventListener('pointermove', function (e) {
+      var r = card.getBoundingClientRect();
+      card.style.setProperty('--mx', (e.clientX - r.left) + 'px');
+      card.style.setProperty('--my', (e.clientY - r.top) + 'px');
+    }, { passive: true });
+
+    // Die 404-Seite kennt ihren eigenen Ort nicht. Deshalb vom tiefsten Pfad aufwärts
+    // nach dem Ordner suchen, in dem die Seite wirklich liegt, und die Links dorthin zeigen lassen.
+    (async function () {
+      var parts = location.pathname.split('/').filter(Boolean);
+      for (var i = parts.length; i >= 0; i--) {
+        var base = '/' + parts.slice(0, i).map(function (p) { return p + '/'; }).join('');
+        try {
+          var res = await fetch(base + 'assets/css/core.css', { method: 'HEAD' });
+          if (res.ok) {
+            document.getElementById('home').href = base;
+            document.getElementById('os').href = base + 'os.html';
+            return;
+          }
+        } catch (e) { /* offline oder blockiert: nächster Kandidat */ }
+      }
+    })();
+  </script>
+</body>
+</html>

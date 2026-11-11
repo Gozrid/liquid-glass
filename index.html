@@ -1,0 +1,400 @@
+<!doctype html>
+<html lang="de" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Fable 5.2 — Liquid Glass zum Anfassen</title>
+  <meta name="description" content="Ein interaktiver Liquid-Glass-Showcase: echte Lichtbrechung im Shader, Federphysik, Live-Demos und ein komplettes Betriebssystem im Browser. Gebaut von Claude Fable 5.2 – ohne Framework, ohne Bilder.">
+  <meta name="theme-color" content="#05060f">
+  <meta property="og:title" content="Fable 5.2 — Liquid Glass zum Anfassen">
+  <meta property="og:description" content="Echte Lichtbrechung, Federphysik und ein Betriebssystem im Browser. 100 % Code, 0 Abhängigkeiten.">
+  <meta property="og:type" content="website">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='6' y1='3' x2='26' y2='30' gradientUnits='userSpaceOnUse'%3E%3Cstop offset='0' stop-color='%23ffc078'/%3E%3Cstop offset='.42' stop-color='%23ff5d6c'/%3E%3Cstop offset='.8' stop-color='%239a6bff'/%3E%3Cstop offset='1' stop-color='%2345c8ff'/%3E%3C/linearGradient%3E%3C/defs%3E%3Cpath d='M16 2.5s10 9.800 10 17.200a10 10 0 0 1-20 0C6 12.300 16 2.500 16 2.500z' fill='url(%23g)'/%3E%3C/svg%3E">
+  <script>
+    // Theme vor dem ersten Paint setzen (kein Aufblitzen)
+    try { var t = localStorage.getItem('fable.theme'); if (t) document.documentElement.dataset.theme = JSON.parse(t); } catch (e) {}
+  </script>
+  <!-- Opt-in für den Seitenübergang muss vor dem ersten Frame bekannt sein, daher inline -->
+  <style>@view-transition { navigation: auto; }</style>
+  <link rel="stylesheet" href="assets/css/core.css">
+  <link rel="stylesheet" href="assets/css/site.css">
+  <script type="module" src="assets/js/site/main.js"></script>
+</head>
+<body>
+  <canvas id="stage" aria-hidden="true"></canvas>
+  <div class="scroll-bar" aria-hidden="true"><i></i></div>
+
+  <!-- ====================== Navigation ====================== -->
+  <header class="nav glass" id="nav" data-refract="13,34" data-sheen>
+    <a class="nav-brand" href="#top" aria-label="Zum Anfang">
+      <span class="brand-mark" data-logo></span>
+      <span class="brand-name">Fable&nbsp;5.2</span>
+    </a>
+    <nav class="nav-links" id="nav-links" aria-label="Abschnitte">
+      <span class="nav-ind" aria-hidden="true"></span>
+      <a href="#material">Material</a>
+      <a href="#komponenten">Komponenten</a>
+      <a href="#koennen">Können</a>
+      <a href="#system">System</a>
+    </nav>
+    <div class="nav-actions">
+      <button class="icon-btn" id="palette-btn" type="button" aria-label="Befehlspalette öffnen" title="Befehlspalette (⌘K)"><i data-icon="command"></i></button>
+      <button class="icon-btn" id="theme-btn" type="button" aria-label="Erscheinungsbild wechseln" title="Hell / Dunkel"><i data-icon="moon" class="i-moon"></i><i data-icon="sun" class="i-sun"></i></button>
+    </div>
+  </header>
+
+  <main>
+    <!-- ====================== Hero ====================== -->
+    <section class="hero" id="top">
+      <div class="hero-inner">
+        <p class="eyebrow glass" data-reveal><span class="pulse-dot"></span>Entworfen &amp; programmiert von Claude Fable 5.2</p>
+        <h1 class="hero-title" id="hero-title">
+          <span class="line"><span class="w">Liquid</span> <span class="w">Glass.</span></span>
+          <span class="line"><span class="w acc">Zum</span> <span class="w acc">Anfassen.</span></span>
+        </h1>
+        <p class="hero-lede" data-reveal style="--i:1">Brechung, Dispersion und Federphysik in Echtzeit. Kein Framework, keine Bilddatei – jeder Pixel auf dieser Seite ist berechnet. <span class="fine-only">Fahr mit dem Zeiger über die Schrift.</span><span class="coarse-only">Tippe und ziehe über die Schrift.</span></p>
+        <div class="hero-cta" data-reveal style="--i:2">
+          <a class="btn primary" href="#material" data-magnet>Material anfassen <i data-icon="arrowRight"></i></a>
+          <a class="btn glass" href="os.html" data-os-link data-magnet data-sheen data-refract="12,30"><i data-icon="power"></i> fableOS starten</a>
+        </div>
+      </div>
+      <div class="hero-foot" data-reveal style="--i:3">
+        <span class="hint"><kbd>Klick</kbd> lässt Tropfen fallen</span>
+        <span class="hint"><kbd>⌘</kbd><kbd>K</kbd> Befehlspalette</span>
+        <a class="scroll-cue" href="#material" aria-label="Weiter zum Material"><i></i></a>
+      </div>
+    </section>
+
+    <!-- ====================== 01 Material ====================== -->
+    <section class="sec" id="material" data-section="Material">
+      <header class="sec-head">
+        <p class="kicker" data-reveal>01 — Material</p>
+        <h2 data-reveal style="--i:1">Kein Trick mit Unschärfe.<br><span class="grad-text">Echte Optik im Shader.</span></h2>
+        <p class="sec-lede" data-reveal style="--i:2">Die Linsen unten sind Distanzfelder. Jeder Pixel berechnet seine Kantennormale, bricht den Blick nach innen, spaltet Rot, Grün und Blau auf und setzt ein Glanzlicht. Zieh die Formen zusammen – sie verschmelzen wie Flüssigkeit.</p>
+      </header>
+
+      <div class="lab">
+        <div class="lab-view" id="lab-view" data-reveal>
+          <canvas id="lab-canvas" aria-label="Interaktive Glas-Simulation: Formen lassen sich ziehen"></canvas>
+          <div class="lab-nogl">WebGL2 ist in diesem Browser nicht verfügbar – die Simulation braucht es leider.</div>
+          <div class="lab-chip glass clear" id="lab-hint"><i data-icon="cursor"></i> Formen ziehen · Doppelklick wechselt die Form</div>
+          <div class="lab-chip glass clear mono" id="lab-fps">– fps</div>
+        </div>
+
+        <aside class="lab-panel glass" data-reveal style="--i:1" data-sheen aria-label="Glas-Parameter">
+          <div class="gseg" id="lab-presets" aria-label="Voreinstellungen">
+            <button data-value="klar" aria-selected="true">Klar</button>
+            <button data-value="frost">Frost</button>
+            <button data-value="prisma">Prisma</button>
+            <button data-value="tropfen">Tropfen</button>
+          </div>
+          <div class="lab-rows" id="lab-rows">
+            <div class="row"><span>Brechung</span><output data-out="refr"></output><div class="gslider" data-param="refr" data-min="0" data-max="140" data-step="1" aria-label="Brechung"></div></div>
+            <div class="row"><span>Kantenbreite</span><output data-out="bezel"></output><div class="gslider" data-param="bezel" data-min="6" data-max="140" data-step="1" aria-label="Kantenbreite"></div></div>
+            <div class="row"><span>Dispersion</span><output data-out="disp"></output><div class="gslider" data-param="disp" data-min="0" data-max="1" data-step="0.01" aria-label="Dispersion"></div></div>
+            <div class="row"><span>Frost</span><output data-out="frost"></output><div class="gslider" data-param="frost" data-min="0" data-max="26" data-step="0.5" aria-label="Frost"></div></div>
+            <div class="row"><span>Tönung</span><output data-out="tint"></output><div class="gslider" data-param="tint" data-min="0" data-max="0.6" data-step="0.01" aria-label="Tönung"></div></div>
+            <div class="row"><span>Glanz</span><output data-out="spec"></output><div class="gslider" data-param="spec" data-min="0" data-max="2" data-step="0.01" aria-label="Glanz"></div></div>
+            <div class="row"><span>Verschmelzung</span><output data-out="k"></output><div class="gslider" data-param="k" data-min="0" data-max="110" data-step="1" aria-label="Verschmelzung"></div></div>
+          </div>
+          <div class="lab-actions">
+            <button class="btn small glass flat" id="lab-add" type="button"><i data-icon="drop"></i> Tropfen</button>
+            <button class="btn small glass flat" id="lab-reset" type="button"><i data-icon="reload"></i> Zurücksetzen</button>
+          </div>
+          <pre class="lab-code mono scroll" id="lab-code" aria-label="Aktuelle Shader-Parameter"></pre>
+        </aside>
+      </div>
+    </section>
+
+    <!-- ====================== 02 Komponenten ====================== -->
+    <section class="sec" id="komponenten" data-section="Komponenten">
+      <div class="kit-backdrop" id="kit-backdrop" data-motif="typo" aria-hidden="true">
+        <div class="motif motif-typo">
+          <div class="mq" style="--d:46s"><span>Schalter · Regler · Morph · Kapsel · </span><span>Schalter · Regler · Morph · Kapsel · </span></div>
+          <div class="mq rev" style="--d:58s"><span>Brechung — Glanz — Tiefe — Bewegung — </span><span>Brechung — Glanz — Tiefe — Bewegung — </span></div>
+          <div class="mq" style="--d:40s"><span>Flüssig · Federnd · Direkt · Lebendig · </span><span>Flüssig · Federnd · Direkt · Lebendig · </span></div>
+          <div class="mq rev" style="--d:52s"><span>Tab-Leiste — Menü — Karte — Mitteilung — </span><span>Tab-Leiste — Menü — Karte — Mitteilung — </span></div>
+          <div class="mq" style="--d:64s"><span>Liquid Glass · Liquid Glass · Liquid Glass · </span><span>Liquid Glass · Liquid Glass · Liquid Glass · </span></div>
+        </div>
+        <div class="motif motif-orbs"><i></i><i></i><i></i><i></i><i></i><i></i></div>
+        <div class="motif motif-grid"></div>
+      </div>
+
+      <header class="sec-head">
+        <p class="kicker" data-reveal>02 — Komponenten</p>
+        <h2 data-reveal style="--i:1">Bedienelemente,<br><span class="grad-text">die nachgeben.</span></h2>
+        <p class="sec-lede" data-reveal style="--i:2">Alles hier ist echt verdrahtet: Die Schalter stellen die Seite um, die Regler verändern das Glas, das du gerade ansiehst. Drück, zieh, halte – jede Bewegung läuft über Federn statt über starre Kurven.</p>
+      </header>
+
+      <div class="kit">
+        <!-- Segment -->
+        <article class="kit-card glass k-seg" data-sheen data-reveal>
+          <h3>Segmente</h3>
+          <p class="k-sub">Die Pille dehnt sich beim Wandern – zwei Federn, eine pro Kante. Wechsle, was hinter dem Glas liegt.</p>
+          <div class="k-stage">
+            <div class="gseg" id="kit-motif" aria-label="Hintergrundmotiv">
+              <button data-value="typo" aria-selected="true">Typo</button>
+              <button data-value="orbs">Kugeln</button>
+              <button data-value="grid">Raster</button>
+            </div>
+          </div>
+        </article>
+
+        <!-- Schalter -->
+        <article class="kit-card glass k-sw" data-sheen data-reveal style="--i:1">
+          <h3>Schalter</h3>
+          <p class="k-sub">Drei Schalter, drei echte Wirkungen.</p>
+          <ul class="k-list">
+            <li><span><i data-icon="moon"></i> Dunkles Design</span><button class="gswitch" id="sw-dark" aria-label="Dunkles Design"></button></li>
+            <li><span><i data-icon="sparkles"></i> Glanzlichter</span><button class="gswitch" id="sw-sheen" aria-checked="true" aria-label="Glanzlichter"></button></li>
+            <li><span><i data-icon="wave"></i> Hintergrund bewegen</span><button class="gswitch" id="sw-motion" aria-checked="true" aria-label="Hintergrund bewegen"></button></li>
+          </ul>
+        </article>
+
+        <!-- Regler -->
+        <article class="kit-card glass k-sl" data-sheen data-reveal style="--i:2">
+          <h3>Regler</h3>
+          <p class="k-sub">Beim Ziehen wird der Knopf zum Tropfen und dehnt sich mit dem Tempo.</p>
+          <div class="k-rows">
+            <div class="row"><span>Unschärfe</span><output id="out-blur">20 px</output><div class="gslider" id="sl-blur" data-min="0" data-max="40" data-step="1" data-value="20" aria-label="Unschärfe des Glases"></div></div>
+            <div class="row"><span>Farbton</span><output id="out-hue">0°</output><div class="gslider" id="sl-hue" data-min="0" data-max="360" data-step="1" data-value="0" aria-label="Farbton des Hintergrunds"></div></div>
+            <div class="row"><span>Tönung</span><output id="out-fill">26 %</output><div class="gslider" id="sl-fill" data-min="0" data-max="70" data-step="1" data-value="26" aria-label="Tönung des Glases"></div></div>
+          </div>
+        </article>
+
+        <!-- Karte -->
+        <article class="kit-card glass k-tilt" data-reveal>
+          <h3>Tiefe</h3>
+          <p class="k-sub">Neigt sich zum Zeiger, das Glanzlicht wandert mit.</p>
+          <div class="tilt-wrap">
+            <div class="tilt glass" id="tilt" data-sheen>
+              <div class="tilt-top"><span class="brand-mark" data-logo></span><span class="tilt-chip"></span></div>
+              <div class="tilt-num mono">5200 0002 0026 1111</div>
+              <div class="tilt-bottom"><div><small>Modell</small><b>Claude Fable 5.2</b></div><div><small>Material</small><b>Liquid Glass</b></div></div>
+              <span class="tilt-glow"></span>
+            </div>
+          </div>
+        </article>
+
+        <!-- Kapsel -->
+        <article class="kit-card glass k-cap" data-sheen data-reveal style="--i:1">
+          <h3>Morph-Kapsel</h3>
+          <p class="k-sub">Eine Form, vier Zustände. Größe und Inhalt fließen ineinander – klick die Kapsel an, um sie zu öffnen.</p>
+          <div class="cap-stage">
+            <div class="cap glass thick" id="cap" tabindex="0" role="button" aria-label="Statuskapsel – öffnen">
+              <div class="cap-state" data-state="idle"><span class="pulse-dot ok"></span><span>Bereit</span><span class="cap-time mono" id="cap-clock">00:00</span></div>
+              <div class="cap-state" data-state="timer"><svg class="cap-ring" viewBox="0 0 36 36"><circle cx="18" cy="18" r="15"/><circle cx="18" cy="18" r="15" id="cap-ring"/></svg><span class="cap-big mono" id="cap-timer">0:30</span><span class="cap-dim">Timer</span></div>
+              <div class="cap-state" data-state="music"><span class="cap-art"></span><span class="cap-track"><b>Glasperlenspiel</b><small>Fable · Synth-Demo</small></span><span class="eq"><i></i><i></i><i></i><i></i></span></div>
+              <div class="cap-state" data-state="open">
+                <div class="cap-open-head"><span class="cap-art lg"></span><div><b>Glasperlenspiel</b><small>Fable · Synth-Demo</small></div><span class="eq"><i></i><i></i><i></i><i></i></span></div>
+                <div class="cap-progress"><i id="cap-prog"></i></div>
+                <div class="cap-ctl">
+                  <button class="icon-btn" type="button" data-cap="prev" aria-label="Zurück"><i data-icon="chevronLeft"></i></button>
+                  <button class="icon-btn big" type="button" data-cap="play" aria-label="Wiedergabe"><i data-icon="pause"></i></button>
+                  <button class="icon-btn" type="button" data-cap="next" aria-label="Weiter"><i data-icon="chevronRight"></i></button>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="gseg" id="cap-modes" aria-label="Zustand der Kapsel">
+            <button data-value="idle" aria-selected="true">Ruhe</button>
+            <button data-value="timer">Timer</button>
+            <button data-value="music">Musik</button>
+          </div>
+        </article>
+
+        <!-- Morph-Menü -->
+        <article class="kit-card glass k-menu" data-sheen data-reveal>
+          <h3>Morph-Menü</h3>
+          <p class="k-sub">Der Knopf wird zum Menü, statt eines zu öffnen.</p>
+          <div class="k-stage tall">
+            <div class="morph glass thick" id="morph" data-open="false">
+              <button class="morph-trigger" type="button" aria-expanded="false" aria-controls="morph-menu"><i data-icon="plus"></i><span>Aktionen</span></button>
+              <ul class="morph-menu" id="morph-menu" role="menu">
+                <li><button type="button" role="menuitem" data-msg="In die Zwischenablage kopiert"><i data-icon="copy"></i>Link kopieren</button></li>
+                <li><button type="button" role="menuitem" data-msg="Konfetti!" data-fx="confetti"><i data-icon="sparkles"></i>Konfetti werfen</button></li>
+                <li><button type="button" role="menuitem" data-msg="Design gewechselt" data-fx="theme"><i data-icon="sun"></i>Design wechseln</button></li>
+                <li><button type="button" role="menuitem" data-msg="Geschlossen"><i data-icon="close"></i>Schließen</button></li>
+              </ul>
+            </div>
+          </div>
+        </article>
+
+        <!-- Tab-Leiste -->
+        <article class="kit-card glass k-tabs" data-sheen data-reveal style="--i:1">
+          <h3>Tab-Leiste</h3>
+          <p class="k-sub">Schwebt über dem Inhalt, die Linse gleitet zum aktiven Tab.</p>
+          <div class="k-stage tall">
+            <div class="tabs-demo">
+              <div class="tabs-screen" id="tabs-screen">
+                <div class="tabs-page" data-page="0"><b>Start</b><span>Guten Tag. Alles fließt.</span></div>
+                <div class="tabs-page" data-page="1"><b>Suche</b><span>Finde, was glänzt.</span></div>
+                <div class="tabs-page" data-page="2"><b>Mediathek</b><span>Deine Sammlung aus Licht.</span></div>
+                <div class="tabs-page" data-page="3"><b>Profil</b><span>Du, durch Glas gesehen.</span></div>
+              </div>
+              <div class="tabbar glass thick" id="tabbar" role="tablist" aria-label="Demo-Tabs">
+                <span class="tab-ind" aria-hidden="true"></span>
+                <button type="button" role="tab" aria-selected="true" aria-label="Start"><i data-icon="drop"></i></button>
+                <button type="button" role="tab" aria-selected="false" aria-label="Suche"><i data-icon="search"></i></button>
+                <button type="button" role="tab" aria-selected="false" aria-label="Mediathek"><i data-icon="layers"></i></button>
+                <button type="button" role="tab" aria-selected="false" aria-label="Profil"><i data-icon="user"></i></button>
+              </div>
+            </div>
+          </div>
+        </article>
+
+        <!-- Mitteilungen -->
+        <article class="kit-card glass k-toast" data-sheen data-reveal style="--i:2">
+          <h3>Mitteilungen</h3>
+          <p class="k-sub">Gleiten herein, stapeln sich, lassen sich wegwischen.</p>
+          <div class="k-stage tall col">
+            <button class="btn glass" id="toast-btn" type="button" data-magnet><i data-icon="bell"></i> Mitteilung senden</button>
+            <button class="btn small glass flat" id="confetti-btn" type="button"><i data-icon="sparkles"></i> Konfetti</button>
+          </div>
+        </article>
+      </div>
+    </section>
+
+    <!-- ====================== 03 Können ====================== -->
+    <section class="sec" id="koennen" data-section="Können">
+      <header class="sec-head">
+        <p class="kicker" data-reveal>03 — Können</p>
+        <h2 data-reveal style="--i:1">Sechs Experimente.<br><span class="grad-text">Alle live, alle zum Spielen.</span></h2>
+        <p class="sec-lede" data-reveal style="--i:2">Partikel, Klangsynthese, Stoffsimulation, ein Shader-Editor, Live-Daten und Typo-Physik – jedes Stück von Grund auf geschrieben, nichts eingebunden.</p>
+      </header>
+
+      <div class="bento">
+        <!-- Partikel -->
+        <article class="demo glass d-flow" data-reveal>
+          <canvas id="flow-canvas" class="demo-canvas" aria-label="Partikel-Strömungsfeld, reagiert auf den Zeiger"></canvas>
+          <header class="demo-head">
+            <div><h3>Strömung</h3><p>2 400 Partikel folgen einem Vektorfeld. Der Zeiger verdrängt sie, ein Klick lässt sie explodieren.</p></div>
+            <div class="gseg" id="flow-mode" aria-label="Farbschema"><button data-value="0" aria-selected="true">Glut</button><button data-value="1">Eis</button><button data-value="2">Neon</button></div>
+          </header>
+        </article>
+
+        <!-- Sequencer -->
+        <article class="demo glass d-seq" data-reveal style="--i:1" data-sheen>
+          <header class="demo-head">
+            <div><h3>Sequencer</h3><p>Vier Spuren, sechzehn Schritte. Jeder Klang entsteht im Browser – keine Samples.</p></div>
+            <button class="btn small primary" id="seq-play" type="button" aria-pressed="false"><i data-icon="play"></i><span>Start</span></button>
+          </header>
+          <div class="seq" id="seq" role="group" aria-label="Schritt-Sequencer"></div>
+          <footer class="demo-foot">
+            <div class="row inline"><span>Tempo</span><output id="seq-bpm-out">112</output><div class="gslider" id="seq-bpm" data-min="70" data-max="170" data-step="1" data-value="112" aria-label="Tempo in BPM"></div></div>
+            <button class="btn small glass flat" id="seq-rand" type="button">Würfeln</button>
+            <button class="btn small glass flat" id="seq-clear" type="button">Leeren</button>
+          </footer>
+        </article>
+
+        <!-- Stoff -->
+        <article class="demo glass d-cloth" data-reveal>
+          <canvas id="cloth-canvas" class="demo-canvas" aria-label="Stoffsimulation zum Ziehen"></canvas>
+          <header class="demo-head">
+            <div><h3>Stoff</h3><p>Verlet-Integration. Zieh am Tuch – <span class="fine-only">mit <kbd>⇧</kbd> schneidest du.</span><span class="coarse-only">zwei Finger schneiden.</span></p></div>
+            <button class="icon-btn" id="cloth-reset" type="button" aria-label="Stoff zurücksetzen"><i data-icon="reload"></i></button>
+          </header>
+        </article>
+
+        <!-- Shader-Editor -->
+        <article class="demo glass d-shader" data-reveal style="--i:1">
+          <header class="demo-head">
+            <div><h3>Live-Shader</h3><p>Schreib GLSL – das Bild rechts folgt jedem Tastendruck.</p></div>
+            <div class="gseg" id="shader-presets" aria-label="Shader-Vorlagen"><button data-value="plasma" aria-selected="true">Plasma</button><button data-value="ringe">Ringe</button><button data-value="kacheln">Kacheln</button></div>
+          </header>
+          <div class="shader-body">
+            <div class="shader-edit">
+              <textarea id="shader-src" class="mono scroll" spellcheck="false" autocapitalize="off" autocomplete="off" aria-label="GLSL-Quelltext"></textarea>
+              <div class="shader-status mono" id="shader-status" role="status"></div>
+            </div>
+            <canvas id="shader-canvas" aria-label="Ausgabe des Shaders"></canvas>
+          </div>
+        </article>
+
+        <!-- Live-Daten -->
+        <article class="demo glass d-chart" data-reveal data-sheen>
+          <header class="demo-head">
+            <div><h3>Live-Daten</h3><p>Das Tempo deines Zeigers, zehnmal pro Sekunde gemessen – die letzten 12 Sekunden.</p></div>
+          </header>
+          <div class="stats" id="chart-stats">
+            <div class="stat"><span class="stat-label">Jetzt</span><span class="stat-value" id="st-now">0</span><span class="stat-unit">px/s</span></div>
+            <div class="stat"><span class="stat-label">Spitze</span><span class="stat-value" id="st-peak">0</span><span class="stat-unit">px/s</span></div>
+            <div class="stat"><span class="stat-label">Strecke seit Laden</span><span class="stat-value" id="st-dist">0</span><span class="stat-unit">m</span></div>
+          </div>
+          <div class="chart" id="chart" tabindex="0" aria-label="Liniendiagramm: Zeigergeschwindigkeit in Pixeln pro Sekunde über die letzten 12 Sekunden">
+            <svg id="chart-svg" role="img" aria-hidden="true"></svg>
+            <div class="chart-tip" id="chart-tip" hidden><b></b><span></span></div>
+          </div>
+        </article>
+
+        <!-- Lettern -->
+        <article class="demo glass d-type" data-reveal style="--i:1">
+          <header class="demo-head">
+            <div><h3>Lettern</h3><p>Jeder Buchstabe hängt an einer Feder. Scheuch sie auf – oder tipp dein eigenes Wort.</p></div>
+            <input class="type-input" id="type-input" type="text" maxlength="12" value="FABLE" aria-label="Eigenes Wort" spellcheck="false">
+          </header>
+          <div class="type-stage" id="type-stage" aria-hidden="true"></div>
+        </article>
+      </div>
+    </section>
+
+    <!-- ====================== 04 System ====================== -->
+    <section class="sec sec-os" id="system" data-section="System">
+      <header class="sec-head center">
+        <p class="kicker" data-reveal>04 — System</p>
+        <h2 data-reveal style="--i:1">Und dann wäre da noch<br><span class="grad-text">ein ganzes Betriebssystem.</span></h2>
+        <p class="sec-lede" data-reveal style="--i:2">fableOS läuft komplett in diesem Tab: Fenster-Manager mit Einrasten, Dock mit Lupe, Suche, ein Terminal mit eigenem Dateisystem und zehn Apps. Was du anlegst, bleibt im Browser gespeichert.</p>
+      </header>
+
+      <a class="device" id="device" href="os.html" data-os-link aria-label="fableOS starten" data-reveal>
+        <div class="device-screen" id="device-screen">
+          <div class="mini-bar"><span class="brand-mark" data-logo></span><b>Terminal</b><span>Datei</span><span>Fenster</span><i></i><span class="mini-clock mono" id="mini-clock">09:41</span></div>
+          <div class="mini-win mini-term glass" style="--tx:-34%;--ty:-22%">
+            <div class="mini-ctl"><i></i><i></i><i></i><b>Terminal</b></div>
+            <pre class="mono" id="mini-term"></pre>
+          </div>
+          <div class="mini-win mini-files glass" style="--tx:30%;--ty:8%">
+            <div class="mini-ctl"><i></i><i></i><i></i><b>Dateien</b></div>
+            <div class="mini-grid"><i></i><i></i><i></i><i class="f"></i><i class="f"></i><i></i><i class="f"></i><i class="f"></i></div>
+          </div>
+          <div class="mini-dock glass"><i style="--c:#ff6a3d"></i><i style="--c:#45c8ff"></i><i style="--c:#ffb65c"></i><i style="--c:#a06bff"></i><i style="--c:#3fe0b0"></i><i style="--c:#ff5d6c"></i><i style="--c:#8e9bff"></i></div>
+        </div>
+        <span class="device-cta btn primary"><i data-icon="power"></i> fableOS starten</span>
+      </a>
+
+      <ul class="os-feats">
+        <li class="glass" data-reveal><i data-icon="layers"></i><b>Fenster-Manager</b><span>Ziehen, skalieren, an Kanten einrasten, Übersicht aller Fenster.</span></li>
+        <li class="glass" data-reveal style="--i:1"><i data-icon="terminal"></i><b>Terminal</b><span>Über 30 Befehle auf einem virtuellen Dateisystem, mit Verlauf und Tab-Vervollständigung.</span></li>
+        <li class="glass" data-reveal style="--i:2"><i data-icon="grid"></i><b>Zehn Apps</b><span>Dateien, Notizen, Malen, Klang, Rechner, Web, ein Spiel und mehr.</span></li>
+        <li class="glass" data-reveal style="--i:3"><i data-icon="search"></i><b>Suche</b><span>Apps, Dateien, Befehle und Rechnungen aus einem Feld.</span></li>
+      </ul>
+    </section>
+  </main>
+
+  <footer class="foot">
+    <div class="foot-inner glass" data-sheen>
+      <div class="foot-brand"><span class="brand-mark" data-logo></span><div><b>Fable 5.2 Showcase</b><span>Entworfen und programmiert von Claude Fable 5.2 (Anthropic) in Claude Code.</span></div></div>
+      <ul class="foot-facts">
+        <li><b>0</b><span>Abhängigkeiten</span></li>
+        <li><b>0</b><span>Bilddateien</span></li>
+        <li><b>0</b><span>Tracker</span></li>
+        <li><b>100&nbsp;%</b><span>Handarbeit in Code</span></li>
+      </ul>
+    </div>
+  </footer>
+
+  <!-- ====================== Overlays ====================== -->
+  <div class="cursor" id="cursor" aria-hidden="true"></div>
+  <div class="toasts" id="toasts" aria-live="polite"></div>
+  <canvas class="confetti" id="confetti" aria-hidden="true"></canvas>
+
+  <div class="palette-wrap" id="palette" hidden>
+    <div class="palette glass thick" role="dialog" aria-modal="true" aria-label="Befehlspalette">
+      <div class="palette-field"><i data-icon="search"></i><input id="palette-input" type="text" placeholder="Wohin? Was tun?" autocomplete="off" spellcheck="false" aria-label="Befehl suchen" aria-controls="palette-list"><kbd>esc</kbd></div>
+      <ul class="palette-list scroll" id="palette-list" role="listbox"></ul>
+    </div>
+  </div>
+
+  <noscript><p class="noscript">Diese Seite lebt von JavaScript – bitte aktiviere es, um das Glas in Bewegung zu sehen.</p></noscript>
+</body>
+</html>
