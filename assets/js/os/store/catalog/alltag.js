@@ -32,7 +32,7 @@ export default [
     category: 'Alltag',
     version: '1.0',
     colors: ['#8f9dff', '#5148e0'],
-    glyph: svg('<circle cx="6.200" cy="6.500" r="2.300"/><path d="M11.500 6.500H20"/><circle cx="6.200" cy="12" r="2.300" fill="currentColor"/><path d="M11.500 12H20"/><circle cx="6.200" cy="17.500" r="2.300"/><path d="M11.500 17.500H17"/>'),
+    glyph: svg('<circle cx="6" cy="6" r="2"/><path d="M11.500 6H20"/><circle cx="6" cy="12" r="2" fill="currentColor"/><path d="M11.500 12H20"/><circle cx="6" cy="18" r="2"/><path d="M11.500 18H17"/>'),
     keywords: 'aufgaben todo liste erledigen einkauf fällig abhaken',
     description: 'Sammle alles, was du nicht vergessen willst, in farbigen Listen. Erinnerungen bekommen auf Wunsch Datum, Uhrzeit, Priorität und Notiz – ist es so weit, meldet sich fableOS. Die intelligenten Listen zeigen auf einen Blick, was heute ansteht.',
     features: [
@@ -83,5 +83,23 @@ export default [
     ],
     privacy: ['Lädt Wetterdaten von open-meteo.com', 'Standort nur auf Wunsch'],
     widgets: [{ id: 'now', name: 'Aktuelles Wetter', size: 's' }, { id: 'week', name: '5-Tage-Vorhersage', size: 'm' }],
+  },
+  {
+    id: 'maps',
+    name: 'Karten',
+    tagline: 'Orte finden auf OpenStreetMap',
+    category: 'Alltag',
+    version: '1.0',
+    colors: ['#5fe0a6', '#0f9d6c'],
+    glyph: svg('<path d="M3.500 6.800l5.500-2.300 6 2.300 5.500-2.300v12.700L15 19.500l-6-2.300-5.500 2.300z"/><path d="M9 4.500v12.700M15 6.800v12.700"/>'),
+    keywords: 'karte stadtplan ort adresse navigation openstreetmap standort route',
+    description: 'Die ganze Welt als Karte von OpenStreetMap. Suche Orte und Adressen, wechsle zwischen Standard-, Rad-, ÖPNV- und humanitärer Karte und sichere deine Lieblingsorte als Favoriten. Koordinaten kopierst du mit einem Klick.',
+    features: [
+      'Ortssuche mit Trefferliste und Markierung',
+      'Vier Kartenebenen: Standard, Rad, ÖPNV, Humanitär',
+      'Favoriten und zuletzt gesuchte Orte',
+      'Mein Standort, Koordinaten kopieren, in OpenStreetMap öffnen',
+    ],
+    privacy: ['Lädt Karten von openstreetmap.org', 'Ortssuche über nominatim.openstreetmap.org', 'Standort nur auf Wunsch'],
   },
 ];

@@ -811,7 +811,7 @@ export default {
     addEventListener(EVT, onData);
     const onOnline = () => { if (errors.size) refresh(true); };
     addEventListener('online', onOnline);
-    const auto = setInterval(() => { if (!win.min && !document.hidden && !loading) { refresh(false); refreshOthers(); } }, 60000);
+    const auto = setInterval(() => { if (!win.min && !document.hidden && !loading && navigator.onLine !== false) { refresh(false); refreshOthers(); } }, 60000);
 
     let visible = true;
     const offVisible = whenVisible(hero, (v) => { visible = v; }, '0px');
