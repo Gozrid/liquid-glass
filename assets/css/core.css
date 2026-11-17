@@ -172,6 +172,10 @@ kbd {
 @media (prefers-reduced-transparency: reduce) {
   .glass { -webkit-backdrop-filter: none; backdrop-filter: none; background: var(--solid); }
 }
+/* Browser ohne Hintergrund-Weichzeichner: lieber deckend als unleserlich */
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .glass { background: var(--solid); }
+}
 
 /* ---------- Buttons ---------- */
 .btn {

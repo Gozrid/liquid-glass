@@ -41,6 +41,7 @@ Fest eingebaut sind Dateien, Web, Notizen, Terminal, Rechner, Malen, Klang, Pris
 - **Suche** (<kbd>⌘</kbd>/<kbd>Strg</kbd> + <kbd>K</kbd>): Apps, Dateien nach Name und Inhalt, Einstellungen, Store, Befehle, Rechnen, Umrechnen (`5 km in mi`), Zwischenablage.
 - **Fable** (<kbd>⌥</kbd> <kbd>Leertaste</kbd>): ein Assistent, der fableOS auf Zuruf bedient – „Installiere Schach“, „Timer 5 Minuten“, „Notiz: Milch kaufen“. Getippt oder gesprochen, mit festen Mustern, komplett auf dem Gerät.
 - Widgets auf dem Schreibtisch (Uhr, Kalender, Merkzettel, Speicher, Akku und die Widgets installierter Apps), acht Live-Hintergründe oder ein eigenes Bild, Bildschirmschoner, aktive Ecken, Nachtlicht, Sperrbildschirm mit optionalem Passwort.
+- Einrichtungsassistent beim allerersten Start („Hallo“ – Name, Design, Akzentfarbe) und **Bildschirmfoto** (<kbd>⌃</kbd> <kbd>⌥</kbd> <kbd>S</kbd>), das als PNG in „Bilder“ landet.
 
 **Dateien**
 
@@ -117,7 +118,7 @@ Alle Pfade sind relativ, ein Push auf `main` genügt für eine neue Version. Ins
 
 ## Browser
 
-- Entwickelt und getestet in Chrome. Die Lichtbrechung an den Rändern von Navigation und Dock nutzt eine Chromium-Funktion; andere Browser zeigen dort Unschärfe.
+- Entwickelt in Chrome; fableOS samt allen 20 Store-Apps ist zusätzlich automatisiert in WebKit (der Engine von Safari) und Firefox durchgespielt. Die Lichtbrechung an den Rändern von Navigation und Dock nutzt eine Chromium-Funktion; andere Browser zeigen dort Unschärfe.
 - Installieren: Chrome und Edge bieten es direkt an; in Safari über *Ablage → Zum Dock hinzufügen* (Mac) bzw. *Teilen → Zum Home-Bildschirm* (iPhone/iPad). Datei-Handler, Kurzbefehle und der Zähler am Symbol sind Chromium-Funktionen.
 - Die Glastropfen im Hero und im Labor brauchen WebGL2. Ohne WebGL2 erscheint ein statischer Hintergrund.
 - Externe Anfragen gibt es nur auf ausdrücklichen Wunsch: Wetter lädt Daten von open-meteo.com, Karten von openstreetmap.org (Ortssuche über nominatim.openstreetmap.org), „Im Web suchen“ öffnet DuckDuckGo in einem neuen Tab, und Web-Apps laden ihre jeweilige Adresse.

@@ -18,6 +18,7 @@ import { initSpotlight } from './shell/spotlight.js';
 import { initCenter, initSwitcher } from './shell/center.js';
 import { initSaver } from './shell/saver.js';
 import { initAssistant } from './shell/assistant.js';
+import { runSetup, screenshot } from './shell/setup.js';
 import { initDesktop } from './desktop.js';
 import { initQuickLook } from './quicklook.js';
 import { initPWA } from './pwa.js';
@@ -301,8 +302,10 @@ async function devApp(id, path) {
   boot.classList.add('out');
   await wait(620);
   boot.hidden = true;
+  const direct = params.has('auto') || params.has('dev') || params.has('open') || params.get('source') === 'file';
   if (settings.pass) lockPass.focus({ preventScroll: true });
-  else if (params.has('auto') || params.has('dev') || params.has('open') || params.get('source') === 'file') unlock();
+  else if (direct) unlock();
+  else if (settings.firstRun) { await runSetup(); unlock(); }      // allererster Start: kurz einrichten
 })();
 
 // ==========================================================================
@@ -349,6 +352,7 @@ addEventListener('keydown', (e) => {
       KeyU: () => w?.snap('tl'), KeyI: () => w?.snap('tr'), KeyJ: () => w?.snap('bl'), KeyK: () => w?.snap('br'),
       KeyL: () => power.lock(),
       KeyD: () => sys.showDesktop(),
+      KeyS: () => screenshot(),
     }[e.code];
     if (act) { take(); act(); }
     return;

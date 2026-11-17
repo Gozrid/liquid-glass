@@ -82,6 +82,7 @@ export function initMenubar(power) {
       sys.pwa?.canOffer() && { label: 'fableOS installieren …', icon: 'plus', run: () => sys.pwa.install() },
       '-',
       { label: 'Vollbild', icon: 'layers', checked: !!document.fullscreenElement, run: () => sys.toggleFullscreen() },
+      { label: 'Bildschirmfoto', icon: 'image', hint: '⌃⌥S', run: () => sys.screenshot() },
       { label: 'Sofort beenden …', icon: 'bolt', hint: '⌥⎋', run: forceQuit },
       '-',
       { label: 'Bildschirmschoner', icon: 'moon', run: () => sys.saver?.start() },

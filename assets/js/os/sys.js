@@ -201,6 +201,10 @@ export const sys = {
   /** Welche App öffnet diese Datei standardmäßig? null = nur Vorschau. */
   defaultApp(st) {
     const ext = extname(st.path);
+    const name = st.path.toLowerCase();
+    // zusammengesetzte Endungen wie „.pixel.json“ gehören eindeutig zu einer App
+    const special = [...apps.values()].find((a) => a.accepts?.some((x) => x.includes('.') && name.endsWith(`.${x}`)));
+    if (special) return special.id;
     const chosen = settings.openWith?.[ext];
     if (chosen && apps.has(chosen)) return chosen;
     const kind = kindOf(st.path, st.mime);
@@ -212,8 +216,9 @@ export const sys = {
   /** Alle Apps, die diese Datei öffnen können (für „Öffnen mit“). */
   handlers(st) {
     const ext = extname(st.path);
+    const name = st.path.toLowerCase();
     const kind = kindOf(st.path, st.mime);
-    return [...apps.values()].filter((a) => a.accepts?.includes(ext)
+    return [...apps.values()].filter((a) => a.accepts?.some((x) => (x.includes('.') ? name.endsWith(`.${x}`) : x === ext))
       || (a.id === 'notes' && (kind === 'text' || kind === 'code'))
       || (a.id === 'paint' && kind === 'image'));
   },

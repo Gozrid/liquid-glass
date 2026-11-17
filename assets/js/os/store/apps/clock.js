@@ -118,19 +118,13 @@ function playPattern(kind) {
 
 // ---------- Klingeln ----------
 let ring = null;       // {kind, title, body, alarm?, started, loop}
-function dismissNote(title) {
-  // die eigene Mitteilung wegräumen, sobald im Fenster gestoppt wurde
-  for (const n of document.querySelectorAll('#notes .note')) {
-    if (n.querySelector('.note-txt b')?.textContent === title) n.querySelector('.note-x')?.click();
-  }
-}
 function stopRing() {
   if (!ring) return;
   clearInterval(ring.loop);
-  const { title } = ring;
+  const { note } = ring;
   ring = null;
   hush();
-  dismissNote(title);
+  note?.close();          // die eigene Mitteilung wegräumen, sobald gestoppt wurde
   emit();
 }
 function startRing(info) {
@@ -145,7 +139,7 @@ function startRing(info) {
   };
   ring.loop = setInterval(beat, info.kind === 'alarm' ? 1900 : 1700);
   beat();
-  sys.notify({
+  mine.note = sys.notify({
     title: info.title, body: info.body, app: 'clock', force: true, ttl: maxMs,
     onClick: () => { stopRing(); sys.open('clock', { tab: info.kind === 'alarm' ? 'alarm' : 'timer' }); },
   });

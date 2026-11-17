@@ -211,7 +211,7 @@ sys.notes = notes;
 export function initNotify() {
   const box = $('#notes');
   sys.notify = ({ title, body = '', icon: ic = 'bell', app = null, onClick = null, ttl = 5200, force = false }) => {
-    if (app && !apps.has(app)) return;                 // die App wurde inzwischen entfernt
+    if (app && !apps.has(app)) return null;            // die App wurde inzwischen entfernt
     const n = { id: `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`, title: String(title), body: String(body), app, icon: ic, time: Date.now() };
     noteLog.unshift(n);
     noteLog.length = Math.min(noteLog.length, 40);
@@ -219,7 +219,7 @@ export function initNotify() {
     persistNotes();
     if (!document.body.classList.contains('center-open')) unread++;
     bus.emit('notes', n);
-    if (settings.dnd && !force) return;
+    if (settings.dnd && !force) return { id: n.id, close() {} };
     if (document.hidden && settings.sysNotes && window.Notification?.permission === 'granted') {
       navigator.serviceWorker?.ready.then((reg) => reg.showNotification(n.title, { body: n.body, icon: 'assets/icons/icon-192.png', badge: 'assets/icons/icon-192.png', tag: n.id })).catch(() => {});
     }
@@ -247,6 +247,7 @@ export function initNotify() {
     box.prepend(el);
     [...box.children].filter((c) => !c.classList.contains('out')).slice(4).forEach((c) => c.remove());
     sfx.notify();
+    return { id: n.id, close };       // wer meldet, darf sein Banner auch wieder einholen
   };
 }
 

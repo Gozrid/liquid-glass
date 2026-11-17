@@ -65,6 +65,7 @@ export function initSpotlight(power) {
     { label: 'Nicht stören umschalten', icon: 'focus', kw: 'fokus dnd', run: () => set('dnd', !settings.dnd) },
     { label: 'Nachtlicht umschalten', icon: 'sun', kw: 'night shift warm', run: () => set('nightShift', !settings.nightShift) },
     { label: 'Vollbild umschalten', icon: 'layers', run: () => sys.toggleFullscreen() },
+    { label: 'Bildschirmfoto aufnehmen', icon: 'image', kw: 'screenshot foto', run: () => sys.screenshot() },
     { label: 'Neuer Schreibtisch', icon: 'plus', kw: 'space desktop', run: () => { sys.wm.addSpace(); sys.wm.setSpace(sys.wm.spaceCount - 1); } },
     { label: 'Alle Fenster schließen', icon: 'close', run: () => sys.wm.closeAll() },
     { label: 'Papierkorb leeren', icon: 'trash', run: () => sys.emptyTrash() },

@@ -137,6 +137,7 @@ export function initAssistant(power) {
     [/\bnicht storen\b/, () => { set('dnd', !settings.dnd); return settings.dnd ? '„Nicht stören“ ist an. Mitteilungen sammle ich still.' : '„Nicht stören“ ist aus.'; }],
     [/\bnachtlicht\b/, () => { set('nightShift', !settings.nightShift); return settings.nightShift ? 'Nachtlicht ist an – wärmere Farben.' : 'Nachtlicht ist aus.'; }],
     [/\bvollbild\b/, () => { sys.toggleFullscreen(); return 'Vollbild umgeschaltet.'; }],
+    [/\b(bildschirmfoto|screenshot)\b/, () => { setTimeout(() => { close(); sys.screenshot(); }, 400); return 'Ich nehme ein Bildschirmfoto auf – dein Browser fragt kurz um Erlaubnis.'; }],
     [/^(?:timer|wecke mich in|stell(?:e)? (?:einen )?timer (?:auf|fur))\s*(?:auf|fur|in)?\s*([\d,.]+)\s*(sekunden?|sek|s|minuten?|min|m|stunden?|std|h)\b/, (m) => {
       const min = minutes(m[1], m[2]);
       if (!(min > 0) || min > 24 * 60) return 'Timer gehen von einer Sekunde bis 24 Stunden.';

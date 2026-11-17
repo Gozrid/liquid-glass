@@ -19,6 +19,7 @@ const KEYS = [
   ['⌥ H  /  ⌥ Q', 'App ausblenden oder beenden'],
   ['Leertaste', 'Vorschau der ausgewählten Datei'],
   ['⌘ ,', 'Systemeinstellungen'],
+  ['⌃ ⌥ S', 'Bildschirmfoto in „Bilder“ sichern'],
   ['⌃ ⌥ L', 'Bildschirm sperren'],
   ['⌥ Esc', 'Apps sofort beenden'],
 ];

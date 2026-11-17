@@ -95,5 +95,5 @@ export default [
       'Vorschau in Originalgröße und als Kachelmuster',
     ],
     privacy: [],
-    accepts: ['png'],  },
+    accepts: ['pixel.json', 'png'],  },
 ];
