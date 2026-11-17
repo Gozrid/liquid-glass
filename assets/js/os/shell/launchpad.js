@@ -56,9 +56,11 @@ export function initLaunchpad() {
       appIcon(app, 'lp'), h('span.lp-name', app.name),
       removable ? h('span.lp-x', { role: 'button', 'aria-label': `${app.name} entfernen`, html: icon('close') }) : null);
     let press = 0;
-    b.addEventListener('pointerdown', () => { press = setTimeout(() => { setEdit(true); sfx.tick(); }, 560); });
+    let held = false;      // der Klick, der einen langen Druck beendet, zählt nicht
+    b.addEventListener('pointerdown', () => { held = false; press = setTimeout(() => { held = true; setEdit(true); sfx.tick(); }, 560); });
     for (const evt of ['pointerup', 'pointerleave', 'pointercancel']) b.addEventListener(evt, () => clearTimeout(press));
     b.addEventListener('click', (e) => {
+      if (held) { held = false; return; }
       if (e.target.closest('.lp-x')) { removeApp(app.id); return; }
       if (edit) { setEdit(false); return; }
       run(app);

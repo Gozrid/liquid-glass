@@ -193,13 +193,12 @@ export function initMenubar(power) {
     const logo = btn('.mb-logo', null, systemMenu);
     logo.innerHTML = LOGO;
     logo.setAttribute('aria-label', 'fableOS-Menü');
-    const { appMenu, menus } = menusFor(win);
+    const { menus } = menusFor(win);
     left.replaceChildren(
       logo,
       btn('.mb-app', win ? win.app.name : 'Schreibtisch', () => menusFor(wm.focused).appMenu),
       ...menus.map((m) => btn('', m.label, () => menusFor(wm.focused).menus.find((x) => x.label === m.label)?.items || m.items)),
     );
-    void appMenu;
   };
   bus.on('focus', render);
   bus.on('wm', render);

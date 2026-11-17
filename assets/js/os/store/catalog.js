@@ -1,11 +1,9 @@
 // catalog.js — Katalog des App Store: sammelt die Einträge aller Rubriken (store/catalog/*.js)
 
-const PARTS = ['alltag', 'kreativ', 'spiele', 'werkzeuge'];
+import alltag from './catalog/alltag.js';
+import kreativ from './catalog/kreativ.js';
+import spiele from './catalog/spiele.js';
+import werkzeuge from './catalog/werkzeuge.js';
 
-const lists = await Promise.all(PARTS.map((part) => import(`./catalog/${part}.js`).then(
-  (m) => m.default,
-  (err) => { console.warn(`[store] Rubrik „${part}“ fehlt`, err); return []; },
-)));
-
-export const CATALOG = lists.flat();
+export const CATALOG = [...alltag, ...kreativ, ...spiele, ...werkzeuge];
 export const entry = (id) => CATALOG.find((e) => e.id === id) || null;

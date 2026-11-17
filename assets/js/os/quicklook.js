@@ -4,7 +4,7 @@ import { h } from '../core/util.js';
 import { icon } from '../core/icons.js';
 import { sfx } from '../core/audio.js';
 import { sys, apps, kindOf, kindName } from './sys.js';
-import { vfs, basename, formatSize } from './vfs.js';
+import { vfs, formatSize } from './vfs.js';
 import { fileIcon, fileBlob, fsops } from './ui.js';
 
 export function initQuickLook() {
@@ -93,5 +93,4 @@ export function initQuickLook() {
   };
   sys.quicklook.close = close;
   sys.quicklook.isOpen = () => !el.hidden;
-  void basename;
 }

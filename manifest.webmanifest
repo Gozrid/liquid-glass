@@ -46,6 +46,7 @@
   "share_target": {
     "action": "./os.html",
     "method": "GET",
+    "enctype": "application/x-www-form-urlencoded",
     "params": { "title": "share_title", "text": "share_text", "url": "share_url" }
   }
 }

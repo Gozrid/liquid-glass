@@ -1,6 +1,6 @@
 // saver.js — Bildschirmschoner „Strömung“ (startet nach Leerlauf) und aktive Ecken
 
-import { $, h, ticker, TAU, reducedMotion } from '../../core/util.js';
+import { h, ticker, TAU, reducedMotion } from '../../core/util.js';
 import { bus } from '../bus.js';
 import { sys, settings } from '../sys.js';
 
@@ -135,6 +135,5 @@ export function initSaver(power) {
 
   sys.saver = { start, stop, get active() { return on; } };
   sys.showDesktop = run.desktop;
-  void $;
   return sys.saver;
 }
