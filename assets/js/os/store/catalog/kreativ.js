@@ -46,4 +46,22 @@ export default [
     privacy: [],
     widgets: [{ id: 'now', name: 'Läuft gerade', size: 's' }],
   },
+  {
+    id: 'camera',
+    name: 'Kamera',
+    tagline: 'Fotos mit Filtern und Selbstauslöser',
+    category: 'Kreativ',
+    version: '1.0',
+    colors: ['#5fd6c4', '#1c7fb4'],
+    glyph: ico('<path d="M3.500 9A2.500 2.500 0 0 1 6 6.500h1.800l1.400-2.200h5.600l1.400 2.200H18A2.500 2.500 0 0 1 20.500 9v7.500A2.500 2.500 0 0 1 18 19H6a2.500 2.500 0 0 1-2.500-2.500z"/><circle cx="12" cy="12.600" r="3.400"/><circle cx="17.300" cy="9.700" r=".9" fill="currentColor" stroke="none"/>'),
+    keywords: 'kamera foto selfie webcam filter selbstauslöser aufnahme',
+    description: 'Kamera zeigt das Live-Bild deiner Webcam und macht daraus Fotos. Acht Filter siehst du schon vor dem Auslösen als lebendige Miniaturen – das Foto sieht genau so aus wie die Vorschau. Mit Selbstauslöser und einem Viererstreifen wie aus dem Fotoautomaten.',
+    features: [
+      'Acht Live-Filter von Mono bis Thermo',
+      'Selbstauslöser mit 3 oder 10 Sekunden',
+      'Serienbild als Viererstreifen',
+      'Aufnahmen landen in Bilder › Kamera',
+    ],
+    privacy: ['Kamera – Bilder bleiben auf diesem Gerät'],
+  },
 ];
