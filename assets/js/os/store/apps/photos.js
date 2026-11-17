@@ -512,6 +512,8 @@ export default {
     const cellEls = new Map();
 
     const saveFavs = () => S.set('favs', [...favs]);
+    /** Menü, nach dessen Schließen die Tastatur wieder dem Fenster gehört. */
+    const menu = (items, pos) => openMenu(items, { ...pos, onClose: () => setTimeout(() => { if (!closed) keepFocus(); }, 0) });
     const say = (text) => toast(win, text);
     const fail = (err) => say(`Das hat nicht geklappt: ${err?.message || err}`);
 
@@ -561,7 +563,7 @@ export default {
       '-',
       { label: 'Neues Album …', icon: 'plus', run: newAlbum },
     ];
-    viewBtn.addEventListener('click', () => openMenu(viewItems(), { anchor: viewBtn }));
+    viewBtn.addEventListener('click', () => menu(viewItems(), { anchor: viewBtn }));
 
     function paintSide() {
       const btn = (html, label, n, on, run) => h('button', { type: 'button', class: on ? 'is-on' : '', onclick: run },
@@ -664,7 +666,7 @@ export default {
       e.preventDefault();
       e.stopPropagation();
       if (!sel.has(cell.dataset.path)) select(cell.dataset.path);
-      openMenu(itemMenu(selected()), { x: e.clientX, y: e.clientY });
+      menu(itemMenu(selected()), { x: e.clientX, y: e.clientY });
     });
     const moveSel = (dx, dy, e) => {
       if (!shown.length) return;
@@ -708,6 +710,7 @@ export default {
     async function rename(st) {
       const ext = extname(st.path);
       const name = await promptSheet(win, { title: 'Foto umbenennen', value: stemOf(st.name), ok: 'Umbenennen' });
+      keepFocus();
       if (!name || name === stemOf(st.name)) return;
       try {
         const to = `${dirname(st.path)}/${name}${ext ? `.${ext}` : ''}`;
@@ -751,6 +754,7 @@ export default {
     }
     async function newAlbum() {
       const name = await promptSheet(win, { title: 'Neues Album', placeholder: 'Name des Albums', ok: 'Anlegen' });
+      keepFocus();
       if (!name) return null;
       try {
         if (!vfs.exists(PICS)) vfs.mkdir(PICS);
@@ -858,7 +862,7 @@ export default {
     const bMore = tool(svg('<circle cx="5.500" cy="12" r="1.300" fill="currentColor"/><circle cx="12" cy="12" r="1.300" fill="currentColor"/><circle cx="18.500" cy="12" r="1.300" fill="currentColor"/>'), 'Weitere Aktionen', () => {
       const st = curStat();
       if (!st) return;
-      openMenu([
+      menu([
         { label: 'Als Hintergrund', icon: 'image', run: () => setWallpaper(st) },
         { label: 'Umbenennen …', icon: 'note', run: () => rename(st) },
         { label: 'Exportieren', icon: 'download', run: () => exportPics([st]) },
@@ -1203,7 +1207,7 @@ export default {
     }
     async function cancelEdit() {
       if (!V.edit) return true;
-      if (isDirty() && !(await confirmSheet(win, { title: 'Änderungen verwerfen?', text: 'Die Bearbeitung dieses Fotos geht verloren.', ok: 'Verwerfen', danger: true }))) return false;
+      if (isDirty() && !(await confirmSheet(win, { title: 'Änderungen verwerfen?', text: 'Die Bearbeitung dieses Fotos geht verloren.', ok: 'Verwerfen', danger: true }))) { keepFocus(); return false; }
       endEdit();
       return true;
     }

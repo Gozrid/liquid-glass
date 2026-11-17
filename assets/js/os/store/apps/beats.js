@@ -268,10 +268,15 @@ export default {
     win.body.append(h('div.kit-app.beats', top, h('div.beats-grid.scroll', head, rowsEl)));
     initControls(top);
 
+    /** Menü, nach dessen Schließen die Tastatur wieder dem Fenster gehört. */
+    const menu = (items, pos) => openMenu(items, { ...pos, onClose: () => setTimeout(() => {
+      const a = document.activeElement;
+      if (!closed && sys.wm.focused === win && (!a || a === document.body || !a.isConnected)) win.el.focus({ preventScroll: true });
+    }, 0) });
     const bPreset = h('button.tool', { type: 'button', 'aria-label': 'Vorlagen', title: 'Vorlagen', html: icon('sparkles') });
-    bPreset.addEventListener('click', () => openMenu([{ heading: 'Vorlage in Muster ' + SLOTS[st.slot] + ' laden' }, ...PRESETS.map((p) => ({ label: p.name, hint: `${p.bpm} BPM`, run: () => loadPreset(p) }))], { anchor: bPreset, align: 'right' }));
+    bPreset.addEventListener('click', () => menu([{ heading: 'Vorlage in Muster ' + SLOTS[st.slot] + ' laden' }, ...PRESETS.map((p) => ({ label: p.name, hint: `${p.bpm} BPM`, run: () => loadPreset(p) }))], { anchor: bPreset, align: 'right' }));
     const bCopy = h('button.tool', { type: 'button', 'aria-label': 'Muster kopieren', title: 'Muster kopieren', html: icon('copy') });
-    bCopy.addEventListener('click', () => openMenu(copyItems(), { anchor: bCopy, align: 'right' }));
+    bCopy.addEventListener('click', () => menu(copyItems(), { anchor: bCopy, align: 'right' }));
     win.tools.append(bPreset,
       h('button.tool', { type: 'button', 'aria-label': 'Zufallsmuster', title: 'Zufallsmuster', html: IC.dice, onclick: () => randomize() }),
       bCopy,
@@ -515,7 +520,7 @@ export default {
       e.preventDefault();
       e.stopPropagation();
       const cur = pat()[i][s];
-      openMenu([
+      menu([
         { heading: `${tr.name} · Schritt ${s + 1}` },
         ...Array.from({ length: NOTES }, (_, k) => NOTES - k).map((v) => ({ label: nameOf(tr, v), checked: cur === v, run: () => { remember(); setCell(i, s, v); } })),
         '-',
