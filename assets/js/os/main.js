@@ -273,7 +273,7 @@ async function devApp(id, path) {
     }
     const keys = def.widgetList.map((w) => `${id}:${w.id}`).filter((k) => widgets.defs.has(k));
     if (keys.length) set('widgets', [...new Set([...keys, ...settings.widgets])]);
-    if (!registry.isLoaded(id)) def.background?.();
+    if (!registry.isLoaded(id) && typeof def.background === 'function') def.background();
     bus.emit('apps');
     sys.open(id, path ? { path } : {});
   } catch (err) {

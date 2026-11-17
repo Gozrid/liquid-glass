@@ -176,9 +176,10 @@ export function initMenubar(power) {
     const base = { Ablage: file.filter(Boolean), Bearbeiten: editMenu, Fenster: windows, Hilfe: help };
     const own = [];
     for (const m of extra) {
+      const items = (typeof m.items === 'function' ? m.items() : m.items) || [];     // Apps dürfen Einträge auch als Funktion liefern
       const name = m.label === 'Datei' ? 'Ablage' : m.label;
-      if (base[name]) base[name] = [...(m.items || []), '-', ...base[name]];
-      else own.push(m);
+      if (base[name]) base[name] = [...items, '-', ...base[name]];
+      else own.push({ label: m.label, items });
     }
     return {
       appMenu,

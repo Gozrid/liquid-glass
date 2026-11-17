@@ -80,7 +80,7 @@ button.kit-row:hover, .kit-row.is-hover:hover { background: var(--raise); }
 .kit-row > .grow { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .kit-chip { display: inline-flex; align-items: center; gap: 5px; flex: none; padding: 3px 10px; border: 0; border-radius: 99px; background: var(--raise); font-size: 12px; font-weight: 600; color: var(--fg-2); white-space: nowrap; }
 button.kit-chip:hover { background: var(--raise-2); }
-.kit-chip.is-on { background: var(--accent); color: #fff; }
+.kit-chip.is-on, button.kit-chip.is-on:hover { background: var(--accent); color: #fff; }
 .kit-empty { display: grid; place-content: center; justify-items: center; gap: 8px; flex: 1; min-height: 0; padding: 30px; text-align: center; color: var(--fg-3); }
 .kit-empty .ico { width: 44px; height: 44px; stroke-width: 1.2; }
 .kit-empty b { font-size: 14px; color: var(--fg-2); }
@@ -91,7 +91,7 @@ button.kit-chip:hover { background: var(--raise-2); }
 /* ---------- Dialoge: ein Blatt gleitet aus der Titelleiste ---------- */
 .kit-sheet-wrap {
   position: absolute; inset: 42px 0 0; z-index: 40;
-  display: grid; justify-items: center; align-content: start;
+  display: grid; grid-template-rows: minmax(0, 1fr); justify-items: center; align-items: start;
   border-radius: 0 0 var(--r) var(--r); overflow: hidden;
   background: rgba(0, 0, 14, .32);
   animation: kit-dim .22s both;
