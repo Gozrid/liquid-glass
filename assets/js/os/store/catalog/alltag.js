@@ -1,5 +1,7 @@
 // alltag.js — Store-Katalog, Rubrik „alltag“. Einträge: siehe README, Abschnitt „Eine App schreiben“.
 
+// Hinweis: „background“ steht nur bei Apps mit Hintergrunddienst im Eintrag. Ein ausdrückliches `background: false`
+// überdeckt beim Zusammenführen mit dem Modul die fehlende Funktion und lässt den Entwicklungs-Start (os.html?dev=…) scheitern.
 const svg = (body) => `<svg class="ico" viewBox="0 0 24 24" aria-hidden="true">${body}</svg>`;
 
 export default [
@@ -42,5 +44,44 @@ export default [
     privacy: [],
     background: true,
     widgets: [{ id: 'today', name: 'Heute fällig', size: 's' }],
+  },
+  {
+    id: 'clock',
+    name: 'Uhr',
+    tagline: 'Weltuhr, Wecker, Stoppuhr, Timer',
+    category: 'Alltag',
+    version: '1.0',
+    colors: ['#565f8a', '#1b1e3d'],
+    glyph: svg('<circle cx="12" cy="13" r="7.300"/><path d="M12 9.200V13l2.600 1.700"/><path d="M4.300 6.200l3-2.700M19.700 6.200l-3-2.700M7.200 19.300L5.800 21M16.800 19.300l1.400 1.700"/>'),
+    keywords: 'zeit wecker alarm stoppuhr timer countdown weltuhr zeitzone',
+    description: 'Vier Uhren in einer: Die Weltuhr zeigt mit kleinen Zifferblättern, wie spät es in über 40 Städten ist. Wecker klingeln an den Wochentagen deiner Wahl, die Stoppuhr misst Runden auf die Hundertstel genau, und der Timer zählt mit großem Fortschrittsring herunter.',
+    features: [
+      'Weltuhr mit Tag/Nacht-Zifferblättern und Zeitabstand',
+      'Wecker mit Wochentagen und Schlummern',
+      'Stoppuhr mit Rundenliste – schnellste und langsamste markiert',
+      'Timer und Wecker laufen weiter, wenn das Fenster zu ist',
+    ],
+    privacy: [],
+    background: true,
+    widgets: [{ id: 'world', name: 'Weltzeit', size: 's' }],
+  },
+  {
+    id: 'weather',
+    name: 'Wetter',
+    tagline: 'Vorhersage für jeden Ort',
+    category: 'Alltag',
+    version: '1.0',
+    colors: ['#6ec3ff', '#2a6df4'],
+    glyph: svg('<circle cx="8.300" cy="8" r="3.100"/><path d="M8.300 2.300v1.200M2.600 8h1.200M4.300 4l.9.9M12.300 4l-.9.9"/><path d="M9.500 20h7.800a3.700 3.700 0 0 0 .5-7.370 5 5 0 0 0-9.600-.930A4.200 4.200 0 0 0 9.500 20z" fill="currentColor" stroke="none"/>'),
+    keywords: 'regen sonne temperatur vorhersage wolken schnee wind klima',
+    description: 'Die Vorhersage für deine Orte – mit einer ruhigen, animierten Himmelsszene, die zum Wetter passt: Sonne und Mond wandern mit der Tageszeit, Wolken ziehen, Regen und Schnee fallen. Dazu die nächsten 24 Stunden, sieben Tage im Überblick und alle wichtigen Messwerte.',
+    features: [
+      'Echte Wetterdaten von Open-Meteo, ohne Konto',
+      'Stundenleiste, 7-Tage-Liste mit Temperaturbalken',
+      'Wind, Luftfeuchte, UV-Index, Niederschlag und Sonnenstand',
+      'Zuletzt geladene Daten bleiben offline sichtbar',
+    ],
+    privacy: ['Lädt Wetterdaten von open-meteo.com', 'Standort nur auf Wunsch'],
+    widgets: [{ id: 'now', name: 'Aktuelles Wetter', size: 's' }, { id: 'week', name: '5-Tage-Vorhersage', size: 'm' }],
   },
 ];
