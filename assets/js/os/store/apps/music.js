@@ -509,6 +509,7 @@ const P = {
   queue: [],
   announced: false,
 };
+P.ctxCur = P.cur;                 // letztes Stück aus der Liste – dort geht es nach der Warteschlange weiter
 const subs = new Set();
 const emit = (why) => {
   announce();
@@ -567,9 +568,9 @@ function halt() {
 function order() {
   if (!P.shuffle) return P.list;
   if (!P.order || P.order.length !== P.list.length || P.order.some((id) => !P.list.includes(id))) {
-    const rest = P.list.filter((id) => id !== P.cur);
+    const rest = P.list.filter((id) => id !== P.ctxCur);
     for (let i = rest.length - 1; i > 0; i--) { const j = (Math.random() * (i + 1)) | 0; [rest[i], rest[j]] = [rest[j], rest[i]]; }
-    P.order = P.list.includes(P.cur) ? [P.cur, ...rest] : rest;
+    P.order = P.list.includes(P.ctxCur) ? [P.ctxCur, ...rest] : rest;
   }
   return P.order;
 }
@@ -577,7 +578,7 @@ function order() {
 function upcoming(n = 8) {
   const o = order();
   if (!o.length) return [];
-  const i = o.indexOf(P.cur);
+  const i = o.indexOf(P.ctxCur);
   const out = [];
   for (let k = 1; k <= o.length && out.length < n; k++) {
     const j = i + k;
@@ -586,9 +587,10 @@ function upcoming(n = 8) {
   }
   return out;
 }
-function load(id, autoplay) {
+function load(id, autoplay, queued = false) {
   halt();
   P.cur = id;
+  if (!queued) P.ctxCur = id;
   P.pos = 0;
   persist();
   if (autoplay) start();
@@ -597,23 +599,25 @@ function load(id, autoplay) {
 function advance(auto) {
   const was = P.playing;
   if (auto && P.repeat === 'one') { halt(); P.pos = 0; start(); emit('track'); return; }
-  const next = P.queue.length ? P.queue.shift() : upcoming(1)[0];
+  const queued = P.queue.length > 0;
+  const next = queued ? P.queue.shift() : upcoming(1)[0];
   if (!next) { halt(); P.pos = 0; emit('state'); return; }
-  if (!P.queue.length && P.shuffle && order().indexOf(next) === 0) P.order = null;      // neue Runde, neu gemischt
-  load(next, auto || was);
+  if (!queued && P.shuffle && order().indexOf(next) === 0) P.order = null;               // neue Runde, neu gemischt
+  load(next, auto || was, queued);
 }
 
 const Player = {
   play(id, list, listName) {
     if (list) { P.list = [...list]; P.listName = listName || 'Auswahl'; P.order = null; }
     if (id && id !== P.cur) load(id, true);
-    else if (id) { halt(); P.pos = 0; start(); emit('track'); } else if (!P.playing) { start(); emit('state'); }
+    else if (id) { halt(); P.pos = 0; P.ctxCur = id; start(); emit('track'); } else if (!P.playing) { start(); emit('state'); }
   },
   pause() { if (P.playing) { halt(); emit('state'); } },
   toggle() { if (P.playing) Player.pause(); else Player.play(); },
   next() { advance(false); },
   prev() {
     if (position() > 3) { Player.seek(0); return; }
+    if (P.cur !== P.ctxCur && TR[P.ctxCur]) { load(P.ctxCur, P.playing); return; }      // aus der Warteschlange zurück in die Liste
     const o = order();
     const i = o.indexOf(P.cur);
     const id = i > 0 ? o[i - 1] : P.repeat === 'off' ? null : o[o.length - 1];
@@ -644,6 +648,8 @@ const Player = {
   cycleRepeat() { Player.setRepeat({ off: 'all', all: 'one', one: 'off' }[P.repeat]); },
   enqueue(id, front = false) { if (front) P.queue.unshift(id); else P.queue.push(id); emit('queue'); },
   dequeue(i) { P.queue.splice(i, 1); emit('queue'); },
+  /** Eintrag i der Warteschlange sofort spielen; was davor stand, entfällt. */
+  playQueued(i) { const id = P.queue.splice(0, i + 1).pop(); if (id) load(id, true, true); },
   clearQueue() { P.queue = []; emit('queue'); },
 };
 
@@ -969,7 +975,8 @@ export default {
       '-', { heading: 'Stimmungen' },
       ...MOODS.map((m) => ({ label: m, checked: view.kind === 'mood' && view.mood === m, run: () => setView('mood', m) })),
     ];
-    vBtn.addEventListener('click', () => openMenu(viewItems(), { anchor: vBtn }));
+    const menu = (items, pos) => openMenu(items, { ...pos, onClose: () => setTimeout(keepFocus, 0) });
+    vBtn.addEventListener('click', () => menu(viewItems(), { anchor: vBtn }));
     function paintSide() {
       const b = (ic, label, n, on, run, dot) => h('button', { type: 'button', class: on ? 'is-on' : '', onclick: run },
         dot ? h('i.kit-dot', { style: { '--c': dot } }) : h('i', { html: icon(ic), style: { display: 'grid' } }), h('span', label), h('span.kit-count', String(n)));
@@ -996,7 +1003,7 @@ export default {
     const playFrom = (id) => Player.play(id, viewIds(), viewName());
     function rowMenu(id, e) {
       const inList = playlist.includes(id);
-      openMenu([
+      menu([
         { label: 'Abspielen', icon: 'play', run: () => playFrom(id) },
         { label: 'Als Nächstes abspielen', icon: 'arrowRight', run: () => { Player.enqueue(id, true); toast(win, 'Wird als Nächstes gespielt'); } },
         { label: 'An die Warteschlange anhängen', icon: 'list', run: () => { Player.enqueue(id); toast(win, 'Zur Warteschlange hinzugefügt'); } },
@@ -1066,7 +1073,7 @@ export default {
           item(P.cur, () => Player.toggle(), h('span', { html: IC.eq, style: { display: 'grid' } }), '.is-now'),
           h('div.kit-head', 'Als Nächstes'),
           ...(P.queue.length
-            ? P.queue.map((id, i) => item(id, () => { P.queue.splice(0, i + 1); Player.play(id); }, h('button.tool', { type: 'button', 'aria-label': 'Aus der Warteschlange entfernen', html: icon('close'), onclick: (e) => { e.stopPropagation(); Player.dequeue(i); } })))
+            ? P.queue.map((id, i) => item(id, () => Player.playQueued(i), h('button.tool', { type: 'button', 'aria-label': 'Aus der Warteschlange entfernen', html: icon('close'), onclick: (e) => { e.stopPropagation(); Player.dequeue(i); } })))
             : [h('div.music-queue-none', 'Nichts vorgemerkt. Rechtsklick auf ein Stück → „Als Nächstes abspielen“.')]),
           h('div.kit-head', `Danach · ${P.listName}`),
           ...(next.length ? next.map((id) => item(id, () => Player.play(id))) : [h('div.music-queue-none', P.repeat === 'off' ? 'Die Liste endet hier.' : 'Keine weiteren Stücke.')])));

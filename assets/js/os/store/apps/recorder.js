@@ -233,7 +233,7 @@ export default {
             { label: 'Exportieren', icon: 'download', run: () => exportMemo(m.path) },
             '-',
             { label: 'In den Papierkorb', icon: 'trash', run: () => remove(m.path) },
-          ], { x: e.clientX, y: e.clientY });
+          ], { x: e.clientX, y: e.clientY, onClose: () => setTimeout(() => { if (!closed) keepFocus(); }, 0) });
         });
         return b;
       }));
@@ -427,6 +427,7 @@ export default {
       const m = memos.find((x) => x.path === path);
       if (!m) return;
       const name = await promptSheet(win, { title: 'Aufnahme umbenennen', value: m.title, ok: 'Umbenennen' });
+      keepFocus();
       if (!name || name === m.title) return;
       try {
         const ext = extname(path);
@@ -616,7 +617,7 @@ export default {
     }
     async function dropRec() {
       if (!R.on) return;
-      if (elapsed() > 3 && !(await confirmSheet(win, { title: 'Aufnahme verwerfen?', text: 'Das Memo wird nicht gesichert.', ok: 'Verwerfen', danger: true }))) return;
+      if (elapsed() > 3 && !(await confirmSheet(win, { title: 'Aufnahme verwerfen?', text: 'Das Memo wird nicht gesichert.', ok: 'Verwerfen', danger: true }))) { keepFocus(); return; }
       stopRec(true);
     }
     /** MediaRecorder hat alles abgeliefert: als Data-URL ins Dateisystem schreiben. */
