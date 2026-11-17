@@ -196,7 +196,7 @@ export const sys = {
   quicklook: null,   // setzt quicklook.js
   search: () => {},  // setzt shell/spotlight.js
   pwa: null,         // setzt pwa.js
-  open(id, args) { return sys.wm.open(id, args); },
+  open(id, args, opts) { return sys.wm.open(id, args, opts); },
 
   /** Welche App öffnet diese Datei standardmäßig? null = nur Vorschau. */
   defaultApp(st) {
