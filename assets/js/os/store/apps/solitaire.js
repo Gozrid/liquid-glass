@@ -188,7 +188,7 @@ style('solitaire', `
 .sol-top { display: flex; align-items: center; gap: 16px; flex: none; height: 38px; padding: 8px 16px 0; font-size: 12.5px; font-weight: 600; color: var(--fg-3); white-space: nowrap; }
 .sol-top b { margin-left: 5px; font: 700 15px/1 var(--font-round); font-variant-numeric: tabular-nums; color: var(--fg); }
 .sol-top .sp { flex: 1; }
-.sol-board { position: relative; flex: 1; min-height: 0; overflow: hidden; outline: 0; touch-action: none; --cw: 80px; --ch: 114px; }
+.sol-board { position: relative; flex: 1; min-height: 0; overflow: hidden; outline: 0; touch-action: none; --cw: 80px; --ch: 114px; background: linear-gradient(180deg, color-mix(in srgb, var(--c-mint) 12%, transparent), color-mix(in srgb, var(--c-mint) 4%, transparent) 70%); }
 .sol-slot { position: absolute; left: 0; top: 0; display: grid; place-items: center; width: var(--cw); height: var(--ch); border-radius: calc(var(--cw) * .1); background: var(--well); box-shadow: inset 0 0 0 1.500px var(--line); color: var(--fg-4); transition: box-shadow .2s; }
 .sol-slot svg { width: 40%; height: 40%; fill: currentColor; opacity: .7; }
 .sol-slot[data-pile="stock"] { cursor: pointer; }
