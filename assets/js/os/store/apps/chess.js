@@ -766,8 +766,9 @@ export default {
     const statusEl = h('div.chess-status', { role: 'status', 'aria-live': 'polite' });
     const movesOl = h('ol');
     const movesEl = h('div.chess-moves.scroll', { 'aria-label': 'Zugliste' }, movesOl);
-    const bUndo = toolBtn('undo', 'Zug zurück (Z)', () => undoMove());
-    const bFlip = toolBtn('reload', 'Brett drehen (D)', () => setFlip(!flip));
+    const refocus = () => boardEl.focus({ preventScroll: true });     // Pfeile und Enter gehören danach wieder dem Brett
+    const bUndo = toolBtn('undo', 'Zug zurück (Z)', () => { undoMove(); refocus(); });
+    const bFlip = toolBtn('reload', 'Brett drehen (D)', () => { setFlip(!flip); refocus(); });
     const bNew = toolBtn('plus', 'Neue Partie (N)', () => newGameSheet());
     const bAgain = h('button.kit-btn.primary.chess-again', { type: 'button', hidden: true, onclick: () => newGameSheet() }, 'Neue Partie');
     win.tools.append(bUndo, bFlip, bNew);

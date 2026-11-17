@@ -306,11 +306,11 @@ export default {
     const bPause = toolBtn('pause', 'Pause (P)', () => setPaused(!paused));
     const digitBtns = [];
     const digits = h('div.sudoku-digits', Array.from({ length: 9 }, (_, k) => {
-      const b = h('button.sudoku-digit', { type: 'button', 'aria-label': `Ziffer ${k + 1}`, onclick: () => enter(k + 1) }, String(k + 1), h('small', '9'));
+      const b = h('button.sudoku-digit', { type: 'button', 'aria-label': `Ziffer ${k + 1}`, onclick: () => { enter(k + 1); board.focus({ preventScroll: true }); } }, String(k + 1), h('small', '9'));
       digitBtns.push(b);
       return b;
     }));
-    const tool = (svgHtml, label, fn) => h('button.sudoku-tool', { type: 'button', 'aria-label': label, title: label, html: svgHtml, onclick: fn });
+    const tool = (svgHtml, label, fn) => h('button.sudoku-tool', { type: 'button', 'aria-label': label, title: label, html: svgHtml, onclick: () => { fn(); board.focus({ preventScroll: true }); } });
     const bNotes = tool(PENCIL, 'Notizen (N)', () => setNotes(!notesMode));
     const bErase = tool(icon('eraser'), 'Löschen (Entf)', () => erase());
     const bUndo = tool(icon('undo'), 'Rückgängig (⌘Z)', () => undo());
