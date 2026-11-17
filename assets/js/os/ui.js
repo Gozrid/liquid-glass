@@ -20,6 +20,14 @@ export function closeMenu() {
   const info = rootInfo;
   rootInfo = null;
   info?.onClose?.();
+  // Die Tastatur gehört danach wieder dem vorderen Fenster – außer der Menüpunkt hat etwas anderes fokussiert
+  setTimeout(() => {
+    const a = document.activeElement;
+    if (stack.length || (a && a !== document.body && a.isConnected && !a.closest('#menubar'))) return;
+    const w = sys.wm?.focused;
+    if (!w) return;
+    if (w.hooks.onFocus) w.hooks.onFocus(); else w.el.focus({ preventScroll: true });
+  }, 0);
 }
 export const menuAnchor = () => rootInfo?.anchor || null;
 

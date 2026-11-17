@@ -107,7 +107,7 @@ export function sheet(win, { title, text, body = null, wide = false, buttons = [
       text ? h('p.kit-sheet-text', text) : null,
       body,
       h('div.kit-sheet-btns', btns));
-    close = mountSheet(win, card, () => done(cancelValue), () => (btns.find((b) => b.classList.contains('primary') || b.classList.contains('danger')) || btns[btns.length - 1])?.click());
+    close = mountSheet(win, card, () => done(cancelValue), () => (btns.find((b) => b.classList.contains('primary')) || btns.find((b) => b.classList.contains('danger')) || btns[btns.length - 1])?.click());
   });
 }
 
