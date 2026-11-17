@@ -64,4 +64,23 @@ export default [
     ],
     privacy: ['Kamera – Bilder bleiben auf diesem Gerät'],
   },
+  {
+    id: 'recorder',
+    name: 'Sprachmemos',
+    tagline: 'Gedanken aufnehmen und anhören',
+    category: 'Kreativ',
+    version: '1.0',
+    colors: ['#ff7a70', '#d81e4a'],
+    // Wellenform: fünf Ausschläge
+    glyph: ico('<path d="M4 10.500v3M8 7v10M12 3.500v17M16 7.500v9M20 10.500v3" stroke-width="2.200"/>'),
+    keywords: 'aufnahme mikrofon diktat audio memo stimme recorder ton',
+    description: 'Sprachmemos nimmt mit dem Mikrofon auf – mit Live-Wellenform, Pause und Fortsetzen. Jede Aufnahme zeigt ihre Wellenform zum Hineinspringen, lässt sich schneller oder langsamer anhören, umbenennen und als Datei exportieren.',
+    features: [
+      'Aufnahme mit mitlaufender Wellenform und Pause',
+      'Anhören mit Springen, ±15 Sekunden und Tempo',
+      'Umbenennen, Exportieren, Papierkorb',
+      'Memos liegen in Musik › Memos',
+    ],
+    privacy: ['Mikrofon – Aufnahmen bleiben auf diesem Gerät'],
+  },
 ];
