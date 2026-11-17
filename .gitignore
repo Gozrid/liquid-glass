@@ -8,3 +8,4 @@
 
 # lokale Werkzeuge (die Seite selbst braucht keine Abhängigkeiten)
 node_modules/
+.claude/

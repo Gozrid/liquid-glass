@@ -4,11 +4,23 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
   <title>fableOS — ein Betriebssystem im Browser</title>
-  <meta name="description" content="fableOS: Fenster-Manager, Dock, Terminal mit virtuellem Dateisystem und zehn Apps – komplett im Browser, gebaut von Claude Fable 5.2.">
+  <meta name="description" content="fableOS: Fenster-Manager, Dock, App Store mit 20 Apps, Suche, Mitteilungszentrale, mehrere Schreibtische und Terminal – komplett im Browser, installierbar als App. Gebaut von Claude Fable 5.2.">
   <meta name="theme-color" content="#05060f">
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='6' y1='3' x2='26' y2='30' gradientUnits='userSpaceOnUse'%3E%3Cstop offset='0' stop-color='%23ffc078'/%3E%3Cstop offset='.42' stop-color='%23ff5d6c'/%3E%3Cstop offset='.8' stop-color='%239a6bff'/%3E%3Cstop offset='1' stop-color='%2345c8ff'/%3E%3C/linearGradient%3E%3C/defs%3E%3Cpath d='M16 2.5s10 9.800 10 17.200a10 10 0 0 1-20 0C6 12.300 16 2.500 16 2.500z' fill='url(%23g)'/%3E%3C/svg%3E">
+  <meta name="color-scheme" content="dark light">
+  <meta name="application-name" content="fableOS">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="fableOS">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="apple-touch-icon" href="assets/icons/apple-touch-icon.png">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='6' y1='3' x2='26' y2='30' gradientUnits='userSpaceOnUse'%3E%3Cstop offset='0' stop-color='%23ffc078'/%3E%3Cstop offset='.42' stop-color='%23ff5d6c'/%3E%3Cstop offset='.8' stop-color='%239a6bff'/%3E%3Cstop offset='1' stop-color='%2345c8ff'/%3E%3C/linearGradient%3E%3C/defs%3E%3Cpath d='M16 2.500s10 9.800 10 17.200a10 10 0 0 1-20 0C6 12.300 16 2.500 16 2.500z' fill='url(%23g)'/%3E%3C/svg%3E">
   <script>
-    try { var s = JSON.parse(localStorage.getItem('fableos.settings') || '{}'); if (s.theme) document.documentElement.dataset.theme = s.theme; } catch (e) {}
+    try {
+      var s = JSON.parse(localStorage.getItem('fableos.settings') || '{}');
+      var t = s.autoTheme ? (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light') : s.theme;
+      if (t) document.documentElement.dataset.theme = t;
+    } catch (e) {}
   </script>
   <!-- Opt-in für den Seitenübergang muss vor dem ersten Frame bekannt sein, daher inline -->
   <style>@view-transition { navigation: auto; }</style>
@@ -40,25 +52,30 @@
       <div id="notes" aria-live="polite"></div>
       <div id="launcher" hidden>
         <div class="launcher glass thick" role="dialog" aria-modal="true" aria-label="Suche">
-          <div class="launcher-field"><i data-icon="search"></i><input id="launcher-input" type="text" placeholder="Apps, Dateien, Befehle, 12 × 7 …" autocomplete="off" spellcheck="false" aria-label="Suchen"><kbd>esc</kbd></div>
+          <div class="launcher-field"><i data-icon="search"></i><input id="launcher-input" type="text" placeholder="Apps, Dateien, Einstellungen, 12 × 7, 5 km in mi …" autocomplete="off" spellcheck="false" aria-label="Suchen"><kbd>esc</kbd></div>
           <ul class="launcher-list scroll" id="launcher-list" role="listbox"></ul>
         </div>
       </div>
     </div>
   </div>
 
+  <div id="night" aria-hidden="true"></div>
   <div id="dimmer" aria-hidden="true"></div>
 
-  <div id="lock" hidden role="button" tabindex="0" aria-label="Entsperren">
+  <div id="lock" hidden aria-label="Sperrbildschirm">
     <div class="lock-top">
       <div class="lock-date" id="lock-date"></div>
       <div class="lock-time" id="lock-time">00:00</div>
     </div>
-    <div class="lock-mid"></div>
+    <div class="lock-mid"><p class="lock-note" id="lock-note"></p></div>
     <div class="lock-bottom">
       <span class="lock-avatar" data-logo></span>
       <b id="lock-user">Gast</b>
-      <span class="lock-hint">Klicken oder eine Taste drücken</span>
+      <form id="lock-form" hidden autocomplete="off">
+        <input id="lock-pass" type="password" placeholder="Passwort eingeben" autocomplete="off" aria-label="Passwort">
+        <button type="submit" aria-label="Anmelden"><i data-icon="arrowRight"></i></button>
+      </form>
+      <span class="lock-hint" id="lock-hint">Klicken oder eine Taste drücken</span>
     </div>
   </div>
 

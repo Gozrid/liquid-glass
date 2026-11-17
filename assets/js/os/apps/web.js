@@ -71,6 +71,7 @@ export default {
     go(args.url || null);
     return {
       onArgs: (a) => { if (a.url) go(a.url); },
+      state: () => (stack[at] ? { url: stack[at] } : null),
       menus: [{ label: 'Lesezeichen', items: BOOKMARKS.map((b) => ({ label: b.name, icon: b.ic, run: () => go(b.url) })) }],
     };
   },

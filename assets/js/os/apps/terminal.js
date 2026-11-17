@@ -4,6 +4,7 @@ import { h, store, escapeHtml as esc, ticker, rand } from '../../core/util.js';
 import { evaluate, formatNumber, looksLikeMath } from '../../core/calc.js';
 import { sys, settings, set, apps, WALLPAPERS, ACCENTS, isImage } from '../sys.js';
 import { vfs, HOME, normalize, pretty, formatSize } from '../vfs.js';
+import { registry } from '../registry.js';
 
 const HIST = 'fableos.term.history';
 const pad = (s, n) => String(s).padEnd(n);
@@ -51,7 +52,7 @@ export default {
         run() {
           const groups = [
             ['Dateien', ['ls', 'cd', 'pwd', 'cat', 'echo', 'touch', 'mkdir', 'rm', 'mv', 'cp', 'tree', 'find', 'grep']],
-            ['System', ['open', 'apps', 'ps', 'kill', 'neofetch', 'uname', 'uptime', 'date', 'whoami', 'history', 'clear']],
+            ['System', ['open', 'apps', 'store', 'ps', 'kill', 'neofetch', 'uname', 'uptime', 'date', 'whoami', 'history', 'clear']],
             ['Aussehen', ['theme', 'wallpaper', 'akzent']],
             ['Sonstiges', ['calc', 'notify', 'say', 'matrix', 'fable', 'exit', 'reboot', 'shutdown']],
           ];
@@ -177,7 +178,38 @@ export default {
           sys.openPath(abs(t));
         },
       },
-      apps: { d: 'Installierte Apps auflisten', run() { for (const a of apps.values()) print(`${span('t-b', pad(a.id, 10))} ${esc(a.name)}`); } },
+      apps: { d: 'Installierte Apps auflisten', run() { for (const a of apps.values()) if (!a.hidden) print(`${span('t-b', pad(a.id, 12))} ${esc(a.name)}`); } },
+      store: {
+        d: 'App Store: store list | install <app> | remove <app>',
+        run(a) {
+          const [sub, ...rest] = a;
+          const name = rest.join(' ').toLowerCase();
+          const find = () => {
+            const e = registry.catalog.find((x) => x.id === name || x.name.toLowerCase() === name);
+            if (!e) throw new Error(`store: „${rest.join(' ')}“ gibt es im Katalog nicht – siehe: store list`);
+            return e;
+          };
+          if (!sub || sub === 'list') {
+            for (const e of registry.catalog) {
+              const on = registry.isInstalled(e.id);
+              print(`${span(on ? 't-ok' : 't-dim', on ? '●' : '○')} ${span('t-b', pad(e.id, 11))} ${esc(pad(e.name, 15))} ${span('t-dim', e.tagline || '')}`);
+            }
+            text(`${registry.catalog.length} Apps im Katalog · ● installiert`, 't-dim');
+          } else if (sub === 'install') {
+            const e = find();
+            if (registry.isInstalled(e.id)) { text(`${e.name} ist bereits installiert.`, 't-dim'); return; }
+            text(`Lade ${e.name} …`, 't-dim');
+            registry.install(e.id).then(
+              (bytes) => { print(span('t-ok', `${e.name} ist installiert (${formatSize(bytes)}). Start mit: open ${e.id}`)); bottom(); },
+              (err) => { print(span('t-err', err.message)); bottom(); });
+          } else if (sub === 'remove') {
+            const e = find();
+            if (!registry.isInstalled(e.id)) { text(`${e.name} ist nicht installiert.`, 't-dim'); return; }
+            registry.uninstall(e.id);
+            text(`${e.name} wurde entfernt.`, 't-ok');
+          } else throw new Error('Aufruf: store list | install <app> | remove <app>');
+        },
+      },
       ps: {
         d: 'Laufende Fenster',
         run() {
@@ -270,8 +302,8 @@ export default {
       },
       sudo: { d: '', run() { text('In fableOS sind alle gleich – und alle Gast.', 't-dim'); } },
       exit: { d: 'Terminal schließen', run() { win.close(); } },
-      reboot: { d: 'Neu starten', run() { location.reload(); } },
-      shutdown: { d: 'Ausschalten (zurück zur Website)', run() { location.href = 'index.html'; } },
+      reboot: { d: 'Neu starten', run() { sys.power.restart(); } },
+      shutdown: { d: 'Ausschalten (zurück zur Website)', run() { sys.power.shutdown(); } },
     };
     C.help = C.hilfe;
 

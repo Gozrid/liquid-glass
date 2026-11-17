@@ -37,6 +37,7 @@ function markdown(src) {
 
 export default {
   id: 'notes', name: 'Notizen', icon: 'note', colors: ['#ffd96b', '#ff9f1a'], keywords: 'editor text schreiben markdown',
+  accepts: ['txt', 'md', 'log'],
   width: 740, height: 500, minW: 440, minH: 300,
 
   mount(win, args) {
@@ -139,6 +140,7 @@ export default {
     return {
       onClose: off,
       onArgs: (a) => { if (a.path) load(a.path); },
+      state: () => (path ? { path } : null),
       onFocus: () => { if (!preview && !document.activeElement?.closest?.('.rename')) area.focus({ preventScroll: true }); },
       menus: [{
         label: 'Notiz',

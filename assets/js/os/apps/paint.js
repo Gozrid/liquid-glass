@@ -11,6 +11,7 @@ const SWATCHES = ['#0b1030', '#ffffff', '#ff5d6c', '#ff6a3d', '#ffb65c', '#3fe0b
 
 export default {
   id: 'paint', name: 'Malen', icon: 'brush', colors: ['#ff8ad1', '#a94bff'], keywords: 'zeichnen bild pinsel',
+  accepts: ['png', 'jpg', 'jpeg', 'webp', 'gif'],
   width: 860, height: 580, minW: 520, minH: 380,
 
   mount(win, args) {

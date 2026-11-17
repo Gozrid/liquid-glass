@@ -1,0 +1,51 @@
+{
+  "id": "./os.html",
+  "name": "fableOS",
+  "short_name": "fableOS",
+  "description": "Ein Betriebssystem im Browser: Fenster, Dock, App Store, Suche, Terminal und über 30 Apps – läuft komplett auf deinem Gerät, auch offline.",
+  "lang": "de",
+  "dir": "ltr",
+  "start_url": "./os.html?source=pwa",
+  "scope": "./",
+  "display": "standalone",
+  "display_override": ["window-controls-overlay", "standalone"],
+  "orientation": "any",
+  "background_color": "#05060f",
+  "theme_color": "#05060f",
+  "categories": ["productivity", "utilities", "entertainment"],
+  "prefer_related_applications": false,
+  "launch_handler": { "client_mode": ["focus-existing", "auto"] },
+  "icons": [
+    { "src": "assets/icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "assets/icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "assets/icons/maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ],
+  "screenshots": [
+    { "src": "assets/icons/screen-wide.jpg", "sizes": "1600x1000", "type": "image/jpeg", "form_factor": "wide", "label": "fableOS: Schreibtisch mit Fenstern, Dock und Widgets" },
+    { "src": "assets/icons/screen-narrow.jpg", "sizes": "780x1560", "type": "image/jpeg", "form_factor": "narrow", "label": "fableOS auf dem Telefon" }
+  ],
+  "shortcuts": [
+    { "name": "App Store", "url": "./os.html?open=store", "icons": [{ "src": "assets/icons/shortcut-store.png", "sizes": "96x96", "type": "image/png" }] },
+    { "name": "Terminal", "url": "./os.html?open=terminal", "icons": [{ "src": "assets/icons/shortcut-terminal.png", "sizes": "96x96", "type": "image/png" }] },
+    { "name": "Notizen", "url": "./os.html?open=notes", "icons": [{ "src": "assets/icons/shortcut-notes.png", "sizes": "96x96", "type": "image/png" }] },
+    { "name": "Dateien", "url": "./os.html?open=files", "icons": [{ "src": "assets/icons/shortcut-files.png", "sizes": "96x96", "type": "image/png" }] }
+  ],
+  "file_handlers": [
+    {
+      "action": "./os.html?source=file",
+      "accept": {
+        "text/plain": [".txt", ".md", ".log"],
+        "application/json": [".json"],
+        "image/png": [".png"],
+        "image/jpeg": [".jpg", ".jpeg"],
+        "image/webp": [".webp"],
+        "image/gif": [".gif"]
+      }
+    }
+  ],
+  "share_target": {
+    "action": "./os.html",
+    "method": "GET",
+    "params": { "title": "share_title", "text": "share_text", "url": "share_url" }
+  }
+}

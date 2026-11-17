@@ -1,17 +1,44 @@
 // desktop.js — Schreibtisch: Dateisymbole, Auswahlrahmen, Kontextmenü, Widgets
 
-import { $, $$, h, coarse } from '../core/util.js';
+import { $, $$, h, coarse, store } from '../core/util.js';
+import { icon } from '../core/icons.js';
 import { bus } from './bus.js';
-import { sys, settings, set, widgets, WALLPAPERS } from './sys.js';
-import { vfs, HOME } from './vfs.js';
-import { openMenu, fileIcon, fsops, renameInline } from './ui.js';
+import { sys, settings, set, widgets, apps, appIcon, isImage, WALLPAPERS } from './sys.js';
+import { registry } from './registry.js';
+import { vfs, HOME, formatSize } from './vfs.js';
+import { openMenu, fileIcon, fsops, renameInline, dialog } from './ui.js';
+import { fileDrag, hostDrop } from './dnd.js';
 
 const DIR = `${HOME}/Schreibtisch`;
+
+/** Kontextmenü-Einträge, die für jede Datei gelten (Schreibtisch und Dateien-App teilen sie sich). */
+export function fileMenu(st, { open, rename, extra = [] } = {}) {
+  const handlers = st.type === 'file' ? sys.handlers(st) : [];
+  const def = st.type === 'file' ? sys.defaultApp(st) : null;
+  return [
+    { label: 'Öffnen', icon: 'arrowUpRight', run: open },
+    handlers.length > 0 && {
+      label: 'Öffnen mit', items: handlers.map((a) => ({ label: a.name, app: a, checked: a.id === def, run: () => sys.openPath(st.path, a.id) })),
+    },
+    { label: 'Übersicht', icon: 'search', hint: 'Leertaste', run: () => sys.quicklook([st.path]) },
+    '-',
+    ...extra,
+    { label: 'Umbenennen', icon: 'note', run: rename },
+    { label: 'Duplizieren', icon: 'copy', run: () => fsops.duplicate(st.path) },
+    { label: 'Kopieren', run: () => fsops.copy([st.path]) },
+    st.type === 'file' && { label: 'Auf dieses Gerät laden', icon: 'download', run: () => fsops.download(st.path) },
+    st.type === 'file' && fsops.canShare() && { label: 'Teilen …', icon: 'external', run: () => fsops.share(st.path) },
+    st.type === 'file' && isImage(st.path, st.mime) && { label: 'Als Hintergrund verwenden', icon: 'image', run: () => sys.setWallpaperImage(st.path) },
+    '-',
+    { label: 'In den Papierkorb', icon: 'trash', run: () => fsops.trash(st.path) },
+  ].filter(Boolean);
+}
 
 export function initDesktop() {
   const desk = $('#desktop');
   const box = $('#icons');
   let selected = new Set();
+  box.dataset.dropPath = DIR;
 
   const paintSel = () => $$('.dicon', box).forEach((el) => el.classList.toggle('is-sel', selected.has(el.dataset.path)));
   const render = () => {
@@ -20,7 +47,9 @@ export function initDesktop() {
     box.replaceChildren(...list.map((st) => {
       const label = h('span.dicon-name', st.name);
       const el = h('button.dicon', { type: 'button', dataset: { path: st.path } }, fileIcon(st), label);
+      if (st.type === 'dir') el.dataset.dropPath = st.path;
       const open = () => sys.openPath(st.path);
+      const rename = () => renameInline(label, (name) => fsops.rename(st.path, name));
       el.addEventListener('click', (e) => {
         e.stopPropagation();
         if (coarse.matches) { open(); return; }
@@ -30,23 +59,20 @@ export function initDesktop() {
       });
       el.addEventListener('dblclick', open);
       el.addEventListener('keydown', (e) => {
+        if (e.target !== el) return;
         if (e.key === 'Enter') open();
-        else if (e.key === 'Delete' || e.key === 'Backspace') fsops.trash(st.path);
-        else if (e.key === 'F2') renameInline(label, (name) => fsops.rename(st.path, name));
+        else if (e.key === 'Delete' || e.key === 'Backspace') { for (const p of selected.size ? [...selected] : [st.path]) fsops.trash(p); }
+        else if (e.key === 'F2') rename();
+        else if (e.code === 'Space') { e.preventDefault(); const all = list.map((s) => s.path); sys.quicklook(all, all.indexOf(st.path)); }
       });
       el.addEventListener('contextmenu', (e) => {
         e.preventDefault();
         e.stopPropagation();
-        selected = new Set([st.path]);
+        if (!selected.has(st.path)) selected = new Set([st.path]);
         paintSel();
-        openMenu([
-          { label: 'Öffnen', icon: 'arrowUpRight', run: open },
-          { label: 'Umbenennen', icon: 'note', run: () => renameInline(label, (name) => fsops.rename(st.path, name)) },
-          { label: 'Duplizieren', icon: 'copy', run: () => { try { vfs.copy(st.path, `${DIR}/${vfs.unique(DIR, st.name)}`); } catch (err) { fsops.fail(err); } } },
-          '-',
-          { label: 'In den Papierkorb', icon: 'trash', run: () => fsops.trash(st.path) },
-        ], { x: e.clientX, y: e.clientY });
+        openMenu(fileMenu(st, { open, rename }), { x: e.clientX, y: e.clientY });
       });
+      fileDrag(el, () => (selected.has(st.path) ? [...selected] : [st.path]));
       return el;
     }));
     selected = new Set([...selected].filter((p) => vfs.exists(p)));
@@ -54,22 +80,30 @@ export function initDesktop() {
   };
   render();
   bus.on('fs', (path) => { if (path === '/' || path.startsWith(DIR)) render(); });
+  hostDrop(desk, () => DIR);
 
   // ---------- Kontextmenü des Schreibtischs ----------
   desk.addEventListener('contextmenu', (e) => {
-    if (e.target.closest('.win, #dock, #menubar, .widget, #overlays')) return;
+    if (e.target.closest('.win, #dock, #menubar, .widget, #overlays, #launchpad, #spaces')) return;
     e.preventDefault();
     const keys = Object.keys(WALLPAPERS);
     openMenu([
       { label: 'Neuer Ordner', icon: 'folder', run: () => fsops.newFolder(DIR) },
       { label: 'Neue Textdatei', icon: 'file', run: () => { const p = fsops.newFile(DIR); if (p) sys.openPath(p); } },
+      { label: 'Vom Gerät importieren …', icon: 'download', run: () => sys.importToDesktop() },
+      { label: 'Einsetzen', disabled: !fsops.clip, run: () => fsops.paste(DIR) },
       '-',
-      { heading: 'Hintergrund' },
-      ...keys.map((k) => ({ label: WALLPAPERS[k].name, checked: settings.wallpaper === k, run: () => set('wallpaper', k) })),
+      {
+        label: 'Hintergrund', icon: 'image', items: [
+          ...keys.map((k) => ({ label: WALLPAPERS[k].name, checked: !settings.wallImage && settings.wallpaper === k, run: () => { set('wallImage', ''); set('wallpaper', k); } })),
+          '-',
+          { label: 'Eigenes Bild …', run: () => sys.open('settings', { tab: 'wall' }) },
+        ],
+      },
+      { label: 'Widgets bearbeiten …', icon: 'grid', run: editWidgets },
       '-',
-      { label: 'Übersicht', icon: 'grid', run: () => sys.wm.toggleOverview() },
-      { label: 'Einstellungen …', icon: 'gear', run: () => sys.open('settings') },
-      { label: 'Über fableOS', icon: 'info', run: () => sys.open('about') },
+      { label: 'Übersicht', icon: 'layers', hint: 'F3', run: () => sys.wm.toggleOverview() },
+      { label: 'Systemeinstellungen …', icon: 'gear', run: () => sys.open('settings') },
     ], { x: e.clientX, y: e.clientY });
   });
 
@@ -78,6 +112,7 @@ export function initDesktop() {
   desk.addEventListener('pointerdown', (e) => {
     if (e.button !== 0 || e.target !== desk && e.target !== box && e.target.id !== 'windows') return;
     if (sys.wm.overview) { sys.wm.toggleOverview(false); return; }
+    document.body.classList.remove('show-desktop');
     selected.clear();
     paintSel();
     if (coarse.matches) return;
@@ -144,11 +179,89 @@ function calendarWidget(el) {
   return () => clearInterval(id);
 }
 
+function noteWidget(el) {
+  el.classList.add('w-note');
+  const KEY = 'fableos.sticky';
+  const area = h('textarea', { placeholder: 'Merkzettel …', spellcheck: false, 'aria-label': 'Merkzettel', value: store.get(KEY, 'Merkzettel\n\nHier ist Platz für einen Gedanken.') });
+  area.addEventListener('input', () => store.set(KEY, area.value));
+  area.addEventListener('keydown', (e) => e.stopPropagation());
+  el.append(area);
+  return null;
+}
+
+function storageWidget(el) {
+  el.classList.add('w-store');
+  const paint = async () => {
+    const used = vfs.usage();
+    let quota = 0;
+    try { quota = (await navigator.storage?.estimate?.())?.quota || 0; } catch { /* ohne Schätzung */ }
+    const files = vfs.find('', '/').length;
+    el.replaceChildren(
+      h('span.w-cap', 'Speicher'),
+      h('b.w-big', formatSize(used)),
+      h('div.kit-progress', { style: { '--p': quota ? Math.max(0.02, Math.min(1, used / quota)) : 0.02 } }, h('i')),
+      h('span.w-sub', quota ? `von ${formatSize(quota)} · ${files} Objekte` : `${files} Objekte`));
+  };
+  paint();
+  return bus.on('fs', paint);
+}
+
+function batteryWidget(el) {
+  el.classList.add('w-batt');
+  let batt = null;
+  const paint = () => {
+    const l = batt ? batt.level : 1;
+    el.replaceChildren(
+      h('div.w-ring', { style: { '--p': l, '--c': l < 0.2 ? 'var(--c-coral)' : 'var(--c-mint)' } }, h('b', batt ? `${Math.round(l * 100)}` : '–'), h('small', '%')),
+      h('span.w-sub', !batt ? 'Akku nicht verfügbar' : batt.charging ? 'Lädt' : 'Akku'));
+  };
+  paint();
+  navigator.getBattery?.().then((b) => {
+    batt = b;
+    paint();
+    b.addEventListener('levelchange', paint);
+    b.addEventListener('chargingchange', paint);
+  }).catch(() => {});
+  return () => { batt?.removeEventListener('levelchange', paint); batt?.removeEventListener('chargingchange', paint); };
+}
+
+/** Dialog „Widgets bearbeiten“: alles, was System und installierte Apps anbieten, ein- und ausschalten. */
+function editWidgets() {
+  const rows = [];
+  for (const def of widgets.defs.values()) rows.push({ key: def.key, name: def.name, size: def.size, app: def.app === 'system' ? null : apps.get(def.app) });
+  for (const app of apps.values()) {
+    for (const w of app.widgetList || []) {
+      const key = `${app.id}:${w.id}`;
+      if (!rows.some((r) => r.key === key)) rows.push({ key, name: w.name, size: w.size, app, lazy: true });
+    }
+  }
+  const list = h('div.wg-list.scroll', rows.map((r) => {
+    const sw = h('button.gswitch', { type: 'button', role: 'switch', 'aria-checked': String(settings.widgets.includes(r.key)), 'aria-label': r.name }, h('i'));
+    sw.addEventListener('click', async () => {
+      const on = sw.getAttribute('aria-checked') !== 'true';
+      sw.setAttribute('aria-checked', String(on));
+      if (on && r.lazy) await registry.load(r.app.id, true);
+      set('widgets', on ? [...settings.widgets.filter((k) => k !== r.key), r.key] : settings.widgets.filter((k) => k !== r.key));
+    });
+    return h('div.wg-row', r.app ? appIcon(r.app, 'sm') : h('span.note-ico', { html: icon('grid') }),
+      h('span.wg-txt', h('b', r.name), h('small', `${r.app ? r.app.name : 'fableOS'} · ${r.size === 'm' ? 'breit' : 'klein'}`)), sw);
+  }));
+  dialog({
+    icon: 'grid', title: 'Widgets', wide: true,
+    text: 'Wähle, was rechts auf dem Schreibtisch liegt. Installierte Apps bringen eigene Widgets mit.',
+    body: list, buttons: [{ label: 'Fertig', value: true, primary: true }],
+  });
+}
+sys.editWidgets = editWidgets;
+
 function initWidgets() {
   const box = $('#widgets');
   const live = new Map();     // Schlüssel → {el, def, cleanup}
   widgets.register('system', 'clock', { name: 'Uhr', size: 's', mount: clockWidget });
   widgets.register('system', 'calendar', { name: 'Kalender', size: 's', mount: calendarWidget });
+  widgets.register('system', 'note', { name: 'Merkzettel', size: 's', mount: noteWidget });
+  widgets.register('system', 'storage', { name: 'Speicher', size: 's', mount: storageWidget });
+  if (navigator.getBattery) widgets.register('system', 'battery', { name: 'Akku', size: 's', mount: batteryWidget });
 
   const drop = (key) => {
     const w = live.get(key);
@@ -176,6 +289,16 @@ function initWidgets() {
     if (!el || e.target.closest('button, input, select, textarea, a, [data-no-open]')) return;
     const app = el.dataset.key.split(':')[0];
     if (app !== 'system' && sys.apps.has(app)) sys.open(app);
+  });
+  box.addEventListener('contextmenu', (e) => {
+    const el = e.target.closest('.widget');
+    if (!el || e.target.closest('textarea, input')) return;
+    e.preventDefault();
+    e.stopPropagation();
+    openMenu([
+      { label: 'Widget entfernen', icon: 'close', run: () => set('widgets', settings.widgets.filter((k) => k !== el.dataset.key)) },
+      { label: 'Widgets bearbeiten …', icon: 'grid', run: editWidgets },
+    ], { x: e.clientX, y: e.clientY });
   });
   bus.on('widgets', render);
   bus.on('setting:widgets', render);

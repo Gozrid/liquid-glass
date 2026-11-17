@@ -1,7 +1,9 @@
-// vfs.js — virtuelles Dateisystem. Ein Baum aus Ordnern und Dateien, gespeichert im localStorage.
+// vfs.js — virtuelles Dateisystem. Ein Baum aus Ordnern und Dateien im Arbeitsspeicher,
+// gesichert in IndexedDB (viel Platz für Bilder und Aufnahmen). Ohne IndexedDB: localStorage (~5 MB).
 
 import { store, debounce } from '../core/util.js';
 import { bus } from './bus.js';
+import { kv } from './idb.js';
 
 const KEY = 'fableos.fs.v1';
 export const HOME = '/Benutzer/gast';
@@ -78,7 +80,8 @@ hat mich nie belogen.
           'geheim.txt': F('Gefunden! Tipp im Terminal einmal:  matrix\n'),
         }),
         Bilder: D(img ? { 'Aurora.jpg': F(img, 'image/jpeg') } : {}),
-        Musik: D({ 'LIESMICH.txt': F('Musik entsteht hier live: öffne die App „Klang“.\n') }),
+        Musik: D({ 'LIESMICH.txt': F('Musik entsteht hier live: öffne die App „Klang“ oder „Musik“.\n') }),
+        Downloads: D(),
         Papierkorb: D(),
       }),
     }),
@@ -96,12 +99,41 @@ hat mich nie belogen.
   });
 }
 
-let tree = store.get(KEY, null);
-if (!tree || tree.t !== 'd') tree = seed();
+let tree = null;
+let useIdb = true;
 
-const persist = debounce(() => {
+/** Ordner, die es immer geben muss – auch in Dateisystemen aus älteren Versionen. */
+function ensureBase() {
+  const home = tree.c.Benutzer?.c?.gast;
+  if (!home || home.t !== 'd') { tree = seed(); return; }
+  for (const name of ['Schreibtisch', 'Dokumente', 'Bilder', 'Musik', 'Downloads', 'Papierkorb']) {
+    if (!Object.hasOwn(home.c, name)) home.c[name] = D();
+  }
+}
+
+/** Lädt den Baum. Muss abgewartet werden, bevor irgendetwas das Dateisystem benutzt (macht main.js). */
+export const ready = (async () => {
+  let saved = null;
+  try { saved = await kv.get('fs'); } catch { useIdb = false; }
+  if (saved?.t === 'd') tree = saved;
+  else {
+    const legacy = store.get(KEY, null);          // Umzug aus dem localStorage früherer Versionen
+    tree = legacy?.t === 'd' ? legacy : seed();
+    if (useIdb) {
+      try { await kv.set('fs', tree); store.del(KEY); } catch { useIdb = false; }
+    }
+  }
+  ensureBase();
+})();
+
+function flush() {
+  if (!tree) return Promise.resolve();
+  if (useIdb) return kv.set('fs', tree).catch(() => bus.emit('fs:full'));
   if (!store.set(KEY, tree)) bus.emit('fs:full');
-}, 200);
+  return Promise.resolve();
+}
+const persist = debounce(flush, 200);
+addEventListener('pagehide', flush);
 function changed(path) {
   persist();
   bus.emit('fs', path);
@@ -210,6 +242,7 @@ export const vfs = {
     delete dirOf(from).c[basename(from)];
     target.c[basename(to)] = n;
     n.m = Date.now();
+    bus.emit('fs', from);      // der alte Ort hat sich ebenfalls geändert
     changed(to);
     return to;
   },
@@ -260,16 +293,33 @@ export const vfs = {
     if (s?.t === 'd') walk(start, s);
     return out;
   },
-  usage: () => JSON.stringify(tree).length,
+  usage: () => sizeOf(tree),
+  /** Kompletter Baum als JSON-taugliches Objekt (für Sicherungen). */
+  dump: () => JSON.parse(JSON.stringify(tree)),
+  /** Ersetzt den kompletten Baum (Wiederherstellen einer Sicherung). */
+  restore(data) {
+    if (data?.t !== 'd') throw new Error('Das ist kein fableOS-Dateisystem');
+    tree = data;
+    ensureBase();
+    bus.emit('fs', '/');
+    return flush();
+  },
   reset() {
     tree = seed();
-    store.set(KEY, tree);
     bus.emit('fs', '/');
+    return flush();
+  },
+  /** Löscht das gespeicherte Dateisystem endgültig. Danach muss die Seite neu geladen werden. */
+  async destroy() {
+    tree = null;
+    store.del(KEY);
+    try { await kv.del('fs'); } catch { /* egal */ }
   },
 };
 
 export function formatSize(bytes) {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toLocaleString('de-DE', { maximumFractionDigits: 1 })} KB`;
-  return `${(bytes / 1024 / 1024).toLocaleString('de-DE', { maximumFractionDigits: 1 })} MB`;
+  if (bytes < 1024 ** 3) return `${(bytes / 1024 / 1024).toLocaleString('de-DE', { maximumFractionDigits: 1 })} MB`;
+  return `${(bytes / 1024 ** 3).toLocaleString('de-DE', { maximumFractionDigits: 1 })} GB`;
 }
