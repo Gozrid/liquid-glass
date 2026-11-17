@@ -172,9 +172,17 @@ export function initMenubar(power) {
       '-',
       { label: 'Zurück zur Website', icon: 'arrowLeft', run: power.shutdown },
     ];
+    // Bringt eine App ein Menü mit, das wie ein Systemmenü heißt, wandern ihre Einträge an dessen Anfang
+    const base = { Ablage: file.filter(Boolean), Bearbeiten: editMenu, Fenster: windows, Hilfe: help };
+    const own = [];
+    for (const m of extra) {
+      const name = m.label === 'Datei' ? 'Ablage' : m.label;
+      if (base[name]) base[name] = [...(m.items || []), '-', ...base[name]];
+      else own.push(m);
+    }
     return {
       appMenu,
-      menus: [{ label: 'Ablage', items: file }, { label: 'Bearbeiten', items: editMenu }, ...extra, { label: 'Fenster', items: windows }, { label: 'Hilfe', items: help }],
+      menus: [{ label: 'Ablage', items: base.Ablage }, { label: 'Bearbeiten', items: base.Bearbeiten }, ...own, { label: 'Fenster', items: base.Fenster }, { label: 'Hilfe', items: base.Hilfe }],
     };
   };
 
