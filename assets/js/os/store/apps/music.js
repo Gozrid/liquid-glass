@@ -527,6 +527,7 @@ function tick() {
   const { ctx } = audio();
   const tr = TR[P.cur];
   if (P.endAt) { if (ctx.currentTime >= P.endAt) advance(true); return; }
+  if (!sys.nowPlaying) announce();                                           // eine andere App hat sich abgemeldet – wir spielen noch
   if (P.nextT < ctx.currentTime - 0.08) P.nextT = ctx.currentTime + 0.05;     // Verspätung (Tab war eingefroren): nicht nachholen
   const ahead = document.hidden ? 1.6 : 0.22;
   let guard = 0;

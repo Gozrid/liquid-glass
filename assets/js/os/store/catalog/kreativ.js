@@ -83,4 +83,23 @@ export default [
     ],
     privacy: ['Mikrofon – Aufnahmen bleiben auf diesem Gerät'],
   },
+  {
+    id: 'beats',
+    name: 'Beats',
+    tagline: 'Rhythmen bauen, Schritt für Schritt',
+    category: 'Kreativ',
+    version: '1.0',
+    colors: ['#b8ec4d', '#2c9f45'],
+    // Raster aus Pads, einige leuchten
+    glyph: ico([0, 1, 2].map((r) => [0, 1, 2].map((c) => `<rect x="${4 + c * 5.750}" y="${4 + r * 5.750}" width="4.500" height="4.500" rx="1.300" fill="currentColor" stroke="none"${[0, 4, 5, 6].includes(r * 3 + c) ? '' : ' opacity=".42"'}/>`).join('')).join('')),
+    keywords: 'beat sequencer drum schlagzeug rhythmus groove bass synth musik machen',
+    description: 'Beats ist ein Step-Sequencer mit 16 Schritten und acht Spuren: Kick, Snare, Hi-Hats, Clap und Tom, dazu Bass und Lead mit Tonhöhe pro Schritt. Alle Klänge entstehen im Synthesizer deines Browsers und laufen taktgenau – mit Swing, vier Mustern und sechs Vorlagen zum Loslegen.',
+    features: [
+      '16 Schritte × 8 Spuren, Bass und Lead mit Tonhöhe',
+      'Tempo 60–180 BPM, Swing, Lautstärke, Stumm und Solo je Spur',
+      'Vier Muster A–D zum Umschalten und Kopieren',
+      'Sechs Vorlagen, Zufallsmuster und Widerrufen',
+    ],
+    privacy: [],
+  },
 ];
