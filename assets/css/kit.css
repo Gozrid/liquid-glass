@@ -1,0 +1,144 @@
+/* ==========================================================================
+   kit.css — Bausteine für Apps: Layouts, Listen, Felder, Knöpfe, Dialoge.
+   Jede App darf diese Klassen nutzen; eigene Stile bringt sie über kit.style() mit.
+   Fensterinhalte sind Container („win“): @container win (max-width: 560px) { … }
+   ========================================================================== */
+
+.win-body { container: win / inline-size; }
+
+/* ---------- Grundgerüst ---------- */
+.kit-app { display: flex; flex-direction: column; flex: 1; min-height: 0; min-width: 0; }
+.kit-split { --side: 190px; display: grid; grid-template-columns: var(--side) minmax(0, 1fr); flex: 1; min-height: 0; }
+.kit-side { display: grid; align-content: start; gap: 1px; min-height: 0; padding: 10px 8px; border-right: .5px solid var(--line); background: rgba(0, 0, 14, .1); }
+.kit-main { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+.kit-body { flex: 1; min-height: 0; padding: 14px 16px; }
+.kit-bar { display: flex; align-items: center; gap: 6px; flex: none; min-height: 43px; padding: 7px 10px; border-bottom: .5px solid var(--line); }
+.kit-bar .sp, .kit-foot .sp { flex: 1; }
+.kit-foot { display: flex; align-items: center; gap: 10px; flex: none; padding: 6px 14px; border-top: .5px solid var(--line); font-size: 12px; color: var(--fg-3); }
+.kit-title { font-size: 13.5px; font-weight: 650; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.kit-head { padding: 8px 8px 4px; font-size: 11px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; color: var(--fg-3); }
+.kit-label { font-size: 12px; font-weight: 600; color: var(--fg-3); }
+.kit-muted { color: var(--fg-3); }
+@container win (max-width: 560px) {
+  .kit-split { grid-template-columns: 1fr; }
+  .kit-split > .kit-side { display: none; }
+}
+
+/* ---------- Seitenleiste ---------- */
+.kit-side > button { display: flex; align-items: center; gap: 9px; min-width: 0; padding: 6px 8px; border: 0; border-radius: 8px; background: none; font-size: 13px; font-weight: 500; text-align: left; color: var(--fg-2); }
+.kit-side > button .ico { width: 16px; height: 16px; color: var(--accent); }
+.kit-side > button > span:first-of-type { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.kit-side > button:hover { background: var(--raise); }
+.kit-side > button.is-on { background: var(--raise-2); color: var(--fg); }
+.kit-count { flex: none; font-size: 11.5px; color: var(--fg-3); font-variant-numeric: tabular-nums; }
+.kit-dot { flex: none; width: 10px; height: 10px; border-radius: 50%; background: var(--c, var(--accent)); }
+
+/* ---------- Knöpfe, Felder ---------- */
+.kit-btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px; flex: none;
+  padding: 6px 13px; border: 0; border-radius: 9px;
+  background: var(--raise); color: var(--fg);
+  font-size: 13px; font-weight: 600; line-height: 1.2; white-space: nowrap;
+  box-shadow: inset 0 0 0 .5px var(--line);
+  transition: transform .4s var(--spring), background-color .15s, filter .15s;
+}
+.kit-btn:hover:not(:disabled) { background: var(--raise-2); }
+.kit-btn:active:not(:disabled) { transform: scale(.95); }
+.kit-btn:disabled { opacity: .4; cursor: default; }
+.kit-btn .ico { width: 15px; height: 15px; }
+.kit-btn.primary { background: var(--accent); color: #fff; box-shadow: inset 0 1px 0 rgba(255, 255, 255, .35); }
+.kit-btn.primary:hover:not(:disabled) { background: var(--accent); filter: brightness(1.1); }
+.kit-btn.danger { background: #e5484d; color: #fff; }
+.kit-btn.danger:hover:not(:disabled) { background: #e5484d; filter: brightness(1.1); }
+.kit-btn.big { padding: 9px 18px; font-size: 14px; border-radius: 11px; }
+.kit-btn.round { border-radius: 99px; }
+
+.kit-field {
+  min-width: 0; padding: 6px 10px; border: 0; outline: 0; border-radius: 9px;
+  background: var(--well); color: var(--fg);
+  box-shadow: inset 0 0 0 1px var(--line);
+  font-size: 13.5px;
+}
+.kit-field:focus { box-shadow: inset 0 0 0 1.5px var(--accent); }
+.kit-field::placeholder { color: var(--fg-3); }
+textarea.kit-field { resize: none; line-height: 1.5; }
+select.kit-field { padding-right: 6px; }
+.kit-search { position: relative; display: flex; align-items: center; min-width: 0; }
+.kit-search .ico { position: absolute; left: 9px; width: 14px; height: 14px; color: var(--fg-3); pointer-events: none; }
+.kit-search .kit-field { width: 100%; padding-left: 29px; border-radius: 99px; }
+.kit-check { display: grid; place-items: center; flex: none; width: 20px; height: 20px; padding: 0; border: 0; border-radius: 50%; background: none; box-shadow: inset 0 0 0 1.6px var(--fg-4); color: transparent; transition: background-color .2s, box-shadow .2s, transform .4s var(--spring); }
+.kit-check:active { transform: scale(.85); }
+.kit-check .ico { width: 12px; height: 12px; stroke-width: 3; }
+.kit-check[aria-checked="true"] { background: var(--c, var(--accent)); box-shadow: none; color: #fff; }
+
+/* ---------- Flächen, Listen ---------- */
+.kit-card { padding: 12px 14px; border-radius: 14px; background: var(--raise); }
+.kit-list { display: grid; align-content: start; gap: 1px; }
+.kit-row { display: flex; align-items: center; gap: 10px; min-width: 0; padding: 7px 10px; border: 0; border-radius: 10px; background: none; text-align: left; font-size: 13px; }
+button.kit-row:hover, .kit-row.is-hover:hover { background: var(--raise); }
+.kit-row.is-on { background: var(--accent); color: #fff; }
+.kit-row > .grow { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.kit-chip { display: inline-flex; align-items: center; gap: 5px; flex: none; padding: 3px 10px; border: 0; border-radius: 99px; background: var(--raise); font-size: 12px; font-weight: 600; color: var(--fg-2); white-space: nowrap; }
+button.kit-chip:hover { background: var(--raise-2); }
+.kit-chip.is-on { background: var(--accent); color: #fff; }
+.kit-empty { display: grid; place-content: center; justify-items: center; gap: 8px; flex: 1; min-height: 0; padding: 30px; text-align: center; color: var(--fg-3); }
+.kit-empty .ico { width: 44px; height: 44px; stroke-width: 1.2; }
+.kit-empty b { font-size: 14px; color: var(--fg-2); }
+.kit-empty span { max-width: 30em; font-size: 12.5px; }
+.kit-progress { height: 6px; border-radius: 9px; background: var(--well); overflow: hidden; }
+.kit-progress i { display: block; width: calc(var(--p, 0) * 100%); height: 100%; border-radius: inherit; background: var(--accent); transition: width .3s var(--ease-out); }
+
+/* ---------- Dialoge: ein Blatt gleitet aus der Titelleiste ---------- */
+.kit-sheet-wrap {
+  position: absolute; inset: 42px 0 0; z-index: 40;
+  display: grid; justify-items: center; align-content: start;
+  border-radius: 0 0 var(--r) var(--r); overflow: hidden;
+  background: rgba(0, 0, 14, .32);
+  animation: kit-dim .22s both;
+}
+@keyframes kit-dim { from { background-color: transparent; } }
+.kit-sheet {
+  display: flex; flex-direction: column; gap: 12px;
+  width: min(420px, calc(100% - 24px)); max-height: calc(100% - 14px); padding: 18px;
+  border-radius: 0 0 16px 16px;
+  background: color-mix(in srgb, var(--solid) 94%, transparent);
+  -webkit-backdrop-filter: blur(24px); backdrop-filter: blur(24px);
+  box-shadow: 0 24px 60px -18px rgba(0, 0, 14, .7), inset 0 0 0 .5px var(--glass-edge);
+  animation: kit-sheet-in .36s var(--ease-out) both;
+}
+.kit-sheet.wide { width: min(560px, calc(100% - 24px)); }
+@keyframes kit-sheet-in { from { transform: translateY(-102%); } }
+.kit-sheet-title { font-size: 15px; font-weight: 700; }
+.kit-sheet-text { font-size: 13px; color: var(--fg-2); text-wrap: pretty; }
+.kit-sheet-btns { display: flex; justify-content: flex-end; gap: 8px; flex: none; flex-wrap: wrap; margin-top: 2px; }
+.kit-sheet .kit-field { width: 100%; }
+
+/* Dateidialog */
+.kit-fd { display: grid; grid-template-rows: auto minmax(0, 1fr); gap: 8px; flex: 0 1 300px; min-height: 96px; }
+.kit-fd-path { display: flex; align-items: center; gap: 2px; min-width: 0; overflow: hidden; }
+.kit-fd-path button { flex: none; padding: 3px 7px; border: 0; border-radius: 6px; background: none; font-size: 12.5px; font-weight: 600; color: var(--fg-2); }
+.kit-fd-path button:hover { background: var(--raise); }
+.kit-fd-path button:last-child { color: var(--fg); }
+.kit-fd-path i { display: grid; color: var(--fg-4); }
+.kit-fd-path .ico { width: 11px; height: 11px; }
+.kit-fd-list { display: grid; align-content: start; gap: 1px; min-height: 0; padding: 5px; border-radius: 11px; background: var(--well); box-shadow: inset 0 0 0 1px var(--line); }
+.kit-fd-list .kit-row { padding: 5px 8px; }
+.kit-fd-list .kit-row.is-off { opacity: .4; }
+.kit-fd-list .ficon { width: 22px; height: 22px; }
+.kit-fd-list .ficon svg { filter: none; }
+.kit-fd-name { display: flex; align-items: center; gap: 10px; }
+.kit-fd-name span { flex: none; font-size: 12.5px; font-weight: 600; color: var(--fg-3); }
+
+/* Kurzer Hinweis am unteren Fensterrand */
+.kit-toast {
+  position: absolute; left: 50%; bottom: 16px; z-index: 45;
+  max-width: calc(100% - 32px); padding: 7px 14px; border-radius: 99px;
+  background: color-mix(in srgb, var(--solid) 92%, transparent); color: var(--fg);
+  -webkit-backdrop-filter: blur(16px); backdrop-filter: blur(16px);
+  box-shadow: 0 10px 30px -8px rgba(0, 0, 14, .6), inset 0 0 0 .5px var(--glass-edge);
+  font-size: 12.5px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  translate: -50% 0; pointer-events: none;
+  animation: kit-toast-in .45s var(--spring-soft) both;
+}
+.kit-toast.out { opacity: 0; translate: -50% 8px; transition: opacity .3s, translate .3s; }
+@keyframes kit-toast-in { from { opacity: 0; translate: -50% 14px; scale: .9; } }

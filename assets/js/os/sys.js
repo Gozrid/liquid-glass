@@ -25,6 +25,8 @@ export const DEFAULTS = {
   brightness: 1,
   user: 'Gast',
   firstRun: true,
+  widgets: ['system:clock', 'system:calendar'],
+  wallImage: '',
 };
 export const settings = { ...DEFAULTS, ...store.get(KEY, {}) };
 
@@ -85,6 +87,23 @@ export function set(key, value) {
 /** App-Register: id → Definition (siehe apps/*.js) */
 export const apps = new Map();
 
+/**
+ * Widget-Register: Schlüssel „app:widget“ → {key, app, id, name, size, mount(el) → aufräumen}.
+ * Größe 's' = 170 × 170 px, 'm' = 354 × 170 px. Der Schreibtisch zeigt, was in settings.widgets steht.
+ */
+export const widgets = {
+  defs: new Map(),
+  register(app, id, def) {
+    const key = `${app}:${id}`;
+    widgets.defs.set(key, { size: 's', ...def, key, app, id });
+    bus.emit('widgets', key);
+  },
+  unregister(app) {
+    for (const [key, def] of widgets.defs) if (def.app === app) widgets.defs.delete(key);
+    bus.emit('widgets', app);
+  },
+};
+
 export function appIcon(app, cls = '') {
   const [c1, c2] = app.colors || ['#8e97b5', '#4a516e'];
   return h(`span.app-icon${cls ? `.${cls}` : ''}`, { style: { '--c1': c1, '--c2': c2 }, html: app.glyph || icon(app.icon) });
@@ -96,8 +115,22 @@ export const isImage = (path, mime = '') => mime.startsWith('image/') || IMAGE_E
 export const sys = {
   version: '5.2',
   settings, set, bus, apps,
+  widgets,
   wm: null,          // setzt main.js
   notify: () => {},  // setzt notify.js
+  /**
+   * „Läuft gerade“: Apps melden ihre Wiedergabe an, das System zeigt sie im Kontrollzentrum.
+   * info = {app, title, artist?, playing, toggle(), next?(), prev?()} oder null zum Abmelden.
+   */
+  nowPlaying: null,
+  media(info) {
+    sys.nowPlaying = info || null;
+    bus.emit('media', sys.nowPlaying);
+  },
+  /** Bild aus dem Dateisystem als Hintergrund setzen ('' = zurück zum gewählten Live-Hintergrund). */
+  setWallpaperImage(path) {
+    set('wallImage', path || '');
+  },
   open(id, args) { return sys.wm.open(id, args); },
   /** Datei oder Ordner mit der passenden App öffnen */
   openPath(path) {

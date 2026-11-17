@@ -6,7 +6,8 @@ import { initGlass, initSheen } from '../core/glassfx.js';
 import { hydrateIcons, LOGO } from '../core/icons.js';
 import { sfx } from '../core/audio.js';
 import { bus } from './bus.js';
-import { sys, settings, set, apps, applySettings, WALLPAPERS } from './sys.js';
+import { sys, settings, set, apps, widgets, applySettings, WALLPAPERS } from './sys.js';
+import { vfs } from './vfs.js';
 import { WM } from './wm.js';
 import { initNotify, closeMenu } from './ui.js';
 import { initMenubar, initDock, initLauncher } from './shell.js';
@@ -36,7 +37,11 @@ let stage = null;
 let wallDirty = 90;
 function applyWallpaper() {
   const w = WALLPAPERS[settings.wallpaper] || WALLPAPERS.aurora;
-  document.body.style.setProperty('--wall-css', w.css);
+  let img = '';
+  try { if (settings.wallImage && vfs.exists(settings.wallImage)) img = vfs.read(settings.wallImage); } catch { /* Bild fehlt */ }
+  if (!img.startsWith('data:image/')) img = '';
+  document.body.classList.toggle('has-wall-image', !!img);
+  document.body.style.setProperty('--wall-css', img ? `url("${img}") center / cover no-repeat #05060f` : w.css);
   if (!stage) return;
   stage.mode = w.mode;
   stage.dprCap = w.scale >= 1 ? 1.5 : 0.6;
@@ -52,6 +57,7 @@ try {
 }
 applyWallpaper();
 bus.on('setting:wallpaper', applyWallpaper);
+bus.on('setting:wallImage', applyWallpaper);
 bus.on('setting:theme', applyWallpaper);
 bus.on('setting:animate', () => { wallDirty = 30; });
 if (stage) {
@@ -60,6 +66,7 @@ if (stage) {
   addEventListener('pointermove', (e) => { px = (e.clientX / innerWidth) * 2 - 1; py = (e.clientY / innerHeight) * 2 - 1; }, { passive: true });
   addEventListener('resize', () => { wallDirty = 10; });
   ticker.add((dt) => {
+    if (document.body.classList.contains('has-wall-image')) return;
     const moving = settings.animate && !reducedMotion.matches;
     if (!moving && wallDirty <= 0) return;      // Standbild: nichts zu tun
     wallDirty--;
@@ -161,8 +168,31 @@ lock.addEventListener('click', unlock);
   boot.classList.add('out');
   await wait(620);
   boot.hidden = true;
-  if (new URLSearchParams(location.search).has('auto')) unlock();
+  const params = new URLSearchParams(location.search);
+  if (params.has('auto') || params.has('dev')) unlock();
+  if (/^[\w-]+$/.test(params.get('dev') || '')) devApp(params.get('dev'), params.get('path'));
 })();
+
+// Entwicklung: os.html?dev=<id> lädt store/apps/<id>.js, startet die App und zeigt ihre Widgets
+async function devApp(id, path) {
+  try {
+    const [{ CATALOG }, mod] = await Promise.all([import('./store/catalog.js'), import(`./store/apps/${id}.js`)]);
+    const meta = CATALOG.find((e) => e.id === id) || { id, name: id, icon: 'code', colors: ['#8e97b5', '#4a516e'] };
+    const def = { ...meta, ...mod.default, id };
+    apps.set(id, def);
+    for (const w of meta.widgets || []) {
+      if (typeof def.widgets?.[w.id] === 'function') widgets.register(id, w.id, { name: w.name, size: w.size, mount: def.widgets[w.id] });
+    }
+    const keys = (meta.widgets || []).map((w) => `${id}:${w.id}`).filter((k) => widgets.defs.has(k));
+    if (keys.length) set('widgets', [...new Set([...keys, ...settings.widgets])]);
+    def.background?.();
+    bus.emit('wm');
+    sys.open(id, path ? { path } : {});
+  } catch (err) {
+    console.error(err);
+    sys.notify({ title: `App „${id}“ lädt nicht`, body: String(err?.message || err), icon: 'close', force: true });
+  }
+}
 
 // ==========================================================================
 // Tastenkürzel

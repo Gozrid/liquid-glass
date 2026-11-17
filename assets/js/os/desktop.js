@@ -1,8 +1,8 @@
 // desktop.js — Schreibtisch: Dateisymbole, Auswahlrahmen, Kontextmenü, Widgets
 
-import { $, $$, h, drag, coarse } from '../core/util.js';
+import { $, $$, h, coarse } from '../core/util.js';
 import { bus } from './bus.js';
-import { sys, settings, set, WALLPAPERS } from './sys.js';
+import { sys, settings, set, widgets, WALLPAPERS } from './sys.js';
 import { vfs, HOME } from './vfs.js';
 import { openMenu, fileIcon, fsops, renameInline } from './ui.js';
 
@@ -107,15 +107,13 @@ export function initDesktop() {
 }
 
 // ==========================================================================
-// Widgets: Uhr und Kalender
+// Widgets: der Schreibtisch zeigt, was in settings.widgets steht (Schlüssel „app:widget“)
 // ==========================================================================
-function initWidgets() {
-  const box = $('#widgets');
-
-  // Uhr
+function clockWidget(el) {
   const marks = Array.from({ length: 12 }, (_, i) => `<i style="--a:${i * 30}deg"></i>`).join('');
-  const clock = h('div.widget.w-clock.glass', { html: `<div class="dial">${marks}<b class="hh"></b><b class="mm"></b><b class="ss"></b><em></em></div><span class="w-city">Ortszeit</span>` });
-  const hands = { hh: clock.querySelector('.hh'), mm: clock.querySelector('.mm'), ss: clock.querySelector('.ss') };
+  el.classList.add('w-clock');
+  el.innerHTML = `<div class="dial">${marks}<b class="hh"></b><b class="mm"></b><b class="ss"></b><em></em></div><span class="w-city">Ortszeit</span>`;
+  const hands = { hh: el.querySelector('.hh'), mm: el.querySelector('.mm'), ss: el.querySelector('.ss') };
   const tick = () => {
     const d = new Date();
     const s = d.getSeconds(), m = d.getMinutes() + s / 60, hr = (d.getHours() % 12) + m / 60;
@@ -124,11 +122,13 @@ function initWidgets() {
     hands.ss.style.rotate = `${s * 6}deg`;
   };
   tick();
-  setInterval(tick, 1000);
+  const id = setInterval(tick, 1000);
+  return () => clearInterval(id);
+}
 
-  // Kalender
-  const cal = h('div.widget.w-cal.glass');
-  const paintCal = () => {
+function calendarWidget(el) {
+  el.classList.add('w-cal');
+  const paint = () => {
     const now = new Date();
     const y = now.getFullYear(), mo = now.getMonth();
     const first = (new Date(y, mo, 1).getDay() + 6) % 7;      // Montag = 0
@@ -136,19 +136,48 @@ function initWidgets() {
     const cells = [];
     for (let i = 0; i < first; i++) cells.push('<span></span>');
     for (let d = 1; d <= days; d++) cells.push(`<span${d === now.getDate() ? ' class="today"' : ''}>${d}</span>`);
-    cal.innerHTML = `<div class="cal-head"><b>${now.toLocaleDateString('de-DE', { month: 'long' })}</b><span>${y}</span></div>
+    el.innerHTML = `<div class="cal-head"><b>${now.toLocaleDateString('de-DE', { month: 'long' })}</b><span>${y}</span></div>
       <div class="cal-grid"><i>Mo</i><i>Di</i><i>Mi</i><i>Do</i><i>Fr</i><i>Sa</i><i>So</i>${cells.join('')}</div>`;
   };
-  paintCal();
-  setInterval(paintCal, 60000);
+  paint();
+  const id = setInterval(paint, 60000);
+  return () => clearInterval(id);
+}
 
-  box.append(clock, cal);
-  for (const w of [clock, cal]) {
-    let ox = 0, oy = 0, bx = 0, by = 0;
-    drag(w, {
-      start: () => { bx = ox; by = oy; w.classList.add('is-drag'); },
-      move: (e, c) => { ox = bx + c.dx; oy = by + c.dy; w.style.translate = `${ox}px ${oy}px`; },
-      end: () => w.classList.remove('is-drag'),
-    });
-  }
+function initWidgets() {
+  const box = $('#widgets');
+  const live = new Map();     // Schlüssel → {el, def, cleanup}
+  widgets.register('system', 'clock', { name: 'Uhr', size: 's', mount: clockWidget });
+  widgets.register('system', 'calendar', { name: 'Kalender', size: 's', mount: calendarWidget });
+
+  const drop = (key) => {
+    const w = live.get(key);
+    if (!w) return;
+    try { w.cleanup?.(); } catch (err) { console.error(err); }
+    w.el.remove();
+    live.delete(key);
+  };
+  const render = () => {
+    const keys = [...new Set(settings.widgets || [])];
+    for (const [key, w] of live) if (!keys.includes(key) || widgets.defs.get(key) !== w.def) drop(key);
+    for (const key of keys) {
+      const def = widgets.defs.get(key);
+      if (!def || live.has(key)) continue;
+      const el = h('div.widget.glass', { dataset: { key, size: def.size || 's' }, 'aria-label': def.name || key });
+      let cleanup = null;
+      try { cleanup = def.mount(el); } catch (err) { console.error(err); el.replaceChildren(h('span.widget-err', 'Widget nicht verfügbar')); }
+      live.set(key, { el, def, cleanup });
+    }
+    const order = keys.map((k) => live.get(k)?.el).filter(Boolean);
+    if (order.length !== box.children.length || order.some((el, i) => box.children[i] !== el)) box.replaceChildren(...order);
+  };
+  box.addEventListener('click', (e) => {
+    const el = e.target.closest('.widget');
+    if (!el || e.target.closest('button, input, select, textarea, a, [data-no-open]')) return;
+    const app = el.dataset.key.split(':')[0];
+    if (app !== 'system' && sys.apps.has(app)) sys.open(app);
+  });
+  bus.on('widgets', render);
+  bus.on('setting:widgets', render);
+  render();
 }
