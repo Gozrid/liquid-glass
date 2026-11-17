@@ -1,3 +1,105 @@
 // kreativ.js — Store-Katalog, Rubrik „kreativ“. Einträge: siehe README, Abschnitt „Eine App schreiben“.
 
-export default [];
+const ico = (d) => `<svg class="ico" viewBox="0 0 24 24" aria-hidden="true">${d}</svg>`;
+
+export default [
+  {
+    id: 'photos',
+    name: 'Fotos',
+    tagline: 'Deine Bilder ansehen und veredeln',
+    category: 'Kreativ',
+    version: '1.0',
+    colors: ['#ffb347', '#f0477e'],
+    // Blüte: sechs Blätter um eine Mitte
+    glyph: ico(`${[0, 60, 120, 180, 240, 300].map((a) => `<ellipse cx="12" cy="6.600" rx="2.500" ry="3.900" transform="rotate(${a} 12 12)"/>`).join('')}<circle cx="12" cy="12" r="1.500" fill="currentColor" stroke="none"/>`),
+    keywords: 'bilder galerie mediathek diashow bearbeiten filter album foto',
+    description: 'Fotos sammelt alle Bilder aus deinem Ordner „Bilder“ in einer Mediathek mit Alben und Favoriten. Im Betrachter blätterst, zoomst und startest du eine Diashow. Mit Reglern und Filtern gibst du jedem Bild den letzten Schliff – und machst es mit einem Klick zum Hintergrund.',
+    features: [
+      'Mediathek mit Alben, Favoriten und stufenloser Rastergröße',
+      'Betrachter mit Zoom, Infos und sanfter Diashow',
+      'Bearbeiten: fünf Regler, sieben Filter, Drehen und Spiegeln',
+      'Import vom Gerät (auch per Drag & Drop) und Export',
+      'Jedes Foto als Schreibtisch-Hintergrund',
+    ],
+    privacy: [],
+    accepts: ['png', 'jpg', 'jpeg', 'webp', 'gif'],
+    widgets: [{ id: 'pick', name: 'Foto', size: 's' }],
+  },
+  {
+    id: 'music',
+    name: 'Musik',
+    tagline: 'Acht Stücke, live komponiert',
+    category: 'Kreativ',
+    version: '1.0',
+    colors: ['#c06bff', '#5438e8'],
+    // Schallplatte mit Lichtreflex
+    glyph: ico('<circle cx="12" cy="12" r="8.600"/><circle cx="12" cy="12" r="2.500"/><path d="M6.900 10.300A5.400 5.400 0 0 1 10.300 6.900M17.100 13.700a5.400 5.400 0 0 1-3.400 3.400"/>'),
+    keywords: 'musik player hören ambient lofi synthwave chiptune generativ playlist',
+    description: 'Musik spielt acht eigene Stücke, die nicht aus Dateien kommen: Flächen, Bässe, Melodien und Schlagzeug entstehen beim Hören im Synthesizer deines Browsers. Fünf Stimmungen von Ambient bis Chiptune, mit Wiedergabeliste, Warteschlange und einem Visualizer, der zum Klang tanzt.',
+    features: [
+      'Acht generative Stücke in fünf Stimmungen',
+      'Zufall, Wiederholen, Warteschlange und eigene Wiedergabeliste',
+      'Live-Visualizer und gerechnete Cover',
+      'Spielt weiter, wenn das Fenster im Dock liegt',
+      'Widget mit Play/Pause für den Schreibtisch',
+    ],
+    privacy: [],
+    widgets: [{ id: 'now', name: 'Läuft gerade', size: 's' }],
+  },
+  {
+    id: 'camera',
+    name: 'Kamera',
+    tagline: 'Fotos mit Filtern und Selbstauslöser',
+    category: 'Kreativ',
+    version: '1.0',
+    colors: ['#5fd6c4', '#1c7fb4'],
+    glyph: ico('<path d="M3.500 9A2.500 2.500 0 0 1 6 6.500h1.800l1.400-2.200h5.600l1.400 2.200H18A2.500 2.500 0 0 1 20.500 9v7.500A2.500 2.500 0 0 1 18 19H6a2.500 2.500 0 0 1-2.500-2.500z"/><circle cx="12" cy="12.600" r="3.400"/><circle cx="17.300" cy="9.700" r=".9" fill="currentColor" stroke="none"/>'),
+    keywords: 'kamera foto selfie webcam filter selbstauslöser aufnahme',
+    description: 'Kamera zeigt das Live-Bild deiner Webcam und macht daraus Fotos. Acht Filter siehst du schon vor dem Auslösen als lebendige Miniaturen – das Foto sieht genau so aus wie die Vorschau. Mit Selbstauslöser und einem Viererstreifen wie aus dem Fotoautomaten.',
+    features: [
+      'Acht Live-Filter von Mono bis Thermo',
+      'Selbstauslöser mit 3 oder 10 Sekunden',
+      'Serienbild als Viererstreifen',
+      'Aufnahmen landen in Bilder › Kamera',
+    ],
+    privacy: ['Kamera – Bilder bleiben auf diesem Gerät'],
+  },
+  {
+    id: 'recorder',
+    name: 'Sprachmemos',
+    tagline: 'Gedanken aufnehmen und anhören',
+    category: 'Kreativ',
+    version: '1.0',
+    colors: ['#ff7a70', '#d81e4a'],
+    // Wellenform: fünf Ausschläge
+    glyph: ico('<path d="M4 10.500v3M8 7v10M12 3.500v17M16 7.500v9M20 10.500v3" stroke-width="2.200"/>'),
+    keywords: 'aufnahme mikrofon diktat audio memo stimme recorder ton',
+    description: 'Sprachmemos nimmt mit dem Mikrofon auf – mit Live-Wellenform, Pause und Fortsetzen. Jede Aufnahme zeigt ihre Wellenform zum Hineinspringen, lässt sich schneller oder langsamer anhören, umbenennen und als Datei exportieren.',
+    features: [
+      'Aufnahme mit mitlaufender Wellenform und Pause',
+      'Anhören mit Springen, ±15 Sekunden und Tempo',
+      'Umbenennen, Exportieren, Papierkorb',
+      'Memos liegen in Musik › Memos',
+    ],
+    privacy: ['Mikrofon – Aufnahmen bleiben auf diesem Gerät'],
+  },
+  {
+    id: 'beats',
+    name: 'Beats',
+    tagline: 'Rhythmen bauen, Schritt für Schritt',
+    category: 'Kreativ',
+    version: '1.0',
+    colors: ['#b8ec4d', '#2c9f45'],
+    // Raster aus Pads, einige leuchten
+    glyph: ico([0, 1, 2].map((r) => [0, 1, 2].map((c) => `<rect x="${4 + c * 5.750}" y="${4 + r * 5.750}" width="4.500" height="4.500" rx="1.300" fill="currentColor" stroke="none"${[0, 4, 5, 6].includes(r * 3 + c) ? '' : ' opacity=".42"'}/>`).join('')).join('')),
+    keywords: 'beat sequencer drum schlagzeug rhythmus groove bass synth musik machen',
+    description: 'Beats ist ein Step-Sequencer mit 16 Schritten und acht Spuren: Kick, Snare, Hi-Hats, Clap und Tom, dazu Bass und Lead mit Tonhöhe pro Schritt. Alle Klänge entstehen im Synthesizer deines Browsers und laufen taktgenau – mit Swing, vier Mustern und sechs Vorlagen zum Loslegen.',
+    features: [
+      '16 Schritte × 8 Spuren, Bass und Lead mit Tonhöhe',
+      'Tempo 60–180 BPM, Swing, Lautstärke, Stumm und Solo je Spur',
+      'Vier Muster A–D zum Umschalten und Kopieren',
+      'Sechs Vorlagen, Zufallsmuster und Widerrufen',
+    ],
+    privacy: [],
+  },
+];
