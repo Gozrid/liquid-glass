@@ -21,15 +21,17 @@ Entworfen und programmiert von Claude Fable 5.2 (Anthropic) in Claude Code.
 
 **Als App installierbar (PWA).** Menü mit dem Tropfen → „fableOS installieren …“ (oder App Store, Einstellungen, Installieren-Symbol des Browsers). Danach hat fableOS ein eigenes Fenster und Symbol, startet ohne Netz, öffnet Text- und Bilddateien deines Computers, bietet Kurzbefehle am App-Symbol und zeigt ungelesene Mitteilungen als Zähler. Ein Service Worker speichert alles für unterwegs und meldet neue Versionen unter *Einstellungen → Allgemein → Softwareupdate*.
 
-**App Store.** 20 Apps zum Laden – jede wird beim Klick auf „Laden“ wirklich heruntergeladen, läuft danach offline und lässt sich wieder entfernen. Dazu Updates, Datenschutz-Angaben pro App und **Web-Apps**: jede Adresse wird auf Wunsch zur App mit eigenem Symbol und Fenster.
+**App Store.** 21 Apps zum Laden – jede wird beim Klick auf „Laden“ wirklich heruntergeladen, läuft danach offline und lässt sich wieder entfernen. Dazu Updates, Datenschutz-Angaben pro App und **Web-Apps**: jede Adresse wird auf Wunsch zur App mit eigenem Symbol und Fenster.
 
 | Rubrik | Apps |
 | --- | --- |
 | Alltag | Kalender · Erinnerungen · Uhr (Weltuhr, Wecker, Stoppuhr, Timer) · Wetter · Karten |
 | Kreativ | Fotos · Musik (generativer Player) · Kamera · Sprachmemos · Beats · Pixel |
-| Spiele | Schach · Sudoku · Minenfeld · Lichtspur · Patience |
+| Spiele | Schach · Sudoku · Minenfeld · Lichtspur · Patience · Sperrzone (3D-Shooter) |
 | Werkzeuge | Tafel (Kanban) · Fokus · Farben |
 | Entwicklung | Code (Editor mit Ausführen in der Sandbox) |
+
+**Sperrzone** ist ein Shooter aus der Ich-Perspektive mit eigenem WebGL2-Renderer (Schatten der Sonne, erzeugte Texturen, Figuren aus Quadern): zwei Karten, sieben Waffen, Team-Deathmatch, Frei für alle und Herrschaft, Bots mit Wegesuche in drei Stufen, Laufbahn mit Rängen – und Mehrspieler für bis zu acht Spieler, die sich über Einladungscodes direkt von Gerät zu Gerät verbinden (WebRTC, kein Server).
 
 Fest eingebaut sind Dateien, Web, Notizen, Terminal, Rechner, Malen, Klang, Prisma (Spiel), Aktivität, Einstellungen und der App Store. Kalender, Fotos, Musik, Wetter und Uhr sind vorinstalliert.
 
@@ -118,7 +120,7 @@ Alle Pfade sind relativ, ein Push auf `main` genügt für eine neue Version. Ins
 
 ## Browser
 
-- Entwickelt in Chrome; fableOS samt allen 20 Store-Apps ist zusätzlich automatisiert in WebKit (der Engine von Safari) und Firefox durchgespielt. Die Lichtbrechung an den Rändern von Navigation und Dock nutzt eine Chromium-Funktion; andere Browser zeigen dort Unschärfe.
+- Entwickelt in Chrome; fableOS samt allen 21 Store-Apps ist zusätzlich automatisiert in WebKit (der Engine von Safari) und Firefox durchgespielt. Die Lichtbrechung an den Rändern von Navigation und Dock nutzt eine Chromium-Funktion; andere Browser zeigen dort Unschärfe.
 - Installieren: Chrome und Edge bieten es direkt an; in Safari über *Ablage → Zum Dock hinzufügen* (Mac) bzw. *Teilen → Zum Home-Bildschirm* (iPhone/iPad). Datei-Handler, Kurzbefehle und der Zähler am Symbol sind Chromium-Funktionen.
 - Die Glastropfen im Hero und im Labor brauchen WebGL2. Ohne WebGL2 erscheint ein statischer Hintergrund.
-- Externe Anfragen gibt es nur auf ausdrücklichen Wunsch: Wetter lädt Daten von open-meteo.com, Karten von openstreetmap.org (Ortssuche über nominatim.openstreetmap.org), „Im Web suchen“ öffnet DuckDuckGo in einem neuen Tab, und Web-Apps laden ihre jeweilige Adresse.
+- Externe Anfragen gibt es nur auf ausdrücklichen Wunsch: Wetter lädt Daten von open-meteo.com, Karten von openstreetmap.org (Ortssuche über nominatim.openstreetmap.org), „Im Web suchen“ öffnet DuckDuckGo in einem neuen Tab, Web-Apps laden ihre jeweilige Adresse, und Sperrzone fragt beim Eröffnen oder Beitreten einer Mehrspieler-Partie stun.l.google.com, um die Geräte zusammenzubringen (die Partie selbst läuft direkt zwischen den Geräten).

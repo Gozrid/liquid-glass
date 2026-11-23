@@ -68,4 +68,17 @@ export default [
     features: ['Ziehen per Drag & Drop, Doppelklick legt ab', 'Eine oder drei Karten vom Talon', 'Hinweise und unbegrenztes Rückgängig', 'Punkte, Zeit und Statistik', 'Karten passen sich der Fenstergröße an'],
     privacy: [],
   },
+  {
+    id: 'shooter',
+    name: 'Sperrzone',
+    tagline: 'Taktischer 3D-Shooter mit Bots und Mehrspieler',
+    category: 'Spiele',
+    version: '1.0',
+    colors: ['#9aa66a', '#2c3524'],
+    glyph: svg('<circle cx="12" cy="12" r="6.500"/><path d="M12 2.500v5M12 16.500v5M2.500 12h5M16.500 12h5"/><circle cx="12" cy="12" r="1.300" fill="currentColor" stroke="none"/>'),
+    keywords: 'sperrzone shooter ego 3d ballern schiessen schießen fps taktik bots mehrspieler multiplayer online deathmatch herrschaft',
+    description: 'Ein Shooter aus der Ich-Perspektive, der komplett im Browser entsteht: zwei Karten, sieben Waffen, drei Spielmodi und Gegner, die Wege suchen, Deckung nutzen und Granaten werfen. Spiele allein mit und gegen Bots oder lade Freunde ein – die Partie läuft direkt von Gerät zu Gerät, ohne Server. Abschüsse bringen Erfahrung, neue Ränge schalten Waffen frei. Braucht Maus und Tastatur.',
+    features: ['Team-Deathmatch, Frei für alle und Herrschaft', 'Karten „Frachthof“ und „Oase“ mit Innenräumen, Treppen und Dächern', 'Sieben Waffen mit Rückstoß, Kimme und Korn, Zielfernrohr', 'Bots in drei Schwierigkeitsstufen', 'Mehrspieler über Einladungscodes für bis zu acht Spieler', 'Radar, Abschussserien, Punktetafel, Laufbahn mit Rängen', 'Alles im Code erzeugt: Grafik, Karten und Klang'],
+    privacy: ['Mehrspieler: Verbindung direkt zwischen den Geräten (WebRTC)', 'Beim Eröffnen oder Beitreten hilft stun.l.google.com, die Geräte zu finden'],
+  },
 ];
