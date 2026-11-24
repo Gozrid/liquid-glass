@@ -3173,7 +3173,7 @@ rezept('zischen', {
   make(K, rnd, v) {
     const fk = vary(v, 3, rnd, 0.08), a = K.noise(K.buf(0.25), rnd, 'white');
     K.hp(a, { f: 1800 }); K.bp(a, { f: 2500 * fk, f2: 6000 * fk, q: 1.1 });
-    K.env(a, [[0, 0.15], [0.2, 1], [0.24, 0.6], [0.25, 0.001]]);
+    K.env(a, [[0, 0.15], [0.2, 1], [0.232, 0.6], [0.243, 0.001]]);          // endet vor dem Feldende: die letzten 5 ms bleiben still
     for (let i = 0; i < 6; i++) K.click(a, rnd, { at: 0.01 + rnd() * 0.2, dur: 0.001, gain: K.peak(a) * 0.3 });
     return K.norm(K.fade(a, { outT: 0.012 }), 1);
   },
