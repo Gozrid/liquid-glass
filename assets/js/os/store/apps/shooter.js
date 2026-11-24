@@ -2220,25 +2220,44 @@ for (const [name, seq] of Object.entries(SIGNALE)) {
 const BANK = new Map();
 const KF = forge();
 const KNORM = 0.9;
-/** Rechenzeit der Klangschmiede: Summe (ms), längste sichtbare Scheibe (ms), Zahl der Scheiben, fertig, Wanduhr von Beginn bis Ende (ms) */
-const KBAKE = { ms: 0, maxSlice: 0, slices: 0, done: false, wall: 0 };
-let bakeJob = null;
 /**
- * Eine Variante berechnen. Gleichanteil weg (nicht bei Schleifen), Spitze auf 0,9 – der Faktor lvl stellt beim Abspielen
+ * Rechenzeit der Klangschmiede: Summe (ms), längste sichtbare Scheibe (ms), längster einzelner Rechenschritt (ms), Zahl der Scheiben, fertig,
+ * Wanduhr von Beginn bis Ende (ms)
+ */
+const KBAKE = { ms: 0, maxSlice: 0, maxStep: 0, slices: 0, done: false, wall: 0 };
+let bakeJob = null;
+/** make() darf ein Generator sein (function*): Er gibt zwischen teuren Schichten mit yield ab, und das Backen verteilt ihn über mehrere Scheiben. */
+const isGen = (o) => !!o && typeof o.next === 'function' && !(o instanceof Float32Array);
+/**
+ * Fertig berechnete Variante ablegen: Gleichanteil weg (nicht bei Schleifen), Spitze auf 0,9 – der Faktor lvl stellt beim Abspielen
  * den Pegel wieder her, den make() geliefert hat. Laut wird ein Rezept also nur über gain.
  */
-function klangMake(name, v) {
-  const R = KLANG[name], out = R.make(KF, KF.rng(klangHash(name) + v), v), ch = out instanceof Float32Array ? [out] : out.ch;
-  if (!R.loop) for (const c of ch) KF.dc(c);
+function klangFinish(name, out) {
+  const ch = out instanceof Float32Array ? [out] : out.ch;
+  if (!KLANG[name].loop) for (const c of ch) KF.dc(c);
   let p = 0;
   for (const c of ch) p = Math.max(p, KF.peak(c));
   if (p > 0) for (const c of ch) for (let i = 0; i < c.length; i++) c[i] *= KNORM / p;
   return { data: ch, lvl: p / KNORM, ab: null };
 }
+const klangStart = (name, v) => KLANG[name].make(KF, KF.rng(klangHash(name) + v), v);
+/** Eine Variante am Stück berechnen (ein Generator läuft dabei ganz durch). */
+function klangMake(name, v) {
+  let out = klangStart(name, v);
+  if (isGen(out)) { let r; while (!(r = out.next()).done); out = r.value; }
+  return klangFinish(name, out);
+}
+const klangHas = (name, v) => !!BANK.get(name)?.[v];
+function klangPut(name, v, d) {
+  let list = BANK.get(name);
+  if (!list) BANK.set(name, (list = []));
+  if (!list[v]) list[v] = d;
+}
 /**
  * Berechnen in Scheiben (läuft ab App-Start): höchstens 8 ms je Scheibe, dann weiter per setTimeout(0); ist die Seite verdeckt, alles am Stück
  * (dort drosselt der Browser die Zeitgeber, und niemand sieht ein Ruckeln). Reihenfolge: Oberfläche, die eigenen Waffen (first), der Rest,
  * zuletzt die Raumantworten für 48 kHz. Schleifen (loop) gehören nicht dazu – Umgebung und Musik werden beim Laden der Karte berechnet.
+ * Ein Rechenschritt ist eine ganze Variante oder – bei Generatoren – das Stück bis zum nächsten yield.
  * onProgress(0 … 1) nach jeder Scheibe. Liefert ein Promise, das mit dem letzten Rezept erfüllt ist.
  */
 function klangBake(first = [], onProgress = null) {
@@ -2250,17 +2269,29 @@ function klangBake(first = [], onProgress = null) {
       for (let v = 0; v < KLANG[n].n; v++) todo.push([n, v]);
     }
     for (const z of ZONEN) todo.push([null, z]);
-    const job = (bakeJob = { todo, i: 0, cbs: [], t0: performance.now() });
+    const job = (bakeJob = { todo, i: 0, cbs: [], t0: performance.now(), gen: null });
+    /** Ein Rechenschritt; liefert seine Dauer in ms. */
+    const step = () => {
+      const a = performance.now(), [n, v] = todo[job.i];
+      if (job.gen) {
+        if (klangHas(n, v)) { job.gen = null; job.i++; }          // inzwischen auf Verlangen berechnet
+        else { const r = job.gen.next(); if (r.done) { klangPut(n, v, klangFinish(n, r.value)); job.gen = null; job.i++; } }
+      } else if (!n) { raumIR(KSR, v); job.i++; }
+      else if (klangHas(n, v)) job.i++;
+      else {
+        const out = klangStart(n, v);
+        if (isGen(out)) job.gen = out; else { klangPut(n, v, klangFinish(n, out)); job.i++; }
+      }
+      const dt = performance.now() - a;
+      KBAKE.ms += dt;
+      KBAKE.maxStep = Math.max(KBAKE.maxStep, dt);
+      return dt;
+    };
     job.promise = new Promise((resolve) => {
-      let est = 0;                                   // längstes Stück bisher: keins anfangen, das die Scheibe über 8 ms triebe
+      let est = 0;                                   // längster Schritt bisher: keinen anfangen, der die Scheibe über 8 ms triebe
       const slice = () => {
         const t0 = performance.now(), hidden = document.hidden;
-        for (let first = true; job.i < todo.length && (hidden || first || performance.now() - t0 + est < 8); first = false) {
-          const [n, v] = todo[job.i++], a = performance.now();
-          if (n) klangGet(n, v);
-          else { raumIR(KSR, v); KBAKE.ms += performance.now() - a; }
-          est = Math.max(est, Math.min(6, performance.now() - a));
-        }
+        for (let first = true; job.i < todo.length && (hidden || first || performance.now() - t0 + est < 8); first = false) est = Math.max(est, Math.min(6, step()));
         const dt = performance.now() - t0;
         KBAKE.slices++;
         if (!hidden) KBAKE.maxSlice = Math.max(KBAKE.maxSlice, dt);
@@ -2280,10 +2311,8 @@ function klangBake(first = [], onProgress = null) {
 }
 /** Variante holen, fehlt sie, sofort berechnen. */
 function klangGet(name, v) {
-  let list = BANK.get(name);
-  if (!list) BANK.set(name, (list = []));
-  if (!list[v]) { const t0 = performance.now(); list[v] = klangMake(name, v); KBAKE.ms += performance.now() - t0; }
-  return list[v];
+  if (!klangHas(name, v)) { const t0 = performance.now(); klangPut(name, v, klangMake(name, v)); KBAKE.ms += performance.now() - t0; }
+  return BANK.get(name)[v];
 }
 
 // --------------------------------------------------------------------------
@@ -2373,11 +2402,22 @@ function createSound(getPrefs) {
     sum.gain.value = shownVol = vol();
     const lim = ctx.createDynamicsCompressor();
     for (const k in LIMIT) lim[k].value = LIMIT[k];
-    const trim = ctx.createGain();
-    trim.gain.value = LIMIT_TRIM;
+    const trim = ctx.createGain(), dry = ctx.createGain(), outN = ctx.createGain();
     sum.connect(lim);
     lim.connect(trim);
-    trim.connect(a.out);
+    trim.connect(outN);
+    outN.connect(a.out);
+    // Ein frisch angelegter DynamicsCompressor regelt in seinen ersten rund 100 ms kräftig herunter (gemessen −11 dB für einen Klang, der
+    // gleich beim Anlegen startet). Die ersten 0,15 s läuft die Summe deshalb am Begrenzer vorbei, dann wird in 0,1 s übergeblendet.
+    const t0 = ctx.currentTime;
+    trim.gain.setValueAtTime(0, t0); trim.gain.setValueAtTime(0, t0 + 0.15); trim.gain.linearRampToValueAtTime(LIMIT_TRIM, t0 + 0.25);
+    dry.gain.setValueAtTime(1, t0); dry.gain.setValueAtTime(1, t0 + 0.15); dry.gain.linearRampToValueAtTime(0, t0 + 0.25);
+    const pre = ctx.createDelay(0.05);
+    pre.delayTime.value = 0.006;                     // so spät wie der Begrenzer (Vorausschau 6 ms), sonst löschen sich beide beim Überblenden teils aus
+    sum.connect(pre);
+    pre.connect(dry);
+    dry.connect(outN);
+    setTimeout(() => { try { sum.disconnect(pre); pre.disconnect(); dry.disconnect(); } catch { /* schon ab */ } }, 1000);
     for (const [b, db] of Object.entries(BUSSE)) { bus[b] = ctx.createGain(); bus[b].gain.value = 10 ** (db / 20); bus[b].connect(sum); }
     // Hall: je Zone ein ConvolverNode. Ortsgebundene Stimmen senden in die Zone der Quelle, alles andere über lsend in die Zone des Hörers
     // (lzone blendet beim Zonenwechsel über).
@@ -2396,7 +2436,7 @@ function createSound(getPrefs) {
       lzone[z].gain.value = z === shown ? 1 : 0;
       lsend.connect(lzone[z]); lzone[z].connect(hallIn[z]);
     }
-    S.tap = trim;
+    S.tap = outN;
   }
   /** Summe folgt prefs.volume (auch im Menü, etwa beim Schieben des Reglers): je Bild weich, vor einem neuen Klang sofort. */
   function level(soft) {
@@ -2472,7 +2512,8 @@ function createSound(getPrefs) {
 
   // ---------- Raumzonen ----------
   /**
-   * Zone an einer Stelle (y = Fußhöhe): ein Strahl nach oben (überdacht?), acht waagerechte in Augenhöhe (mittlere freie Weite w, höchstens 30).
+   * Zone an einer Stelle (y = Fußhöhe): ein Strahl nach oben (überdacht?), acht waagerechte in Augenhöhe (freie Weite w = Median, höchstens 30;
+   * der Median, weil sonst die zwei Strahlen längs einer Gasse das Mittel hochziehen).
    * Überdacht: w < 5 raum, sonst halle. Offen: w < 7 gasse, sonst hof. Je Meter-Zelle zwischengespeichert; RAY bleibt unberührt.
    */
   function zoneAt(x, y, z) {
@@ -2481,10 +2522,11 @@ function createSound(getPrefs) {
     let zn = zcache.get(key);
     if (zn) return zn;
     const t = RAY.t, i = RAY.i, ax = RAY.axis, roof = phys.raycast(x, y + 1.7, z, 0, 1, 0, 14) !== Infinity;
-    let w = 0;
-    for (let k = 0; k < 8; k++) { const r = phys.raycast(x, y + 1.6, z, Math.cos((k * Math.PI) / 4), 0, Math.sin((k * Math.PI) / 4), 30); w += r === Infinity ? 30 : r; }
+    const ws = [];
+    for (let k = 0; k < 8; k++) { const r = phys.raycast(x, y + 1.6, z, Math.cos((k * Math.PI) / 4), 0, Math.sin((k * Math.PI) / 4), 30); ws.push(r === Infinity ? 30 : r); }
     RAY.t = t; RAY.i = i; RAY.axis = ax;
-    w /= 8;
+    ws.sort((a, b) => a - b);
+    const w = (ws[3] + ws[4]) / 2;
     zn = roof ? (w < 5 ? 'raum' : 'halle') : w < 7 ? 'gasse' : 'hof';
     if (zcache.size > 4000) zcache.clear();
     zcache.set(key, zn);
@@ -6627,7 +6669,7 @@ function createApp(win) {
     get bakeMs() { return KBAKE.ms; },
     bake: () => ({ ...KBAKE }),
     /** Alles vergessen und neu berechnen (prüft das Ladebild): löscht die berechneten Varianten, die Raumantworten bleiben. */
-    reset() { BANK.clear(); bakeJob = null; Object.assign(KBAKE, { ms: 0, maxSlice: 0, slices: 0, done: false, wall: 0 }); S.bake(); },
+    reset() { BANK.clear(); bakeJob = null; Object.assign(KBAKE, { ms: 0, maxSlice: 0, maxStep: 0, slices: 0, done: false, wall: 0 }); S.bake(); },
     voices: () => S.voices(),
     play: (name, o) => !!S.play(name, o),
     stats: () => S.stats(),
