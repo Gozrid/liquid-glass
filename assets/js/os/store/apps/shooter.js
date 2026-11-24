@@ -5920,7 +5920,7 @@ function createApp(win) {
   menus.show('main');
   if (matchMedia('(hover: none) and (pointer: coarse)').matches) sys.notify({ title: 'Sperrzone', body: 'Zum Spielen brauchst du Maus und Tastatur – eine Steuerung für Touch-Geräte gibt es noch nicht.', icon: 'info', app: 'shooter' });
   ticker.add(frame);
-  stage._sz = { get M() { return M; }, get net() { return net; }, api, keys, press, start: startMatch };      // für Tests und zum Nachsehen in der Konsole
+  stage._sz = { get M() { return M; }, get net() { return net; }, api, keys, press, start: startMatch, snd: S };      // für Tests und zum Nachsehen in der Konsole
   // Prüfhaken: cam([x, y, z, yaw, pitch, fov] | null) setzt oder löst die feste Kamera, freeze(true) hält die Partie im Aufwärmen
   stage._sz.probe = {
     cam(pose) { if (M) M.fixedCam = pose ? [...pose] : null; },
