@@ -438,7 +438,8 @@ function unitCube() {
 // ==========================================================================
 // 4 · Renderer (WebGL2): Schattenkarte der Sonne, Welt, bewegliche Quader, Himmel, Effekte, Waffe in der Hand
 //     Bildkette (Vertrag V4): Schatten → Szene (HDR, Tiefe; auf „Hoch“ 4-fach abgetastet) → Auflösen → Durchsichtiges (fboFx,
-//     Tiefentest im Shader) → Belichtung → Glühen → Schluss (ACES, Farbstimmung, Vignette, Korn; sonst FXAA danach).
+//     Tiefentest im Shader) → Belichtung → SSAO → Sonnenstrahlen → Glühen → Schluss (SSAO, Strahlen, ACES, Farbstimmung, Vignette,
+//     Korn; sonst FXAA danach).
 // ==========================================================================
 const MAX_LIGHTS = 8;
 const ISTRIDE = 20;      // je Quader: Matrix 16 · Farbe 3 · Art 1
@@ -471,7 +472,11 @@ vec3 aces(vec3 c) { return (c * (2.51 * c + .03)) / (c * (2.43 * c + .59) + .14)
 // Himmel ohne Wolken: Verlauf vom Dunst am Horizont zum Zenit und Sonnenhof. Gemeinsam für FS_SKY und die Spiegelung in shade();
 // braucht die Uniforms uSunDir, uSunCol, uFogCol, uZenith.
 const GLSL_HIMMEL = `
-vec3 nebel(vec3 d) { return uFogCol; }
+// Dunst: zur Sonne hin um bis zu 25 % in Richtung Sonnenfarbe getönt (bei gleicher Helligkeit)
+vec3 nebel(vec3 d) {
+  const vec3 L = vec3(.2126, .7152, .0722);
+  return mix(uFogCol, uSunCol * (dot(uFogCol, L) / max(dot(uSunCol, L), 1e-3)), .25 * pow(max(dot(d, uSunDir), 0.), 4.));
+}
 vec3 himmel(vec3 d) {
   float up = max(d.y, 0.), sd = max(dot(d, uSunDir), 0.);
   return mix(nebel(d), uZenith, 1. - pow(1. - up, 3.5)) + uSunCol * (pow(sd, 420.) * 2.2 + pow(sd, 14.) * .14 + pow(sd, 3.) * .03);
@@ -559,7 +564,7 @@ vec3 shadeS(vec3 albedo, vec3 n, vec3 ng, vec3 wp, float spec, float rough, floa
   float offen = (sunLit(wp + ng * .1 + R * 1.2) + sunLit(wp + ng * .1 + R * 2.4) + sunLit(wp + ng * .1 + R * 3.6)) / 3.;
   col += himmel(R) * Fv * occ * (1. - rough) * (1. - rough) * mix(.1, 1., offen);
   col = mix(col, albedo * EMIS_K, emis);
-  col = mix(col, uFogCol, clamp(1. - exp(-dist * uFogDen), 0., 1.));
+  col = mix(col, nebel(-V), clamp(1. - exp(-dist * uFogDen), 0., 1.));
   return uLdr > .5 ? tonemap(col) : col;
 }
 // Ohne Detail-Texturen (Figuren, Waffen): Rauheit aus der Glanzstärke
@@ -844,6 +849,31 @@ void main() {
   }
   o = vec4(s / max(w, 1e-4), 0., 0., 1.);
 }`;
+// Sonnenstrahlen in Viertelauflösung: Maske aus Himmelspixeln (Tiefe 1) mal Helligkeit, dann 24 Proben zur Sonne hin mit Abklingen 0,96
+const FS_STRAHL_MASKE = `#version 300 es
+precision highp float;
+uniform sampler2D uQuelle;
+uniform highp sampler2D uTiefe;
+uniform vec2 uKnie;
+in vec2 vUV; out vec4 o;
+void main() {
+  ivec2 S = textureSize(uTiefe, 0);
+  if (texelFetch(uTiefe, min(ivec2(gl_FragCoord.xy) * 4 + 2, S - 1), 0).r < 1.) { o = vec4(0., 0., 0., 1.); return; }
+  vec3 c = texture(uQuelle, vUV).rgb;
+  o = vec4(c * smoothstep(uKnie.x, uKnie.y, dot(c, vec3(.2126, .7152, .0722))), 1.);
+}`;
+const FS_STRAHLEN = `#version 300 es
+precision highp float;
+uniform sampler2D uMaske;
+uniform vec2 uSonne;                // Sonne im Bild (0 … 1)
+in vec2 vUV; out vec4 o;
+void main() {
+  vec2 st = (uSonne - vUV) * (.85 / 24.), uv = vUV;
+  vec3 s = vec3(0.);
+  float w = 1.;
+  for (int i = 0; i < 24; i++) { s += texture(uMaske, uv).rgb * w; w *= .96; uv += st; }
+  o = vec4(s / 24. * (1. - smoothstep(.1, .9, length(vUV - uSonne))), 1.);      // zum Bildrand hin schwächer
+}`;
 // Korn (bewegt, im Dunkeln stärker) und Rasterung ±0,5/255 – ganz am Ende, bei FXAA erst nach der Kantenglättung
 const GLSL_KORN = `
 uniform float uKorn, uZeit;
@@ -859,9 +889,9 @@ vec3 korn(vec3 c) {
 // Bildwirkungen aus f.post nach der Farbstimmung.
 const FS_FINAL = `#version 300 es
 precision highp float;
-uniform sampler2D uFarbe, uGlow, uBel, uAo;
+uniform sampler2D uFarbe, uGlow, uBel, uAo, uStrahlen;
 uniform highp sampler2D uTiefe;
-uniform float uLdr, uGlowK, uSatt, uKontrast, uVig, uKornHier, uAoAn;
+uniform float uLdr, uGlowK, uSatt, uKontrast, uVig, uKornHier, uAoAn, uStrahlenK;
 uniform vec3 uTonS, uTonL;
 in vec2 vUV; out vec4 o;
 ${GLSL_ACES}
@@ -873,6 +903,7 @@ void main() {
     float d = texelFetch(uTiefe, ivec2(gl_FragCoord.xy), 0).r;
     if (d >= .1 && d < 1.) c *= mix(1., texture(uAo, vUV).r, .8 * (1. - smoothstep(.4, 1.5, dot(c * bel, vec3(.2126, .7152, .0722)))));
   }
+  if (uStrahlenK > 0.) c += texture(uStrahlen, vUV).rgb * uStrahlenK;     // Sonnenstrahlen (env.grade.rays, ausgeblendet ohne Sonne vor der Kamera)
   if (uLdr < .5) c = pow(clamp(aces(c * bel + g), 0., 1.), vec3(1. / 2.2));
   else c = min(c + g, 1.);
   float l = dot(c, vec3(.2126, .7152, .0722));
@@ -938,6 +969,7 @@ function createRenderer(canvas, { shadowSize = 2048, ldr: forceLdr = false } = {
     lum: program(VS_POST, FS_LUM), adapt: program(VS_POST, FS_ADAPT),
     glowPre: program(VS_POST, FS_GLOW_PRE), glowDown: program(VS_POST, FS_GLOW_DOWN), glowUp: program(VS_POST, FS_GLOW_UP),
     ssao: program(VS_POST, FS_SSAO), aoBlur: program(VS_POST, FS_AO_BLUR),
+    strahlMaske: program(VS_POST, FS_STRAHL_MASKE), strahlen: program(VS_POST, FS_STRAHLEN),
   };
 
   // ---------- Texturen ----------
@@ -1056,13 +1088,14 @@ function createRenderer(canvas, { shadowSize = 2048, ldr: forceLdr = false } = {
   let tier = { msaa: true };                     // gewünschte Merkmale der Qualitätsstufe (setTier)
   // szene: Ziel der Szene (bei Mehrfachabtastung: ms, danach Auflösen in auf); fx: nur farbe; ldr/ldrF: fertiges Bild vor FXAA
   // glow/glowF: Stufen des Glühens (Textur und Framebuffer je Stufe, Größe in glowW/glowH)
-  // ao/aoF, ao2/ao2F: SSAO in halber Auflösung (R8) und Zwischenbild des Weichzeichners
+  // ao/aoF, ao2/ao2F: SSAO in halber Auflösung (R8) und Zwischenbild des Weichzeichners; str/strF (Maske), str2/str2F: Sonnenstrahlen (Viertel)
   const T = { farbe: null, tiefe: null, szene: null, fx: null, msFarbe: null, msTiefe: null, ms: null, ldr: null, ldrF: null, glow: [], glowF: [],
-    lum: null, lumF: null, bel: [], belF: [], ao: null, aoF: null, ao2: null, ao2F: null };
+    lum: null, lumF: null, bel: [], belF: [], ao: null, aoF: null, ao2: null, ao2F: null, str: null, strF: null, str2: null, str2F: null };
   let belCur = 0, belReset = true, lastT = 0, frameNo = 0;
   const lastCam = [0, -1e9, 0];
   const glowW = [], glowH = [];
-  let aoW = 0, aoH = 0;
+  let aoW = 0, aoH = 0, strW = 0, strH = 0;
+  const sonne = [0, 0, 0];
   // Halbkugel für SSAO: 10 Richtungen (z > 0), zur Mitte hin dichter; die ersten 6 decken die Halbkugel schon ab (Stufe „Mittel“)
   const aoKern = new Float32Array(30);
   for (let i = 0, sd = 9; i < 10; i++) {
@@ -1147,6 +1180,12 @@ function createRenderer(canvas, { shadowSize = 2048, ldr: forceLdr = false } = {
       aoW = Math.ceil(w / 2); aoH = Math.ceil(h / 2);
       T.ao = texTarget(aoW, aoH, gl.R8); T.aoF = fboOf(T.ao, null);
       T.ao2 = texTarget(aoW, aoH, gl.R8); T.ao2F = fboOf(T.ao2, null);
+    }
+    // Sonnenstrahlen: Viertelauflösung (nur wenn die Stufe sie will)
+    if (tier.rays) {
+      strW = Math.ceil(w / 4); strH = Math.ceil(h / 4);
+      T.str = texTarget(strW, strH, fmt); T.strF = fboOf(T.str, null);
+      T.str2 = texTarget(strW, strH, fmt); T.str2F = fboOf(T.str2, null);
     }
     // Belichtung (nur mit Float-Zielen): 64×64 mit Mip-Kette, zwei 1×1 im Wechsel
     if (!ldr) {
@@ -1455,6 +1494,28 @@ function createRenderer(canvas, { shadowSize = 2048, ldr: forceLdr = false } = {
       post(P.aoBlur, T.aoF, aoW, aoH);
     }
 
+    // --- Sonnenstrahlen: nur wenn die Sonne vor der Kamera steht (Blick · Sonne ≥ 0,1, darüber weich eingeblendet) ---
+    let strK = 0;
+    if (tier.rays && T.str && env.grade?.rays) {
+      basis(cam.yaw, cam.pitch, cam.roll || 0);
+      const sd = env.sunDir, vor = B[6] * sd[0] + B[7] * sd[1] + B[8] * sd[2];
+      if (vor > 0.1 && project(cam.x + sd[0] * 400, cam.y + sd[1] * 400, cam.z + sd[2] * 400, sonne)) strK = env.grade.rays * sstep(0.1, 0.4, vor);
+    }
+    if (strK > 0) {
+      bindTex(2, T.farbe);
+      bindTex(3, T.tiefe);
+      gl.useProgram(P.strahlMaske.p);
+      gl.uniform1i(P.strahlMaske.u.uQuelle, 2);
+      gl.uniform1i(P.strahlMaske.u.uTiefe, 3);
+      gl.uniform2f(P.strahlMaske.u.uKnie, ldr ? 0.6 : 0.4, ldr ? 1 : 1.6);
+      post(P.strahlMaske, T.strF, strW, strH);
+      bindTex(2, T.str);
+      gl.useProgram(P.strahlen.p);
+      gl.uniform1i(P.strahlen.u.uMaske, 2);
+      gl.uniform2f(P.strahlen.u.uSonne, sonne[0], 1 - sonne[1]);
+      post(P.strahlen, T.str2F, strW, strH);
+    }
+
     // --- Glühen: Vorfilter, Stufen hinab, mit Zelt wieder hinauf ---
     const nG = T.glow.length;
     bindTex(2, T.farbe);
@@ -1499,6 +1560,9 @@ function createRenderer(canvas, { shadowSize = 2048, ldr: forceLdr = false } = {
     gl.uniform1i(P.final.u.uAo, 5);
     gl.uniform1i(P.final.u.uTiefe, 6);
     gl.uniform1f(P.final.u.uAoAn, aoOn ? 1 : 0);
+    if (strK > 0) bindTex(8, T.str2);
+    gl.uniform1i(P.final.u.uStrahlen, 8);
+    gl.uniform1f(P.final.u.uStrahlenK, strK);
     const gr = env.grade || GRADE_NEUTRAL;
     gl.uniform3fv(P.final.u.uTonS, gr.shadow);
     gl.uniform3fv(P.final.u.uTonL, gr.light);
@@ -1541,7 +1605,7 @@ function createRenderer(canvas, { shadowSize = 2048, ldr: forceLdr = false } = {
     gl, render, setWorld, project, resize,
     setShadowSize(size) { if (Math.min(size, maxShadow) !== shadowRes) allocShadow(size); },
     /** Merkmale der Qualitätsstufe (siehe TIERS); Zwischenbilder entstehen beim nächsten Bild neu, wenn sich etwas ändert. */
-    setTier(t) { if (!!t.msaa !== !!tier.msaa || t.glow !== tier.glow || !!t.ssao !== !!tier.ssao) tW = 0; tier = { ...t }; loadDetail(t.detail || TEX); },
+    setTier(t) { if (!!t.msaa !== !!tier.msaa || t.glow !== tier.glow || !!t.ssao !== !!tier.ssao || !!t.rays !== !!tier.rays) tW = 0; tier = { ...t }; loadDetail(t.detail || TEX); },
     /** Rückfall ohne Float-Ziele erzwingen (Prüfhaken); ohne Float-Unterstützung bleibt er immer an. */
     setLdr(on) { const v = !!on || !floatOk; if (v !== ldr) { ldr = v; tW = 0; } },
     stats() {
