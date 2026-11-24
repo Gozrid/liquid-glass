@@ -123,12 +123,18 @@ function mRotZ(o, a) {
 }
 
 // ==========================================================================
-// 2 · Texturen: jede Oberfläche wird einmal berechnet (256², kachelbar) und landet in einem Textur-Array
+// 2 · Texturen: jede Oberfläche wird einmal berechnet (256², kachelbar) und landet in einem Textur-Array.
+//     Dazu ein zweites Array mit Details (Normale, Rauheit, Vertiefung) aus Höhe und Rauheit, die jede Malfunktion mitliefert.
 // ==========================================================================
 const TEX = 256;
 const MAT = {};          // Name → Lage im Textur-Array
 const MAT_DEF = [];      // { name, scale: Meter je Wiederholung, fit: je Fläche einmal, hit: Einschlag-Art, paint }
 const defMat = (name, scale, hit, paint, fit = false) => { MAT[name] = MAT_DEF.length; MAT_DEF.push({ name, scale, hit, paint, fit }); };
+// Malfunktion paint(u, v, o, N): o[0..2] = Farbe, o[3] = Glanzstärke, o[4] = Höhe (0 … 1, Vorgabe 0,5), o[5] = Rauheit (Vorgabe 0,9).
+// Höhen in den Malfunktionen: hgt(Summe) bildet −1 … 1 auf 0 … 1 ab (−1 = tiefste Fuge, +1 = höchste Kante).
+const hgt = (x) => 0.5 + 0.5 * clamp(x, -1, 1);
+/** Normalen-Stärke je Material (Höhe → Normale im Detail-Array) */
+const MAT_BUMP = { plain: 0, concrete: 0.6, asphalt: 0.8, rib: 1.6, plate: 1, wood: 1, brick: 1.4, plaster: 0.4, sand: 0.7, tile: 1, roof: 0.6, hazard: 0.4, cloth: 0.5, gravel: 1.3, planks: 1 };
 
 /** Kachelbares Werte-Rauschen auf festen Gittern (ein Gitter je Lage, damit sich Oktaven nicht gleichen). */
 function noiseSet(seed) {
@@ -154,111 +160,183 @@ function noiseSet(seed) {
 const sstep = (a, b, x) => { const t = clamp((x - a) / (b - a), 0, 1); return t * t * (3 - 2 * t); };
 const gray = (o, c, s) => { o[0] = c; o[1] = c; o[2] = c; o[3] = s; };
 
-defMat('plain', 2, 'concrete', (u, v, o, N) => gray(o, 0.92 + 0.08 * N.fbm(u, v, 8, 8, 3), 0.1));
+defMat('plain', 2, 'concrete', (u, v, o, N) => {
+  const n = N.fbm(u, v, 8, 8, 3);
+  gray(o, 0.92 + 0.08 * n, 0.1);
+  o[5] = 0.9 + (n - 0.5) * 0.2;
+});
 defMat('concrete', 3, 'concrete', (u, v, o, N) => {
   const n = N.fbm(u, v, 4, 4, 5), f = N.at(4, u * 64, v * 64, 64, 64), st = N.fbm(u, v, 16, 2, 3), w = N.white();
   let c = 0.5 + (n - 0.5) * 0.3 + (f - 0.5) * 0.06 + (w - 0.5) * 0.05 - Math.max(0, st - 0.56) * 0.4;
-  if (w > 0.985) c -= 0.1;
-  if (Math.min(u, 1 - u, v, 1 - v) < 0.006) c *= 0.7;
+  let h = (n - 0.5) * 0.6 + (f - 0.5) * 0.3;
+  if (w > 0.985) { c -= 0.1; h -= 0.6; }                                    // Poren
+  if (Math.min(u, 1 - u, v, 1 - v) < 0.006) { c *= 0.7; h = -1; }           // Plattenfugen
   o[0] = c; o[1] = c * 0.99; o[2] = c * 0.96; o[3] = 0.08;
+  o[4] = hgt(h); o[5] = 0.88 + (n - 0.5) * 0.2;
 });
 defMat('asphalt', 4, 'concrete', (u, v, o, N) => {
   const n = N.fbm(u, v, 4, 4, 4), f = N.at(4, u * 64, v * 64, 64, 64), w = N.white();
   let c = 0.17 + (n - 0.5) * 0.1 + (f - 0.5) * 0.05 + (w - 0.5) * 0.08;
+  let h = (f - 0.5) * 0.5 + (w - 0.5) * 0.12;                               // Korn
   if (w > 0.982) c += 0.13;
-  if (Math.abs(N.fbm(u, v, 3, 3, 4) - 0.5) < 0.0045) c *= 0.5;
+  if (Math.abs(N.fbm(u, v, 3, 3, 4) - 0.5) < 0.0045) { c *= 0.5; h = -1; }   // Risse
   o[0] = c; o[1] = c; o[2] = c * 1.04; o[3] = 0.1 + 0.3 * n;
+  o[4] = hgt(h); o[5] = 0.82 + (n - 0.5) * 0.2;
 });
 defMat('rib', 2.44, 'metal', (u, v, o, N) => {          // Wellblech eines Containers: senkrechte Rippen
-  const p = (u * 8) % 1, w = sstep(0.1, 0.25, p) - sstep(0.6, 0.75, p);
+  const p = (u * 8) % 1, w = sstep(0.1, 0.25, p) - sstep(0.6, 0.75, p), n = N.fbm(u, v, 4, 4, 4);
   let c = 0.74 + 0.18 * w + 0.1 * sstep(0.1, 0.18, p) * (1 - sstep(0.18, 0.26, p)) - 0.15 * sstep(0.58, 0.66, p) * (1 - sstep(0.66, 0.76, p));
-  c *= 0.94 + 0.2 * (N.fbm(u, v, 4, 4, 4) - 0.5) - Math.max(0, N.fbm(u, v, 16, 2, 3) - 0.56) * 0.5;
+  c *= 0.94 + 0.2 * (n - 0.5) - Math.max(0, N.fbm(u, v, 16, 2, 3) - 0.56) * 0.5;
   if (N.fbm(u, v, 8, 8, 3) > 0.72) c *= 0.9;
   gray(o, c, 0.35);
+  o[4] = w; o[5] = 0.5 + (n - 0.5) * 0.2;                                   // Rippenprofil
 });
 defMat('plate', 2, 'metal', (u, v, o, N) => {
   const n = N.fbm(u, v, 4, 4, 4), eu = Math.min(u, 1 - u), ev = Math.min(v, 1 - v);
   let c = 0.66 + (n - 0.5) * 0.16 + (N.at(4, u * 8, v * 64, 8, 64) > 0.86 ? 0.05 : 0);
-  if (Math.min(eu, ev) < 0.008) c *= 0.6;
-  if ((eu > 0.025 && eu < 0.05 && Math.abs(((v * 8) % 1) - 0.5) < 0.1) || (ev > 0.025 && ev < 0.05 && Math.abs(((u * 8) % 1) - 0.5) < 0.1)) c *= 0.7;
+  let h = (n - 0.5) * 0.2;
+  if (Math.min(eu, ev) < 0.008) { c *= 0.6; h = -1; }                       // Kanten
+  const ru = Math.abs(((v * 8) % 1) - 0.5), rv = Math.abs(((u * 8) % 1) - 0.5);
+  if ((eu > 0.025 && eu < 0.05 && ru < 0.1) || (ev > 0.025 && ev < 0.05 && rv < 0.1)) {
+    c *= 0.7;
+    const a = eu > 0.025 && eu < 0.05 && ru < 0.1 ? [(eu - 0.0375) / 0.0125, ru / 0.1] : [(ev - 0.0375) / 0.0125, rv / 0.1];
+    h = Math.max(h, Math.sqrt(Math.max(0, 1 - a[0] * a[0] - a[1] * a[1])) * 2 - 1);       // Nieten als Kuppen
+  }
   gray(o, c, 0.5);
+  o[4] = hgt(h); o[5] = 0.4 + (n - 0.5) * 0.2;
 });
 defMat('wood', 1, 'wood', (u, v, o, N) => {             // Kistenseite: Rahmen, Bretter, Diagonalstrebe
   const e = Math.min(u, 1 - u, v, 1 - v), frame = e < 0.12, diag = !frame && Math.abs(u - v) < 0.07;
   const upright = frame ? Math.min(u, 1 - u) < Math.min(v, 1 - v) : diag;
   const g = upright ? N.fbm(u, v, 32, 2, 3) : N.fbm(u, v, 2, 32, 3);
-  let c = 0.72 + 0.5 * (g - 0.5) * 2 * 0.5;
-  if (frame) c *= 1.1;
-  else if (diag) c *= 1.04;
+  let c = 0.72 + 0.5 * (g - 0.5) * 2 * 0.5, h = (g - 0.5) * 2 * 0.2;      // Maserung
+  if (frame) { c *= 1.1; h += 0.5; }                                         // Rahmen
+  else if (diag) { c *= 1.04; h += 0.5; }
   else {
-    if (((v * 5) % 1) < 0.045) c *= 0.5;
+    if (((v * 5) % 1) < 0.045) { c *= 0.5; h = -1; }                        // Brettfugen
     if (e < 0.14 || Math.abs(Math.abs(u - v) - 0.078) < 0.01) c *= 0.62;
   }
   o[0] = 0.66 * c; o[1] = 0.48 * c; o[2] = 0.29 * c; o[3] = 0.04;
+  o[4] = hgt(h); o[5] = 0.75 + (g - 0.5) * 0.2;
 }, true);
 defMat('brick', 2, 'concrete', (u, v, o, N) => {
   const row = Math.floor(v * 8), uu = u * 4 + (row % 2) * 0.5, bx = uu % 1, by = (v * 8) % 1;
   const n = N.fbm(u, v, 8, 8, 3);
-  if (bx < 0.05 || by < 0.11) { const c = 0.56 + (n - 0.5) * 0.2; o[0] = c; o[1] = c * 0.97; o[2] = c * 0.92; o[3] = 0.02; return; }
+  o[5] = 0.85 + (n - 0.5) * 0.2;
+  if (bx < 0.05 || by < 0.11) { const c = 0.56 + (n - 0.5) * 0.2; o[0] = c; o[1] = c * 0.97; o[2] = c * 0.92; o[3] = 0.02; o[4] = 0; return; }   // Mörtel
   const t = N.at(5, (Math.floor(uu) % 4) + 0.5, row + 0.5, 4, 8), c = 0.72 + 0.5 * (t - 0.5) + (n - 0.5) * 0.25;
   o[0] = 0.58 * c; o[1] = 0.3 * c; o[2] = 0.23 * c; o[3] = 0.05;
+  o[4] = hgt(0.4 + (n - 0.5) * 2 * 0.2);                                    // Stein mit Rauschen
 });
 defMat('plaster', 3, 'concrete', (u, v, o, N) => {
   const n = N.fbm(u, v, 3, 3, 5), f = N.at(4, u * 64, v * 64, 64, 64);
-  let c = 0.8 + (n - 0.5) * 0.24 + (f - 0.5) * 0.05;
-  if (Math.abs(N.fbm(u, v, 5, 5, 3) - 0.5) < 0.0028) c *= 0.9;
+  let c = 0.8 + (n - 0.5) * 0.24 + (f - 0.5) * 0.05, h = (n - 0.5) * 2 * 0.3 + (f - 0.5) * 0.2;
+  if (Math.abs(N.fbm(u, v, 5, 5, 3) - 0.5) < 0.0028) { c *= 0.9; h -= 0.6; }   // Riss
   o[0] = c; o[1] = c * 0.97; o[2] = c * 0.92; o[3] = 0.03;
+  o[4] = hgt(h); o[5] = 0.92 + (n - 0.5) * 0.2;
 });
 defMat('sand', 4, 'sand', (u, v, o, N) => {
-  const n = N.fbm(u, v, 4, 4, 4), f = N.at(4, u * 64, v * 64, 64, 64);
-  const c = 0.8 + (n - 0.5) * 0.22 + Math.sin(TAU * (v * 12 + N.fbm(u, v, 2, 2, 3) * 2)) * 0.022 + (f - 0.5) * 0.07;
+  const n = N.fbm(u, v, 4, 4, 4), f = N.at(4, u * 64, v * 64, 64, 64), rip = Math.sin(TAU * (v * 12 + N.fbm(u, v, 2, 2, 3) * 2));
+  const c = 0.8 + (n - 0.5) * 0.22 + rip * 0.022 + (f - 0.5) * 0.07;
   o[0] = c; o[1] = c * 0.86; o[2] = c * 0.63; o[3] = 0.02;
+  o[4] = hgt(rip * 0.5 + (n - 0.5) * 0.6 + (f - 0.5) * 0.3); o[5] = 0.95 + (n - 0.5) * 0.2;   // Rippel und Rauschen
 });
 defMat('tile', 2.4, 'concrete', (u, v, o, N) => {
   const tu = (u * 4) % 1, tv = (v * 4) % 1, n = N.fbm(u, v, 8, 8, 3);
-  let c = ((Math.floor(u * 4) + Math.floor(v * 4)) % 2 ? 0.56 : 0.47) + (n - 0.5) * 0.12;
-  if (tu < 0.03 || tv < 0.03) c = 0.27;
+  let c = ((Math.floor(u * 4) + Math.floor(v * 4)) % 2 ? 0.56 : 0.47) + (n - 0.5) * 0.12, h = (n - 0.5) * 0.1;
+  if (tu < 0.03 || tv < 0.03) { c = 0.27; h = -1; }                         // Fugen
   gray(o, c, 0.35);
+  o[4] = hgt(h); o[5] = 0.25 + (n - 0.5) * 0.2;
 });
 defMat('roof', 4, 'concrete', (u, v, o, N) => {
-  let c = 0.2 + (N.fbm(u, v, 6, 6, 4) - 0.5) * 0.12;
-  if (((v * 4) % 1) < 0.02) c *= 0.6;
+  const n = N.fbm(u, v, 6, 6, 4);
+  let c = 0.2 + (n - 0.5) * 0.12, h = (n - 0.5) * 2 * 0.2;
+  if (((v * 4) % 1) < 0.02) { c *= 0.6; h = -1; }                           // Nähte
   o[0] = c; o[1] = c; o[2] = c * 1.06; o[3] = 0.15;
+  o[4] = hgt(h); o[5] = 0.7 + (n - 0.5) * 0.2;
 });
 defMat('hazard', 1, 'metal', (u, v, o, N) => {
   const wear = N.fbm(u, v, 6, 6, 4), y = ((u + v) * 4) % 1 < 0.5;
   const k = wear > 0.62 ? 0.75 : 1;
   o[0] = (y ? 0.95 : 0.09) * k; o[1] = (y ? 0.74 : 0.09) * k; o[2] = (y ? 0.1 : 0.09) * k; o[3] = 0.2;
+  o[4] = hgt(wear > 0.62 ? -0.4 : 0); o[5] = 0.5 + (wear - 0.5) * 0.2;      // Abplatzer
 });
-defMat('cloth', 1.5, 'cloth', (u, v, o, N) => gray(o, (((u * 4) % 1) < 0.5 ? 1 : 0.7) * (0.9 + 0.1 * N.at(4, u * 64, v * 64, 64, 64)), 0.02));
+defMat('cloth', 1.5, 'cloth', (u, v, o, N) => {
+  const f = N.at(4, u * 64, v * 64, 64, 64), band = ((u * 4) % 1) < 0.5;
+  gray(o, (band ? 1 : 0.7) * (0.9 + 0.1 * f), 0.02);
+  o[4] = hgt((band ? 0.2 : -0.2) + 0.5 * Math.sin(TAU * u * 32) * Math.sin(TAU * v * 32)); o[5] = 0.95 + (f - 0.5) * 0.2;   // Gewebestreifen
+});
 defMat('gravel', 3, 'sand', (u, v, o, N) => {
   const n = N.fbm(u, v, 8, 8, 4), p = N.at(4, u * 48, v * 48, 48, 48), w = N.white();
   const c = 0.42 + (n - 0.5) * 0.26 + (p - 0.5) * 0.16 + (w - 0.5) * 0.12 + (w > 0.97 ? 0.12 : 0);
   o[0] = c * 1.02; o[1] = c * 0.97; o[2] = c * 0.9; o[3] = 0.04;
+  o[4] = hgt((p - 0.5) * 2.2); o[5] = 0.9 + (n - 0.5) * 0.2;                // Kiesel
 });
 defMat('planks', 2, 'wood', (u, v, o, N) => {
   const row = Math.floor(v * 6), g = N.fbm(u, v, 2, 48, 3), t = N.at(5, 0.5, row + 0.5, 1, 6);
-  let c = (0.72 + 0.5 * (g - 0.5)) * (0.85 + 0.3 * t);
-  if (((v * 6) % 1) < 0.04 || ((u * 2 + row * 0.37) % 1) < 0.008) c *= 0.5;
+  let c = (0.72 + 0.5 * (g - 0.5)) * (0.85 + 0.3 * t), h = (g - 0.5) * 2 * 0.25;   // Maserung
+  if (((v * 6) % 1) < 0.04 || ((u * 2 + row * 0.37) % 1) < 0.008) { c *= 0.5; h = -1; }   // Fugen
   o[0] = 0.52 * c; o[1] = 0.37 * c; o[2] = 0.23 * c; o[3] = 0.06;
+  o[4] = hgt(h); o[5] = 0.78 + (g - 0.5) * 0.2;
 });
 
+/**
+ * Malt alle Lagen in der Kantenlänge size. Jede Malfunktion läuft je Texel genau einmal (sie zieht fortlaufende Zufallszahlen):
+ * Farbe (nur wenn color) und zugleich Höhe und Rauheit in Float32Array.
+ */
+function paintLayers(size, color) {
+  const N = noiseSet(20261), o = [0, 0, 0, 0, 0.5, 0.9];
+  const out = { color: [], height: [], rough: [] };
+  for (const def of MAT_DEF) {
+    const px = color ? new Uint8Array(size * size * 4) : null, hh = new Float32Array(size * size), rr = new Float32Array(size * size);
+    for (let y = 0, i = 0, j = 0; y < size; y++) {
+      for (let x = 0; x < size; x++, i += 4, j++) {
+        o[4] = 0.5; o[5] = 0.9;
+        def.paint((x + 0.5) / size, (y + 0.5) / size, o, N);
+        if (px) { px[i] = clamp(o[0], 0, 1) * 255; px[i + 1] = clamp(o[1], 0, 1) * 255; px[i + 2] = clamp(o[2], 0, 1) * 255; px[i + 3] = clamp(o[3], 0, 1) * 255; }
+        hh[j] = clamp(o[4], 0, 1); rr[j] = clamp(o[5], 0, 1);
+      }
+    }
+    out.color.push(px); out.height.push(hh); out.rough.push(rr);
+  }
+  return out;
+}
 let texCache = null;
-/** Berechnet alle Oberflächen (einmal je Sitzung). */
+const detailCache = {};
+/** Berechnet alle Oberflächen (einmal je Sitzung): { color: RGBA je Lage, height, rough } in 256². */
 function paintTextures() {
-  if (texCache) return texCache;
-  const N = noiseSet(20261), o = [0, 0, 0, 0];
-  texCache = MAT_DEF.map((def) => {
-    const px = new Uint8Array(TEX * TEX * 4);
-    for (let y = 0, i = 0; y < TEX; y++) {
-      for (let x = 0; x < TEX; x++, i += 4) {
-        def.paint((x + 0.5) / TEX, (y + 0.5) / TEX, o, N);
-        px[i] = clamp(o[0], 0, 1) * 255; px[i + 1] = clamp(o[1], 0, 1) * 255; px[i + 2] = clamp(o[2], 0, 1) * 255; px[i + 3] = clamp(o[3], 0, 1) * 255;
+  if (!texCache) texCache = paintLayers(TEX, true);
+  return texCache;
+}
+/**
+ * Detail-Array (RGBA8 ohne sRGB) je Lage: R, G = Normale x, y (·0,5 + 0,5), B = Rauheit, A = Vertiefung (0,5 + (h − h_weich)·4,
+ * h_weich = Mittel über 5×5). Die Normale entsteht aus zentralen Differenzen der Höhe mit Umlauf an den Rändern (die Kachel bleibt nahtlos).
+ * size 256 nutzt die Höhen aus dem Farbdurchlauf; 512 malt die Lagen noch einmal (eigene Zufallsfolge, die Farbe bleibt unberührt).
+ */
+function detailTextures(size) {
+  if (detailCache[size]) return detailCache[size];
+  const src = size === TEX ? paintTextures() : paintLayers(size, false);
+  const k0 = (size / 256) * 4, S = size, m = S - 1;
+  detailCache[size] = MAT_DEF.map((def, l) => {
+    const H = src.height[l], R = src.rough[l], k = k0 * MAT_BUMP[def.name], px = new Uint8Array(S * S * 4);
+    const row = new Float32Array(S * S), soft = new Float32Array(S * S);
+    for (let y = 0; y < S; y++) for (let x = 0; x < S; x++) {             // 5×5-Mittel, getrennt nach Zeilen und Spalten
+      let a = 0; for (let d = -2; d <= 2; d++) a += H[y * S + ((x + d) & m)]; row[y * S + x] = a / 5;
+    }
+    for (let y = 0; y < S; y++) for (let x = 0; x < S; x++) {
+      let a = 0; for (let d = -2; d <= 2; d++) a += row[((y + d) & m) * S + x]; soft[y * S + x] = a / 5;
+    }
+    for (let y = 0, i = 0, j = 0; y < S; y++) {
+      for (let x = 0; x < S; x++, i += 4, j++) {
+        const dx = (H[y * S + ((x + 1) & m)] - H[y * S + ((x - 1) & m)]) * 0.5 * k, dy = (H[((y + 1) & m) * S + x] - H[((y - 1) & m) * S + x]) * 0.5 * k;
+        const il = 1 / Math.hypot(dx, dy, 1);
+        px[i] = (-dx * il * 0.5 + 0.5) * 255; px[i + 1] = (-dy * il * 0.5 + 0.5) * 255;
+        px[i + 2] = R[j] * 255; px[i + 3] = clamp(0.5 + (H[j] - soft[j]) * 4, 0, 1) * 255;
       }
     }
     return px;
   });
-  return texCache;
+  return detailCache[size];
 }
 
 // ==========================================================================
@@ -718,7 +796,7 @@ function createRenderer(canvas, { shadowSize = 2048, ldr: forceLdr = false } = {
   // ---------- Texturen ----------
   const tex = gl.createTexture();
   {
-    const layers = paintTextures();
+    const layers = paintTextures().color;
     gl.bindTexture(gl.TEXTURE_2D_ARRAY, tex);
     gl.texStorage3D(gl.TEXTURE_2D_ARRAY, Math.log2(TEX) + 1, gl.SRGB8_ALPHA8, TEX, TEX, layers.length);
     layers.forEach((px, i) => gl.texSubImage3D(gl.TEXTURE_2D_ARRAY, 0, 0, 0, i, TEX, TEX, 1, gl.RGBA, gl.UNSIGNED_BYTE, px));
@@ -728,6 +806,23 @@ function createRenderer(canvas, { shadowSize = 2048, ldr: forceLdr = false } = {
     const aniso = gl.getExtension('EXT_texture_filter_anisotropic');
     if (aniso) gl.texParameterf(gl.TEXTURE_2D_ARRAY, aniso.TEXTURE_MAX_ANISOTROPY_EXT, Math.min(8, gl.getParameter(aniso.MAX_TEXTURE_MAX_ANISOTROPY_EXT)));
   }
+  // Detail-Array (Normale, Rauheit, Vertiefung) auf Einheit 7; Kantenlänge nach Qualitätsstufe (TIERS.detail), bei Wechsel neu angelegt
+  let detailTex = null, detailSize = 0;
+  function loadDetail(size) {
+    if (detailTex && size === detailSize) return;
+    const layers = detailTextures(size);
+    if (detailTex) gl.deleteTexture(detailTex);
+    detailTex = gl.createTexture(); detailSize = size;
+    gl.bindTexture(gl.TEXTURE_2D_ARRAY, detailTex);
+    gl.texStorage3D(gl.TEXTURE_2D_ARRAY, Math.log2(size) + 1, gl.RGBA8, size, size, layers.length);
+    layers.forEach((px, i) => gl.texSubImage3D(gl.TEXTURE_2D_ARRAY, 0, 0, 0, i, size, size, 1, gl.RGBA, gl.UNSIGNED_BYTE, px));
+    gl.generateMipmap(gl.TEXTURE_2D_ARRAY);
+    gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    const aniso = gl.getExtension('EXT_texture_filter_anisotropic');
+    if (aniso) gl.texParameterf(gl.TEXTURE_2D_ARRAY, aniso.TEXTURE_MAX_ANISOTROPY_EXT, Math.min(8, gl.getParameter(aniso.MAX_TEXTURE_MAX_ANISOTROPY_EXT)));
+  }
+  loadDetail(TEX);
 
   // ---------- Schattenkarte ----------
   let shadowRes = shadowSize, shadowOk = true;
@@ -808,7 +903,7 @@ function createRenderer(canvas, { shadowSize = 2048, ldr: forceLdr = false } = {
   }
 
   // ---------- Zwischenbilder (bei jeder Größenänderung neu) ----------
-  // Einheiten 0 und 1 gehören der Szene (Textur-Array, Schattenkarte); die Schritte danach lesen nur aus Einheit 2 und höher.
+  // Einheiten 0, 1 und 7 gehören der Szene (Textur-Array, Schattenkarte, Detail-Array); die Schritte danach lesen nur aus Einheit 2 bis 6.
   // So hängt nie eine Textur, die gerade gelesen wird, zugleich am gezeichneten Framebuffer.
   let ldr = !floatOk || forceLdr, tW = 0, tH = 0, msaa = 0;
   let tier = { msaa: true };                     // gewünschte Merkmale der Qualitätsstufe (setTier)
@@ -1056,11 +1151,14 @@ function createRenderer(canvas, { shadowSize = 2048, ldr: forceLdr = false } = {
     gl.depthRange(0.1, 1);
     gl.activeTexture(gl.TEXTURE1);
     gl.bindTexture(gl.TEXTURE_2D, shadowTex);
+    gl.activeTexture(gl.TEXTURE7);
+    gl.bindTexture(gl.TEXTURE_2D_ARRAY, detailTex);
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D_ARRAY, tex);
     useLit(P.world, cam);
     gl.uniformMatrix4fv(P.world.u.uVP, false, vp);
     gl.uniform1i(P.world.u.uTex, 0);
+    gl.uniform1i(P.world.u.uDetail, 7);
     gl.bindVertexArray(worldVao);
     gl.drawElements(gl.TRIANGLES, worldCount, gl.UNSIGNED_INT, 0);
 
@@ -1250,7 +1348,7 @@ function createRenderer(canvas, { shadowSize = 2048, ldr: forceLdr = false } = {
     gl, render, setWorld, project, resize,
     setShadowSize(size) { if (Math.min(size, maxShadow) !== shadowRes) allocShadow(size); },
     /** Merkmale der Qualitätsstufe (siehe TIERS); Zwischenbilder entstehen beim nächsten Bild neu, wenn sich etwas ändert. */
-    setTier(t) { if (!!t.msaa !== !!tier.msaa || t.glow !== tier.glow) tW = 0; tier = { ...t }; },
+    setTier(t) { if (!!t.msaa !== !!tier.msaa || t.glow !== tier.glow) tW = 0; tier = { ...t }; loadDetail(t.detail || TEX); },
     /** Rückfall ohne Float-Ziele erzwingen (Prüfhaken); ohne Float-Unterstützung bleibt er immer an. */
     setLdr(on) { const v = !!on || !floatOk; if (v !== ldr) { ldr = v; tW = 0; } },
     stats() {
