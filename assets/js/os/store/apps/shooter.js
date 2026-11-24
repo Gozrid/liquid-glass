@@ -2359,7 +2359,7 @@ function raumIR(sr, zone) {
  */
 function createSound(getPrefs) {
   let ctx = null, sum = null, gone = false, phys = null, LL = { x: 0, y: 1.6, z: 0, yaw: 0 };
-  let lsend = null, zoneL = 'hof', shown = 'hof', zoneT = 0, forced = null;
+  let lsend = null, zoneL = 'hof', shown = 'hof', zoneT = 0, forced = null, shownVol = -1;
   const bus = {}, pool = [], last = {}, stat = { plays: 0, steals: 0, drops: 0, max: 0 }, st = { hp: 100, boom: 0 };
   const hallIn = {}, lzone = {}, zcache = new Map();
   const vol = () => getPrefs().volume;
@@ -2370,7 +2370,7 @@ function createSound(getPrefs) {
     const a = audio();
     ctx = a.ctx;
     sum = ctx.createGain();
-    sum.gain.value = vol();
+    sum.gain.value = shownVol = vol();
     const lim = ctx.createDynamicsCompressor();
     for (const k in LIMIT) lim[k].value = LIMIT[k];
     const trim = ctx.createGain();
@@ -2397,6 +2397,15 @@ function createSound(getPrefs) {
       lsend.connect(lzone[z]); lzone[z].connect(hallIn[z]);
     }
     S.tap = trim;
+  }
+  /** Summe folgt prefs.volume (auch im Menü, etwa beim Schieben des Reglers): je Bild weich, vor einem neuen Klang sofort. */
+  function level(soft) {
+    const v = vol();
+    if (v === shownVol) return;
+    shownVol = v;
+    const t = ctx.currentTime;
+    sum.gain.cancelScheduledValues(t);
+    if (soft) sum.gain.setTargetAtTime(v, t, 0.02); else sum.gain.setValueAtTime(v, t);
   }
 
   // ---------- Stimmen ----------
@@ -2499,6 +2508,7 @@ function createSound(getPrefs) {
     const R = KLANG[name];
     if (!R || !ok()) return null;
     graph();
+    level();
     const now = performance.now(), L = o.L || LL;
     purge(now);
     const pl = o.x !== undefined && R.reach > 0 ? place(L, o.x, o.y ?? L.y, o.z ?? L.z, R.reach, o.free) : null;
@@ -2559,7 +2569,7 @@ function createSound(getPrefs) {
     listen(L, dt = 0) {
       LL = L;
       if (!ctx) return;
-      if (sum.gain.value !== vol()) sum.gain.setTargetAtTime(vol(), ctx.currentTime, 0.02);
+      level(true);
       if ((zoneT -= dt) <= 0) { zoneT = 0.25; zoneL = zoneAt(L.x, Math.max(0, L.y - 1.6), L.z); fadeZone(); }
     },
     /** Raum vorgeben (Hörprobe): 'hof' | 'halle' | 'gasse' | 'raum' | 'aus' (ohne Hall) – null: wieder selbst bestimmen. */
