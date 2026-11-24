@@ -780,6 +780,62 @@ void main() {
   float alt = texelFetch(uAlt, ivec2(0), 0).r;
   o = vec4(alt + (ziel - alt) * (1. - exp(-uDt / (ziel < alt ? uBelK.w : uBelDunkel))), mittel, 0., 1.);
 }`;
+// SSAO in halber Auflösung: Ort aus texTiefe, Normale aus den Nachbarn (je Achse die kleinere Differenz), Halbkugel mit Radius 0,5 m,
+// 6 oder 10 Proben (uKern, je Pixel gedreht), mit Reichweitenprüfung; Ergebnis hoch 1,5. Waffe in der Hand und Himmel bleiben frei (1).
+const FS_SSAO = `#version 300 es
+precision highp float;
+uniform highp sampler2D uTiefe;
+uniform vec2 uProj;                 // tan(Sichtfeld/2) · Seitenverhältnis, tan(Sichtfeld/2)
+uniform vec3 uKern[10];
+uniform float uProben;
+out vec4 o;
+${GLSL_LINZ}
+ivec2 S;
+vec3 posAt(ivec2 p) { p = clamp(p, ivec2(0), S - 1); float z = linZ(texelFetch(uTiefe, p, 0).r); return vec3(((vec2(p) + .5) / vec2(S) * 2. - 1.) * uProj * z, -z); }
+void main() {
+  S = textureSize(uTiefe, 0);
+  ivec2 p = ivec2(gl_FragCoord.xy) * 2;
+  float d = texelFetch(uTiefe, p, 0).r;
+  if (d < .1 || d >= 1.) { o = vec4(1.); return; }
+  ivec2 c = clamp(p, ivec2(2), S - 3);                                      // Nachbarn am Bildrand: Normale des nächsten inneren Punkts
+  vec3 P = posAt(p), C = posAt(c), l = posAt(c - ivec2(2, 0)), r = posAt(c + ivec2(2, 0)), b = posAt(c - ivec2(0, 2)), t = posAt(c + ivec2(0, 2));
+  vec3 N = cross(abs(r.z - C.z) < abs(C.z - l.z) ? r - C : C - l, abs(t.z - C.z) < abs(C.z - b.z) ? t - C : C - b);
+  N = dot(N, N) > 1e-12 ? normalize(N) : vec3(0., 0., 1.);
+  float a = 6.2831853 * fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(.06711056, .00583715))));
+  vec3 rv = vec3(cos(a), sin(a), 0.), T = normalize(rv - N * dot(rv, N));
+  mat3 M = mat3(T, cross(N, T), N);
+  int n = int(uProben);
+  float occ = 0.;
+  for (int i = 0; i < 10; i++) {
+    if (i >= n) break;
+    vec3 q = P + M * uKern[i] * .5;
+    vec2 uv = q.xy / (-q.z * uProj) * .5 + .5;
+    if (q.z > -.07 || uv.x < 0. || uv.x > 1. || uv.y < 0. || uv.y > 1.) continue;
+    float sd = texelFetch(uTiefe, ivec2(uv * vec2(S)), 0).r;
+    if (sd < .1) continue;                                                   // die Waffe in der Hand verdeckt nichts
+    float sz = linZ(sd);
+    occ += step(sz, -q.z - .03) * (1. - smoothstep(.5, 1., -P.z - sz));      // Reichweite: was über 1 m davor liegt, verdeckt nicht
+  }
+  o = vec4(pow(1. - occ / float(n), 1.5), 0., 0., 1.);
+}`;
+// SSAO weichzeichnen: 5 Punkte in einer Richtung, Gewicht fällt mit dem Tiefensprung (keine Säume an Kanten)
+const FS_AO_BLUR = `#version 300 es
+precision highp float;
+uniform sampler2D uAo;
+uniform highp sampler2D uTiefe;
+uniform vec2 uDir;
+out vec4 o;
+${GLSL_LINZ}
+void main() {
+  ivec2 q = ivec2(gl_FragCoord.xy), A = textureSize(uAo, 0) - 1, S = textureSize(uTiefe, 0) - 1;
+  float z0 = linZ(texelFetch(uTiefe, min(q * 2, S), 0).r), s = 0., w = 0.;
+  for (int i = -2; i <= 2; i++) {
+    ivec2 k = clamp(q + ivec2(uDir) * i, ivec2(0), A);
+    float wi = (i == 0 ? 1. : abs(i) == 1 ? .7 : .4) * max(0., 1. - abs(linZ(texelFetch(uTiefe, min(k * 2, S), 0).r) - z0) / (.04 * z0 + .05));
+    s += texelFetch(uAo, k, 0).r * wi; w += wi;
+  }
+  o = vec4(s / max(w, 1e-4), 0., 0., 1.);
+}`;
 // Korn (bewegt, im Dunkeln stärker) und Rasterung ±0,5/255 – ganz am Ende, bei FXAA erst nach der Kantenglättung
 const GLSL_KORN = `
 uniform float uKorn, uZeit;
@@ -795,15 +851,21 @@ vec3 korn(vec3 c) {
 // Bildwirkungen aus f.post nach der Farbstimmung.
 const FS_FINAL = `#version 300 es
 precision highp float;
-uniform sampler2D uFarbe, uGlow, uBel;
-uniform float uLdr, uGlowK, uSatt, uKontrast, uVig, uKornHier;
+uniform sampler2D uFarbe, uGlow, uBel, uAo;
+uniform highp sampler2D uTiefe;
+uniform float uLdr, uGlowK, uSatt, uKontrast, uVig, uKornHier, uAoAn;
 uniform vec3 uTonS, uTonL;
 in vec2 vUV; out vec4 o;
 ${GLSL_ACES}
 ${GLSL_KORN}
 void main() {
   vec3 c = texture(uFarbe, vUV).rgb, g = texture(uGlow, vUV).rgb * uGlowK;
-  if (uLdr < .5) c = pow(clamp(aces(c * texelFetch(uBel, ivec2(0), 0).r + g), 0., 1.), vec3(1. / 2.2));
+  float bel = uLdr < .5 ? texelFetch(uBel, ivec2(0), 0).r : 1.;
+  if (uAoAn > .5) {                                                       // SSAO: wirkt im Schatten, kaum im Sonnenlicht
+    float d = texelFetch(uTiefe, ivec2(gl_FragCoord.xy), 0).r;
+    if (d >= .1 && d < 1.) c *= mix(1., texture(uAo, vUV).r, .8 * (1. - smoothstep(.4, 1.5, dot(c * bel, vec3(.2126, .7152, .0722)))));
+  }
+  if (uLdr < .5) c = pow(clamp(aces(c * bel + g), 0., 1.), vec3(1. / 2.2));
   else c = min(c + g, 1.);
   float l = dot(c, vec3(.2126, .7152, .0722));
   c *= mix(uTonS, uTonL, smoothstep(.15, .85, l));                       // Farbstimmung: Schatten und Lichter getönt
@@ -867,6 +929,7 @@ function createRenderer(canvas, { shadowSize = 2048, ldr: forceLdr = false } = {
     final: program(VS_POST, FS_FINAL), fxaa: program(VS_POST, FS_FXAA),
     lum: program(VS_POST, FS_LUM), adapt: program(VS_POST, FS_ADAPT),
     glowPre: program(VS_POST, FS_GLOW_PRE), glowDown: program(VS_POST, FS_GLOW_DOWN), glowUp: program(VS_POST, FS_GLOW_UP),
+    ssao: program(VS_POST, FS_SSAO), aoBlur: program(VS_POST, FS_AO_BLUR),
   };
 
   // ---------- Texturen ----------
@@ -985,11 +1048,20 @@ function createRenderer(canvas, { shadowSize = 2048, ldr: forceLdr = false } = {
   let tier = { msaa: true };                     // gewünschte Merkmale der Qualitätsstufe (setTier)
   // szene: Ziel der Szene (bei Mehrfachabtastung: ms, danach Auflösen in auf); fx: nur farbe; ldr/ldrF: fertiges Bild vor FXAA
   // glow/glowF: Stufen des Glühens (Textur und Framebuffer je Stufe, Größe in glowW/glowH)
+  // ao/aoF, ao2/ao2F: SSAO in halber Auflösung (R8) und Zwischenbild des Weichzeichners
   const T = { farbe: null, tiefe: null, szene: null, fx: null, msFarbe: null, msTiefe: null, ms: null, ldr: null, ldrF: null, glow: [], glowF: [],
-    lum: null, lumF: null, bel: [], belF: [] };
+    lum: null, lumF: null, bel: [], belF: [], ao: null, aoF: null, ao2: null, ao2F: null };
   let belCur = 0, belReset = true, lastT = 0, frameNo = 0;
   const lastCam = [0, -1e9, 0];
   const glowW = [], glowH = [];
+  let aoW = 0, aoH = 0;
+  // Halbkugel für SSAO: 10 Richtungen (z > 0), zur Mitte hin dichter; die ersten 6 decken die Halbkugel schon ab (Stufe „Mittel“)
+  const aoKern = new Float32Array(30);
+  for (let i = 0, sd = 9; i < 10; i++) {
+    const rn = () => ((sd = (Math.imul(sd, 1664525) + 1013904223) >>> 0) / 4294967296);
+    const a = (i * 2.399963) % TAU, cz = 0.15 + 0.85 * rn(), r = Math.sqrt(1 - cz * cz), k = 0.15 + 0.85 * ((i + rn()) / 10) ** 2;
+    aoKern.set([Math.cos(a) * r * k, Math.sin(a) * r * k, cz * k], i * 3);
+  }
   const samplesOf = (fmt) => { try { return [...(gl.getInternalformatParameter(gl.RENDERBUFFER, fmt, gl.SAMPLES) || [])]; } catch { return []; } };
   function rbTarget(w, h, fmt) {
     const r = gl.createRenderbuffer();
@@ -1061,6 +1133,12 @@ function createRenderer(canvas, { shadowSize = 2048, ldr: forceLdr = false } = {
       glowW.push(gw); glowH.push(gh);
       T.glow.push(texTarget(gw, gh, fmt));
       T.glowF.push(fboOf(T.glow[i], null));
+    }
+    // SSAO: halbe Auflösung, R8 (nur wenn die Stufe sie will)
+    if (tier.ssao) {
+      aoW = Math.ceil(w / 2); aoH = Math.ceil(h / 2);
+      T.ao = texTarget(aoW, aoH, gl.R8); T.aoF = fboOf(T.ao, null);
+      T.ao2 = texTarget(aoW, aoH, gl.R8); T.ao2F = fboOf(T.ao2, null);
     }
     // Belichtung (nur mit Float-Zielen): 64×64 mit Mip-Kette, zwei 1×1 im Wechsel
     if (!ldr) {
@@ -1348,6 +1426,27 @@ function createRenderer(canvas, { shadowSize = 2048, ldr: forceLdr = false } = {
       belReset = false;
     }
 
+    // --- SSAO: halbe Auflösung aus texTiefe, danach in zwei Richtungen weichzeichnen (ao → ao2 → ao) ---
+    const aoOn = !!(tier.ssao && T.ao);
+    if (aoOn) {
+      bindTex(3, T.tiefe);
+      gl.useProgram(P.ssao.p);
+      gl.uniform1i(P.ssao.u.uTiefe, 3);
+      gl.uniform2f(P.ssao.u.uProj, tanHalf * aspect, tanHalf);
+      gl.uniform3fv(P.ssao.u.uKern, aoKern);
+      gl.uniform1f(P.ssao.u.uProben, tier.ssao);
+      post(P.ssao, T.aoF, aoW, aoH);
+      gl.useProgram(P.aoBlur.p);
+      gl.uniform1i(P.aoBlur.u.uTiefe, 3);
+      gl.uniform1i(P.aoBlur.u.uAo, 2);
+      bindTex(2, T.ao);
+      gl.uniform2f(P.aoBlur.u.uDir, 1, 0);
+      post(P.aoBlur, T.ao2F, aoW, aoH);
+      bindTex(2, T.ao2);
+      gl.uniform2f(P.aoBlur.u.uDir, 0, 1);
+      post(P.aoBlur, T.aoF, aoW, aoH);
+    }
+
     // --- Glühen: Vorfilter, Stufen hinab, mit Zelt wieder hinauf ---
     const nG = T.glow.length;
     bindTex(2, T.farbe);
@@ -1388,6 +1487,10 @@ function createRenderer(canvas, { shadowSize = 2048, ldr: forceLdr = false } = {
     gl.uniform1f(P.final.u.uGlowK, 0.1);
     gl.uniform1i(P.final.u.uBel, 4);
     gl.uniform1f(P.final.u.uLdr, ldr ? 1 : 0);
+    if (aoOn) { bindTex(5, T.ao); bindTex(6, T.tiefe); }
+    gl.uniform1i(P.final.u.uAo, 5);
+    gl.uniform1i(P.final.u.uTiefe, 6);
+    gl.uniform1f(P.final.u.uAoAn, aoOn ? 1 : 0);
     const gr = env.grade || GRADE_NEUTRAL;
     gl.uniform3fv(P.final.u.uTonS, gr.shadow);
     gl.uniform3fv(P.final.u.uTonL, gr.light);
@@ -1430,7 +1533,7 @@ function createRenderer(canvas, { shadowSize = 2048, ldr: forceLdr = false } = {
     gl, render, setWorld, project, resize,
     setShadowSize(size) { if (Math.min(size, maxShadow) !== shadowRes) allocShadow(size); },
     /** Merkmale der Qualitätsstufe (siehe TIERS); Zwischenbilder entstehen beim nächsten Bild neu, wenn sich etwas ändert. */
-    setTier(t) { if (!!t.msaa !== !!tier.msaa || t.glow !== tier.glow) tW = 0; tier = { ...t }; loadDetail(t.detail || TEX); },
+    setTier(t) { if (!!t.msaa !== !!tier.msaa || t.glow !== tier.glow || !!t.ssao !== !!tier.ssao) tW = 0; tier = { ...t }; loadDetail(t.detail || TEX); },
     /** Rückfall ohne Float-Ziele erzwingen (Prüfhaken); ohne Float-Unterstützung bleibt er immer an. */
     setLdr(on) { const v = !!on || !floatOk; if (v !== ldr) { ldr = v; tW = 0; } },
     stats() {
