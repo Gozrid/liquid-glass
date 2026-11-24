@@ -3311,6 +3311,11 @@ const LIMIT = { threshold: -4, knee: 2, ratio: 20, attack: 0.002, release: 0.09 
  * Der Ausgleich dahinter nimmt das zurück: unter der Schwelle bleibt jeder Klang so laut wie geliefert, darüber wird begrenzt.
  */
 const LIMIT_TRIM = 10 ** (-1.94 / 20);
+/**
+ * Nachtmodus (Schritt 7.6): Begrenzer mit Schwelle −14 dB und Verhältnis 8; seine Aufholverstärkung beträgt +6,98 dB (Chromium und Firefox,
+ * Sinus unter der Schwelle) – der Ausgleich nimmt sie zurück, leise Klänge bleiben also gleich laut, laute werden stark gedämpft.
+ */
+const LIMIT_NACHT = { ...LIMIT, threshold: -14, ratio: 8 }, NACHT_TRIM = 10 ** (-6.98 / 20);
 const IMPACT_SND = { concrete: 'beton', metal: 'metall', wood: 'holz', body: 'koerper', sand: 'sand', cloth: 'stoff' };
 /** Überschall-Munition: vorbeifliegende Kugeln knallen vor dem Pfeifen */
 const UEBERSCHALL = { rifle: true, dmr: true, sniper: true, lmg: true };
@@ -3388,7 +3393,7 @@ function createSound(getPrefs) {
   const beds = [];
   /** Umgebung der Karte: want = AMB_KARTE-Eintrag, ready = Schleifen berechnet, on = laufende Schleifen, t = Zeit bis zum nächsten Einzelklang (s). */
   const amb = { want: null, ready: false, on: [], t: 8, inside: false };
-  let ambIn = null, ambLp = null, lastListen = 0, tickId = 0, NYQ = 24000;
+  let ambIn = null, ambLp = null, lastListen = 0, tickId = 0, NYQ = 24000, lim = null, trim = null, shownMix = '', graphAt = 0;
   /** Zustände (Schritt 7.5): je Bus außer ui eine Senke und ein Tiefpass (nahe Explosion), dazu am Bus welt der Tiefpass bei wenig Leben. */
   const zst = {}, hp = { lp: null, f: 0, k: 0, beat: 0, breath: 0 };
   /** Ortsfeste Quellen der Karte: { name, x, y, z, reach, v (laufende Stimme oder null) } – sie klingen nur in Reichweite (Schritt 7.2). */
@@ -3407,9 +3412,11 @@ function createSound(getPrefs) {
     ctx = a.ctx;
     sum = ctx.createGain();
     sum.gain.value = shownVol = vol();
-    const lim = ctx.createDynamicsCompressor();
-    for (const k in LIMIT) lim[k].value = LIMIT[k];
-    const trim = ctx.createGain(), dry = ctx.createGain(), outN = ctx.createGain();
+    lim = ctx.createDynamicsCompressor();
+    const night = !!getPrefs().night, LV = night ? LIMIT_NACHT : LIMIT;
+    for (const k in LV) lim[k].value = LV[k];
+    trim = ctx.createGain();
+    const dry = ctx.createGain(), outN = ctx.createGain();
     sum.connect(lim);
     lim.connect(trim);
     trim.connect(outN);
@@ -3417,7 +3424,8 @@ function createSound(getPrefs) {
     // Ein frisch angelegter DynamicsCompressor regelt in seinen ersten rund 100 ms kräftig herunter (gemessen −11 dB für einen Klang, der
     // gleich beim Anlegen startet). Die ersten 0,15 s läuft die Summe deshalb am Begrenzer vorbei, dann wird in 0,1 s übergeblendet.
     const t0 = ctx.currentTime;
-    trim.gain.setValueAtTime(0, t0); trim.gain.setValueAtTime(0, t0 + 0.15); trim.gain.linearRampToValueAtTime(LIMIT_TRIM, t0 + 0.25);
+    trim.gain.setValueAtTime(0, t0); trim.gain.setValueAtTime(0, t0 + 0.15); trim.gain.linearRampToValueAtTime(night ? NACHT_TRIM : LIMIT_TRIM, t0 + 0.25);
+    shownMix = `${night}`;
     dry.gain.setValueAtTime(1, t0); dry.gain.setValueAtTime(1, t0 + 0.15); dry.gain.linearRampToValueAtTime(0, t0 + 0.25);
     const pre = ctx.createDelay(0.05);
     pre.delayTime.value = 0.006;                     // so spät wie der Begrenzer (Vorausschau 6 ms), sonst löschen sich beide beim Überblenden teils aus
@@ -3428,7 +3436,7 @@ function createSound(getPrefs) {
     NYQ = ctx.sampleRate / 2;                       // ein Tiefpass auf Nyquist lässt alles unverändert durch
     const lowpass = () => { const f = ctx.createBiquadFilter(); f.type = 'lowpass'; f.frequency.value = NYQ; f.Q.value = 0; return f; };
     for (const [b, db] of Object.entries(BUSSE)) {
-      bus[b] = ctx.createGain(); bus[b].gain.value = 10 ** (db / 20);
+      bus[b] = ctx.createGain(); bus[b].gain.value = 10 ** (db / 20);           // die Regler setzt mixLevel beim ersten Klang
       if (b === 'ui') { bus[b].connect(sum); continue; }
       const duck = ctx.createGain(), lp = lowpass();
       bus[b].connect(duck); duck.connect(lp);
@@ -3458,9 +3466,31 @@ function createSound(getPrefs) {
       lsend.connect(lzone[z]); lzone[z].connect(hallIn[z]);
     }
     S.tap = outN;
+    graphAt = performance.now();
+  }
+  /**
+   * Regler der Busse (Schritt 7.6): Effekte (waffe, welt, foley, ui), Umgebung (amb), Musik (musik) als Faktor auf den Bus-Pegel;
+   * Nachtmodus stellt den Begrenzer um. Nur bei einer Änderung.
+   */
+  function mixLevel() {
+    const P = getPrefs(), f01 = (v, d) => (typeof v === 'number' && Number.isFinite(v) ? clamp(v, 0, 1) : d);
+    const fx = f01(P.volFx, 1), am = f01(P.volAmb, 0.7), mu = f01(P.volMusic, 0.6), night = !!P.night, key = `${fx}|${am}|${mu}|${night}`;
+    if (key === shownMix) return;
+    const t = ctx.currentTime, nightWas = shownMix.endsWith('true'), first = !shownMix.includes('|');
+    shownMix = key;
+    for (const [b, db] of Object.entries(BUSSE)) {
+      const g = 10 ** (db / 20) * (b === 'amb' ? am : b === 'musik' ? mu : fx);
+      if (first) bus[b].gain.value = g; else bus[b].gain.setTargetAtTime(g, t, 0.02);
+    }
+    if (night !== nightWas) {
+      const LV = night ? LIMIT_NACHT : LIMIT;
+      lim.threshold.setValueAtTime(LV.threshold, t); lim.ratio.setValueAtTime(LV.ratio, t);
+      if (performance.now() - graphAt > 300) { trim.gain.cancelScheduledValues(t); trim.gain.setTargetAtTime(night ? NACHT_TRIM : LIMIT_TRIM, t, 0.03); }
+    }
   }
   /** Summe folgt prefs.volume (auch im Menü, etwa beim Schieben des Reglers): je Bild weich, vor einem neuen Klang sofort. */
   function level(soft) {
+    mixLevel();
     const v = vol();
     if (v === shownVol) return;
     shownVol = v;
@@ -3528,7 +3558,9 @@ function createSound(getPrefs) {
     vol *= 10 ** ((-1.5 * back) / 20);
     fc *= 1 - 0.3 * back;
     if (phys && !free && !sight(L, x, y, z)) { fc = Math.max(500, fc * 0.25); vol *= 0.5; }
-    return { d, vol, fc, pan: side * 0.85, delay: Math.min(d / 343, 0.35) };
+    // Richtung im Raum des Hörers (Blick −Z) für den Kopfhörer-Modus
+    const inv = d > 0.01 ? 1 / d : 0, rx = (dx * Math.cos(L.yaw) + dz * Math.sin(L.yaw)) * inv, rz = -(dx * Math.sin(L.yaw) - dz * Math.cos(L.yaw)) * inv;
+    return { d, vol, fc, pan: side * 0.85, delay: Math.min(d / 343, 0.35), rx, ry: (y - L.y) * inv, rz: inv ? rz : -1 };
   }
 
   // ---------- Raumzonen ----------
@@ -3603,8 +3635,15 @@ function createSound(getPrefs) {
     if (o.fadeIn) { g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(vol, t + o.fadeIn); } else g.gain.value = vol;
     if (o.dur) { g.gain.setValueAtTime(vol, t + Math.max(0, o.dur - 0.012)); g.gain.linearRampToValueAtTime(0, t + o.dur); }
     const pan = pl ? pl.pan : o.pan || 0;
-    if (pl || pan) { const p = ctx.createStereoPanner(); p.pan.value = clamp(pan, -1, 1); g.connect(p); p.connect(dest); nodes.push(p); }
-    else g.connect(dest);
+    if (pl || pan) {
+      let p;
+      if (pl && getPrefs().hrtf) {                   // Kopfhörer-Modus: Richtung über HRTF; die Entfernung rechnet weiter das Mischpult
+        p = ctx.createPanner();
+        Object.assign(p, { panningModel: 'HRTF', distanceModel: 'linear', rolloffFactor: 0, refDistance: 1, maxDistance: 10000 });
+        aim(p, pl, 0);
+      } else { p = ctx.createStereoPanner(); p.pan.value = clamp(pan, -1, 1); }
+      g.connect(p); p.connect(dest); nodes.push(p);
+    } else g.connect(dest);
     const v = { name, prio, prot, vol, t0: now, len, until: now + ((o.when || 0) + (pl ? pl.delay : 0) + len + 1.5) * 1000, loop: R.loop, src, g, nodes, off: false, ending: false, bed: !!o.bed };
     // ortsgebundener Dauerklang: listen führt Pegel, Tiefpass und Lage mit dem Hörer nach
     if (o.bed && pl) Object.assign(v, { pos: [o.x, o.y ?? L.y, o.z ?? L.z], reach: R.reach, free: !!o.free, base: vol / pl.vol, lp: nodes[2], pan: nodes[nodes.length - 1], blocked: false });
@@ -3683,6 +3722,12 @@ function createSound(getPrefs) {
       else if (q.v && d > R.reach + 3) { stop(q.v, 0.3); q.v = null; }
     }
   }
+  /** PannerNode (Kopfhörer-Modus) auf die Richtung der Quelle stellen; tau > 0 gleitet. */
+  function aim(p, pl, tau) {
+    const t = ctx.currentTime;
+    if (p.positionX) for (const [q, v] of [[p.positionX, pl.rx], [p.positionY, pl.ry], [p.positionZ, pl.rz]]) { if (tau) q.setTargetAtTime(v, t, tau); else q.value = v; }
+    else p.setPosition(pl.rx, pl.ry, pl.rz);
+  }
   /** Lage, Pegel und Tiefpass eines ortsgebundenen Dauerklangs nachführen (je Bild); Verdeckung nur, wenn occ (alle 0,25 s). */
   function follow(v, occ) {
     const [x, y, z] = v.pos, pl = place(LL, x, y, z, v.reach, true), t = ctx.currentTime;
@@ -3691,6 +3736,7 @@ function createSound(getPrefs) {
     v.g.gain.setTargetAtTime(vol, t, 0.04);
     if (v.lp?.frequency) v.lp.frequency.setTargetAtTime(fc, t, 0.04);
     if (pl && v.pan?.pan) v.pan.pan.setTargetAtTime(clamp(pl.pan, -1, 1), t, 0.04);
+    else if (pl && v.pan?.panningModel) aim(v.pan, pl, 0.04);
   }
   /**
    * Alle 100 ms (ab dem ersten Klang): ruft listen nicht mehr (Partie verlassen, Fenster verdeckt), enden die Umgebung und die Quellen der Karte;
@@ -3736,6 +3782,7 @@ function createSound(getPrefs) {
   }
   function tick() {
     if (gone) return;
+    level(true);
     musicPump();
     if (performance.now() - lastListen > 600) { if (amb.on.length) ambStop(1); srcStop(); if (hp.k) lowHp(100); }
   }
@@ -3793,7 +3840,10 @@ function createSound(getPrefs) {
       if (o.hp !== undefined) lowHp(o.hp);
     },
     /** Pegel und Tiefpass der Busse (Prüfungen): je Bus { gain, duck, lp }, welt zusätzlich hpLp; hall. */
-    busse: () => Object.fromEntries([...Object.keys(BUSSE), 'hall'].map((b) => [b, { gain: bus[b]?.gain.value ?? null, duck: zst[b]?.duck.gain.value ?? 1, lp: zst[b]?.lp.frequency.value ?? null, ...(b === 'welt' ? { hpLp: hp.lp?.frequency.value } : {}) }])),
+    busse: () => ({
+      ...Object.fromEntries([...Object.keys(BUSSE), 'hall'].map((b) => [b, { gain: bus[b]?.gain.value ?? null, duck: zst[b]?.duck.gain.value ?? 1, lp: zst[b]?.lp.frequency.value ?? null, ...(b === 'welt' ? { hpLp: hp.lp?.frequency.value } : {}) }])),
+      limit: lim ? { threshold: lim.threshold.value, ratio: lim.ratio.value, trim: trim.gain.value } : null,
+    }),
     stats: () => ({ ...stat, by: { ...stat.by }, voices: pool.length, beds: beds.length, bedNames: beds.map((v) => v.name) }),
     /** Dauerklänge mit ihren aktuellen Werten (Prüfungen): Name, Pegel, Tiefpass, Stereo-Lage. */
     beds: () => beds.map((v) => ({ name: v.name, gain: v.g.gain.value, fc: v.lp?.frequency?.value ?? null, pan: v.pan?.pan?.value ?? null, pos: v.pos || null })),
@@ -6339,7 +6389,7 @@ function createMenus(root, api) {
   const pct = (v) => `${Math.round(v * 100)} %`;
   const reduced = matchMedia('(prefers-reduced-motion: reduce)');
   const snd = (kind) => { try { api.snd?.(kind); } catch { /* ohne Ton */ } };
-  const DEFAULTS = { sens: 1, adsSens: 0.8, invertY: false, fov: 75, volume: 0.8, quality: 'auto', shadows: true, fps: false, toggleAds: false, toggleCrouch: true };
+  const DEFAULTS = { sens: 1, adsSens: 0.8, invertY: false, fov: 75, volume: 0.8, quality: 'auto', shadows: true, fps: false, toggleAds: false, toggleCrouch: true, volFx: 1, volAmb: 0.7, volMusic: 0.6, hrtf: false, night: false };
   const STAT_NAMES = ['Schaden', 'Feuerrate', 'Reichweite', 'Beweglichkeit'];
   const TIPS = [
     'Wer rennt, kann nicht schießen – nimm rechtzeitig Tempo heraus.',
@@ -6807,6 +6857,11 @@ function createMenus(root, api) {
           row('Vollbild', 'Das Spiel füllt den ganzen Bildschirm', bFull)),
         sec('Ton',
           row('Lautstärke', 'Zusätzlich zur Lautstärke des Systems', slider('Lautstärke', 0, 1, 0.05, P.volume, pct, live('volume'))),
+          row('Effekte', 'Waffen, Schritte, Treffer und Funk', slider('Effekte', 0, 1, 0.05, P.volFx, pct, live('volFx'))),
+          row('Umgebung', 'Wind, Hafen, Zikaden, Lampen und Brunnen', slider('Umgebung', 0, 1, 0.05, P.volAmb, pct, live('volAmb'))),
+          row('Musik', 'Im Menü und an den großen Momenten – im Einsatz keine Dauermusik', slider('Musik', 0, 1, 0.05, P.volMusic, pct, live('volMusic'))),
+          row('Kopfhörer-Modus', 'Richtungen räumlich (HRTF) – nur mit Kopfhörern sinnvoll', toggle('Kopfhörer-Modus', P.hrtf, live('hrtf'))),
+          row('Nachtmodus', 'Schüsse und Explosionen stark gedämpft, Leises bleibt', toggle('Nachtmodus', P.night, live('night'))),
           row('Hörprobe', 'Jeden Klang einzeln anhören, mit Raum und Entfernung', btn('.small', 'Öffnen', () => { snd('ok'); hearing(); }, 'play'))),
         sec('Tastenbelegung', h('div.szm-keys', KEYS.map(([keys, what]) => h('div', keys.map((k) => h('kbd', k)), h('span', what))))),
         h('div.szm-sec', { style: { display: 'flex', justifyContent: 'flex-end' } },
@@ -7186,12 +7241,14 @@ function createApp(win) {
   // Gespeichertes kann alt, von Hand verändert oder beschädigt sein: erst auf gültige Werte bringen, dann benutzen.
   const stored = (key) => { const v = db.get(key, {}); return v && typeof v === 'object' && !Array.isArray(v) ? v : {}; };
   const num = (v, d, lo, hi) => (typeof v === 'number' && Number.isFinite(v) ? clamp(v, lo, hi) : d);
-  const PREFS = { sens: 1, adsSens: 0.8, invertY: false, fov: 75, volume: 0.8, quality: 'auto', shadows: true, fps: false, toggleAds: false, toggleCrouch: true };
+  const PREFS = { sens: 1, adsSens: 0.8, invertY: false, fov: 75, volume: 0.8, quality: 'auto', shadows: true, fps: false, toggleAds: false, toggleCrouch: true, volFx: 1, volAmb: 0.7, volMusic: 0.6, hrtf: false, night: false };
   const prefs = { ...PREFS, ...stored('prefs') };
   prefs.sens = num(prefs.sens, PREFS.sens, 0.2, 3); prefs.adsSens = num(prefs.adsSens, PREFS.adsSens, 0.3, 1.5);
   prefs.fov = num(prefs.fov, PREFS.fov, 60, 100); prefs.volume = num(prefs.volume, PREFS.volume, 0, 1);
   if (!Object.hasOwn(SHADOW_RES, prefs.quality)) prefs.quality = PREFS.quality;
   for (const k of ['invertY', 'shadows', 'fps', 'toggleAds', 'toggleCrouch']) if (typeof prefs[k] !== 'boolean') prefs[k] = PREFS[k];
+  for (const k of ['volFx', 'volAmb', 'volMusic']) prefs[k] = num(prefs[k], PREFS[k], 0, 1);          // Ton (Phase 7)
+  for (const k of ['hrtf', 'night']) if (typeof prefs[k] !== 'boolean') prefs[k] = PREFS[k];
   const profile = { xp: 0, kills: 0, deaths: 0, assists: 0, headshots: 0, matches: 0, wins: 0, bestStreak: 0, shots: 0, hits: 0, time: 0, byWeapon: {}, ...stored('profile') };
   for (const k of ['xp', 'kills', 'deaths', 'assists', 'headshots', 'matches', 'wins', 'bestStreak', 'shots', 'hits', 'time']) profile[k] = Math.round(num(profile[k], 0, 0, 1e9));
   profile.hits = Math.min(profile.hits, profile.shots);       // mehr Treffer als Schüsse kann es nicht geben
