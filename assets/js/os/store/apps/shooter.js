@@ -2065,10 +2065,13 @@ function forge(sr = KSR) {
 // --------------------------------------------------------------------------
 /** Busse des Mischpults und ihre Startpegel in dB. */
 const BUSSE = { waffe: 0, welt: -3, foley: -8, ui: -10, amb: -18, musik: -14 };
-/** Name → Rezept { n, bus, gain (dB vor dem Bus), prio 0…9, cap, reach (m, 0 = nicht ortsgebunden), send, sendD, loop, make } */
+/**
+ * Name → Rezept { n, bus, gain (dB vor dem Bus), prio 0…9, cap, reach (m, 0 = nicht ortsgebunden), send, sendD, loop, later, make }.
+ * later: gehört nicht zum Backen ab App-Start (Umgebung, Musik) – wird bei Bedarf im Hintergrund berechnet (klangLater).
+ */
 const KLANG = {};
 /** Rezept eintragen. sendD: zusätzlicher Hall-Anteil mal d/reach (ferne Schüsse hallen mehr). */
-const rezept = (name, r) => { KLANG[name] = { n: 3, bus: 'ui', gain: 0, prio: 5, cap: 4, reach: 0, send: 0, sendD: 0, loop: false, ...r }; };
+const rezept = (name, r) => { KLANG[name] = { n: 3, bus: 'ui', gain: 0, prio: 5, cap: 4, reach: 0, send: 0, sendD: 0, loop: false, later: false, ...r }; };
 const klangHash = (s) => { let x = 2166136261; for (let i = 0; i < s.length; i++) x = Math.imul(x ^ s.charCodeAt(i), 16777619); return x >>> 0; };
 /** Pegel eines alten Klangs: Lautstärke der alten Kette abzüglich des Bus-Pegels – an der Summe bleibt alles so laut wie vorher. */
 const altDb = (v, bus) => 20 * Math.log10(v) - BUSSE[bus];
@@ -2804,7 +2807,7 @@ for (const [name, db] of [['frachthof.brummen', -27], ['frachthof.wind', -25], [
 }
 /** Einzelklänge der Umgebung: Kranschlag, Möwe, Schiffshorn (Frachthof); Palmenrascheln, Markise (Oase). */
 rezept('amb.kran', {
-  bus: 'amb', gain: spitze(-22, 'amb'), prio: 1, cap: 1, reach: 90, send: 0.6,
+  later: true, bus: 'amb', gain: spitze(-22, 'amb'), prio: 1, cap: 1, reach: 90, send: 0.6,
   make(K, rnd, v) {
     const fk = vary(v, 3, rnd, 0.06), a = K.buf(2.6);
     K.click(a, rnd, { dur: 0.003, gain: 0.5 });
@@ -2814,7 +2817,7 @@ rezept('amb.kran', {
   },
 });
 rezept('amb.moewe', {
-  bus: 'amb', gain: spitze(-25, 'amb'), prio: 1, cap: 1, reach: 90, send: 0.3,
+  later: true, bus: 'amb', gain: spitze(-25, 'amb'), prio: 1, cap: 1, reach: 90, send: 0.3,
   make(K, rnd, v) {
     const fk = vary(v, 3, rnd, 0.08), a = K.buf(0.62);
     for (const [at, g] of [[0.02, 1], [0.26 + 0.04 * rnd(), 0.8]]) {
@@ -2833,7 +2836,7 @@ rezept('amb.moewe', {
   },
 });
 rezept('amb.horn', {
-  n: 2, bus: 'amb', gain: spitze(-20, 'amb'), prio: 1, cap: 1, reach: 400, send: 0.8,
+  n: 2, later: true, bus: 'amb', gain: spitze(-20, 'amb'), prio: 1, cap: 1, reach: 400, send: 0.8,
   make(K, rnd, v) {
     const fk = v ? 1.04 : 0.97, a = K.buf(2.6);
     blepSaw(a, K.SR, { f: 110 * fk, dur: 2.2, gain: 0.5, ph0: rnd() });
@@ -2844,7 +2847,7 @@ rezept('amb.horn', {
   },
 });
 rezept('amb.palme', {
-  bus: 'amb', gain: spitze(-27, 'amb'), prio: 1, cap: 1, reach: 60, send: 0.2,
+  later: true, bus: 'amb', gain: spitze(-27, 'amb'), prio: 1, cap: 1, reach: 60, send: 0.2,
   make(K, rnd, v) {
     const a = K.buf(1.5), n = 4 + v + ((rnd() * 3) | 0);
     for (let i = 0; i < n; i++) {
@@ -2856,7 +2859,7 @@ rezept('amb.palme', {
   },
 });
 rezept('amb.markise', {
-  bus: 'amb', gain: spitze(-24, 'amb'), prio: 1, cap: 1, reach: 60, send: 0.3,
+  later: true, bus: 'amb', gain: spitze(-24, 'amb'), prio: 1, cap: 1, reach: 60, send: 0.3,
   make(K, rnd, v) {
     const fk = vary(v, 3, rnd, 0.1), a = K.buf(1);
     for (let i = 0, t = 0.01; i < 2 + (v % 2); i++, t += 0.18 + 0.15 * rnd()) {
@@ -2912,6 +2915,196 @@ const FLACKER = { Frachthof: [34, 0], Oase: [17, -22] };
 /** Brunnen der Oase (Markt): [x, y, z] */
 const BRUNNEN = { Oase: [-5.5, 0.9, 0] };
 
+// ---------- Musik und Motive (Schritt 7.4): d-Moll, 84 Schläge je Minute; im Einsatz keine Dauermusik ----------
+/** Tonhöhe einer MIDI-Note in Hz (A4 = 69 = 440 Hz). */
+const midi = (m) => 440 * 2 ** ((m - 69) / 12);
+/** Sägezahn (PolyBLEP) als Zustand: run(a, i0, i1, gain) addiert in a[i0 … i1) – für lange Felder in Stücken. f in Hz, ph0 Startphase 0 … 1. */
+function sawRun(sr, f, ph0 = 0) {
+  const dt = f / sr;
+  let ph = ph0;
+  return (a, i0, i1, gain = 1) => {
+    for (let i = i0; i < i1; i++) {
+      let v = 2 * ph - 1;
+      if (ph < dt) { const t = ph / dt; v -= t + t - t * t - 1; } else if (ph > 1 - dt) { const t = (ph - 1) / dt; v -= t * t + t + t + 1; }
+      a[i] += gain * v;
+      ph += dt;
+      if (ph >= 1) ph -= 1;
+    }
+  };
+}
+/** Addiert src ab at (s) in a; was über das Ende hinausreicht, beginnt vorn wieder (Schleife). */
+function addWrap(a, src, at, gain = 1, sr = KSR) {
+  const n = a.length, i0 = Math.round(at * sr);
+  for (let i = 0; i < src.length; i++) a[(i0 + i) % n] += src[i] * gain;
+  return a;
+}
+/** Filter über ein periodisches Feld ohne Einschwingen: erst über das Ende (als Vorlauf), dann über das ganze Feld. */
+function periodicRun(a, run, pre) {
+  const w = a.slice(a.length - pre);
+  run(w, 0, w.length);
+  return run;
+}
+/** Tiefe Trommel: Sinus f → f2 mit Klick, Abklingzeit tau (s). Spitze 1. */
+function drum(K, rnd, { f = 70, f2 = 42, len = 0.6, tau = 0.16, click = 0.3 } = {}) {
+  const a = K.sine(K.buf(len), { f, f2, dur: len * 0.6, gain: 1 });
+  K.decay(a, { attack: 0.002, tau });
+  K.click(a, rnd, { dur: 0.004, gain: click });
+  K.mix(a, noiseHit(K, rnd, 0.08, { lp: 1200, tau: 0.02 }), { gain: click * 0.5 });
+  K.fade(a, { outT: 0.05 }); K.dc(a);
+  return K.norm(a, 1);
+}
+/** Gezupfter Ton mit weichem Tiefpass (Melodie der Motive). */
+function plucked(K, rnd, { f, len = 1, tau = 0.5, bright = 0.5, lp = 3000 }) {
+  const a = K.pluck(K.buf(len), rnd, { f, tau, bright, gain: 1 });
+  K.lp(a, { f: lp });
+  K.fade(a, { inT: 0.002, outT: Math.min(0.2, len * 0.3) });
+  return K.norm(a, 1);
+}
+const BPM = 84;
+/**
+ * Menü-Musik: 8 Takte als Schleife. Fläche aus zwei leicht verstimmten Sägezähnen (Tiefpass 600 Hz), Akkord D2–A2–F3–C4–E4; Puls: Sinus 55 Hz
+ * auf jedem Schlag (−12 dB); Sechzehntel-Ticken (Rauschen über 7 kHz, −24 dB); Bass D1–D1–F1–C1 je Takt. Alle Frequenzen sind auf ganze
+ * Schwingungen je Schleife gerundet (höchstens 0,02 Hz daneben) – die Fläche ist damit genau periodisch, Ausklänge laufen vorn wieder ein.
+ * Zuletzt wird das Feld so gedreht, dass die Naht zwischen zwei Sechzehnteln liegt (gleich laut davor und danach). Generator.
+ */
+function* makeMenue(K, rnd) {
+  const sr = K.SR, beat = 60 / BPM, N = Math.round(32 * beat * sr), T = N / sr, q = (f) => Math.max(1, Math.round(f * T)) / T;
+  const ch = [new Float32Array(N), new Float32Array(N)];
+  // Fläche: je Note ein Sägezahn je Seite, ±6 Cent verstimmt, sanft im Zweitakt schwellend
+  const pad = [38, 45, 53, 60, 64].map(midi), pg = [0.32, 0.26, 0.22, 0.18, 0.14];
+  for (let c = 0; c < 2; c++) {
+    const runs = pad.map((f, i) => [sawRun(sr, q(f * 2 ** ((c ? 6 : -6) / 1200)), rnd()), pg[i]]);
+    yield* stuecke(N, (i0, i1) => { for (const [run, g] of runs) run(ch[c], i0, i1, g); });
+    const lp1 = periodicRun(ch[c], biquadRun(sr, 'lowpass', () => 600), sr), lp2 = periodicRun(ch[c], biquadRun(sr, 'lowpass', () => 600), sr);
+    const sw = shapeRun(sr, (t) => 0.82 + 0.18 * Math.sin((2 * Math.PI * t) / (8 * beat) + c * 0.6));
+    yield* stuecke(N, (i0, i1) => { lp1(ch[c], i0, i1); lp2(ch[c], i0, i1); sw(ch[c], i0, i1); });
+  }
+  let pk = 0;
+  for (const c of ch) pk = Math.max(pk, K.peak(c));
+  yield;
+  const k0 = 0.5 / pk;
+  for (const c of ch) yield* stuecke(N, (i0, i1) => { for (let i = i0; i < i1; i++) c[i] *= k0; });
+  // Bass je Takt: D1 D1 F1 C1 (zweimal), Sinus mit etwas Oberton, legato
+  const bass = [26, 26, 29, 24].map(midi);
+  for (let bar = 0; bar < 8; bar++) {
+    const f = bass[bar % 4], len = 4 * beat + 0.25, x = K.buf(len);
+    K.sine(x, { f, gain: 1 }); K.sine(x, { f: 2 * f, gain: 0.35, phase: 0.5 }); K.sine(x, { f: 3 * f, gain: 0.12 });
+    yield;
+    K.env(x, [[0, 0.001], [0.03, 1], [4 * beat - 0.1, 0.75], [len, 0.001]]);
+    for (const c of ch) addWrap(c, x, bar * 4 * beat, 0.42);
+    yield;
+  }
+  yield;
+  // Puls: Sinus 55 Hz auf jedem Schlag, −12 dB gegen die Fläche
+  const pulse = K.sine(K.buf(0.5), { f: 55, gain: 1 });
+  K.decay(pulse, { attack: 0.004, tau: 0.11 }); K.fade(pulse, { outT: 0.05 }); K.dc(pulse);
+  for (let b = 0; b < 32; b++) for (const c of ch) addWrap(c, pulse, b * beat, 0.5 * 10 ** (-12 / 20) * (b % 4 ? 0.8 : 1));
+  yield;
+  // Sechzehntel-Ticken: Rauschen über 7 kHz, −24 dB, abwechselnd etwas links und rechts
+  for (let k = 0; k < 128; k++) {
+    const x = noiseHit(K, rnd, 0.02, { hp: 7000, attack: 0.0005, tau: 0.004 });
+    K.fade(x, { outT: 0.006 });
+    const g = 0.5 * 10 ** (-24 / 20) * (k % 4 === 2 ? 1 : 0.6);
+    addWrap(ch[0], x, (k * beat) / 4, g * (k % 2 ? 0.7 : 1));
+    addWrap(ch[1], x, (k * beat) / 4, g * (k % 2 ? 1 : 0.7));
+    if (k % 32 === 31) yield;
+  }
+  // Naht zwischen die Sechzehntel 3 und 4 des letzten Schlags legen (je 89 ms Abstand): Feld drehen
+  const r = Math.round((31 * beat + (2.5 * beat) / 4) * sr);
+  const out = [];
+  for (const c of ch) { const o = new Float32Array(N); o.set(c.subarray(r)); o.set(c.subarray(0, r), N - r); out.push(o); yield; }
+  pk = 0;
+  for (const c of out) pk = Math.max(pk, K.peak(c));
+  yield;
+  const k1 = 1 / pk;
+  for (const c of out) yield* stuecke(N, (i0, i1) => { for (let i = i0; i < i1; i++) c[i] *= k1; });
+  return { ch: out };
+}
+rezept('musik.menue', { n: 1, bus: 'musik', gain: spitze(-21, 'musik'), prio: 9, cap: 1, loop: true, later: true, make: (K, rnd) => makeMenue(K, rnd) });
+/** Motiv „Start“: steigende Quinte D4 → A4 und ein Schlag, 1,2 s. */
+rezept('musik.start', {
+  n: 2, bus: 'musik', gain: spitze(-16, 'musik'), prio: 8, cap: 1, later: true,
+  make(K, rnd, v) {
+    const fk = v ? 1 : 1.003, a = K.buf(1.2);
+    K.mix(a, plucked(K, rnd, { f: midi(62) * fk, len: 0.5, tau: 0.4, bright: 0.6, lp: 2500 }), { gain: 0.6 });
+    K.mix(a, plucked(K, rnd, { f: midi(69) * fk, len: 0.85, tau: 0.7, bright: 0.7, lp: 3000 }), { at: 0.3, gain: 0.8 });
+    const pad = K.buf(0.9);
+    blepSaw(pad, K.SR, { f: midi(57) * fk, dur: 0.9, gain: 0.3 }); blepSaw(pad, K.SR, { f: midi(62) * fk * 1.004, dur: 0.9, gain: 0.3 });
+    K.lp(pad, { f: 900 }); K.env(pad, [[0, 0.001], [0.05, 1], [0.6, 0.6], [0.9, 0.001]]);
+    K.mix(a, pad, { at: 0.3, gain: 0.5 });
+    K.mix(a, drum(K, rnd, { f: 80, f2: 40, len: 0.8, tau: 0.2, click: 0.4 }), { at: 0.3, gain: 0.9 });
+    return K.norm(K.fade(a, { outT: 0.15 }), 1);
+  },
+});
+/** Motiv „Spannung“: 4 Takte bei 100 Schlägen je Minute – tiefe Trommel auf jedem Schlag, darüber ein Anstieg (Fläche öffnet sich, Rauschen steigt). */
+rezept('musik.spannung', {
+  n: 1, bus: 'musik', gain: spitze(-17, 'musik'), prio: 8, cap: 1, later: true,
+  *make(K, rnd) {
+    const sr = K.SR, beat = 0.6, len = 16 * beat + 0.8, a = K.buf(len), n = a.length;
+    const runs = [38, 45, 50, 53].map((m, i) => [sawRun(sr, midi(m) * (1 + (i % 2 ? 0.003 : -0.003)), rnd()), 0.25]);
+    yield* stuecke(n, (i0, i1) => { for (const [run, g] of runs) run(a, i0, i1, g); });
+    const lp = biquadRun(sr, 'lowpass', (t) => 250 * (2200 / 250) ** Math.min(1, t / (16 * beat)), 1.2);
+    const env = shapeRun(sr, (t) => (t < 16 * beat ? 0.25 + 0.75 * (t / (16 * beat)) ** 1.5 : Math.max(0, 1 - (t - 16 * beat) / 0.6)));
+    yield* stuecke(n, (i0, i1) => { lp(a, i0, i1); env(a, i0, i1); });
+    K.norm(a, 0.45);
+    yield;
+    const riser = K.noise(K.buf(16 * beat), rnd, 'pink');
+    yield;
+    K.bp(riser, { f: 300, f2: 3500, q: 1.5 });
+    yield;
+    const rEnv = shapeRun(sr, (t) => (t < 16 * beat - 0.3 ? 0.01 * 100 ** (t / (16 * beat - 0.3)) : Math.max(0.001, 1 - (t - 16 * beat + 0.3) / 0.3)));
+    yield* stuecke(riser.length, (i0, i1) => rEnv(riser, i0, i1));
+    K.mix(a, K.norm(riser, 0.25));
+    yield;
+    const dr = drum(K, rnd, { f: 65, f2: 40, len: 0.55, tau: 0.15, click: 0.35 });
+    for (let b = 0; b < 16; b++) K.mix(a, dr, { at: b * beat, gain: (b % 4 ? 0.55 : 0.85) * (0.7 + 0.3 * (b / 15)) });
+    K.mix(a, drum(K, rnd, { f: 90, f2: 35, len: 0.8, tau: 0.25, click: 0.5 }), { at: 16 * beat, gain: 1 });
+    return K.norm(K.fade(a, { outT: 0.2 }), 1);
+  },
+});
+/** Motiv „Sieg“: D-Dur aufwärts (D4 F♯4 A4 D5), dann der Akkord. */
+rezept('musik.sieg', {
+  n: 1, bus: 'musik', gain: spitze(-15, 'musik'), prio: 8, cap: 1, later: true,
+  *make(K, rnd) {
+    const a = K.buf(2.8), notes = [62, 66, 69, 74].map(midi);
+    notes.forEach((f, i) => K.mix(a, plucked(K, rnd, { f, len: 2.4 - i * 0.15, tau: 0.9, bright: 0.65, lp: 3500 }), { at: i * 0.15, gain: 0.55 }));
+    yield;
+    const pad = K.buf(2.2);
+    for (const [i, f] of notes.entries()) { blepSaw(pad, K.SR, { f: f * (1 + (i % 2 ? 0.003 : -0.003)), dur: 2.2, gain: 0.22, ph0: rnd() }); if (i === 1) yield; }
+    yield;
+    K.lp(pad, { f: 1400 }); K.env(pad, [[0, 0.001], [0.15, 1], [1.4, 0.7], [2.2, 0.001]]);
+    K.mix(a, pad, { at: 0.45, gain: 0.6 });
+    K.mix(a, drum(K, rnd, { f: 85, f2: 45, len: 0.7, tau: 0.2, click: 0.4 }), { at: 0.45, gain: 0.8 });
+    return K.norm(K.fade(a, { outT: 0.3 }), 1);
+  },
+});
+/** Motiv „Niederlage“: D – C – B – A abwärts (D3 C3 B♭2 A2), dunkel über Dm, endet offen auf A. */
+rezept('musik.niederlage', {
+  n: 1, bus: 'musik', gain: spitze(-16, 'musik'), prio: 8, cap: 1, later: true,
+  *make(K, rnd) {
+    const a = K.buf(3.4), notes = [50, 48, 46, 45].map(midi);
+    notes.forEach((f, i) => K.mix(a, plucked(K, rnd, { f, len: i === 3 ? 1.9 : 0.8, tau: i === 3 ? 1.2 : 0.6, bright: 0.35, lp: 900 }), { at: i * 0.45, gain: 0.7 }));
+    yield;
+    const pad = K.buf(3.2);
+    for (const [i, m] of [38, 45, 53].entries()) { blepSaw(pad, K.SR, { f: midi(m) * (1 + (i % 2 ? 0.004 : -0.004)), dur: 3.2, gain: 0.3, ph0: rnd() }); yield; }
+    K.lp(pad, { f: 500 }); K.env(pad, [[0, 0.001], [0.4, 1], [2.4, 0.6], [3.2, 0.001]]);
+    yield;
+    K.mix(a, pad, { gain: 0.45 });
+    K.mix(a, drum(K, rnd, { f: 60, f2: 35, len: 0.9, tau: 0.3, click: 0.2 }), { at: 1.35, gain: 0.6 });
+    return K.norm(K.fade(a, { outT: 0.3 }), 1);
+  },
+});
+/** Motiv „Stufe“ (neue Stufe erreicht): helles Aufsteigen D5 – A5 – D6 mit Glockenklang. */
+rezept('musik.stufe', {
+  n: 1, bus: 'musik', gain: spitze(-17, 'musik'), prio: 8, cap: 1, later: true,
+  *make(K, rnd) {
+    const a = K.buf(1.6);
+    for (const [i, m] of [74, 81, 86].entries()) { const f = midi(m); K.modal(a, { at: i * 0.12, modes: [[f, 500, 1], [f * 2.76, 180, 0.35], [f * 5.4, 70, 0.15]] }); yield; }
+    K.mix(a, plucked(K, rnd, { f: midi(62), len: 1.4, tau: 0.8, bright: 0.5, lp: 2000 }), { gain: 0.5 });
+    return K.norm(K.fade(a, { outT: 0.2 }), 1);
+  },
+});
+
 /** Gruppen der Rezepte (Hörprobe): Name → Gruppe; KLANG_GRUPPEN in der Reihenfolge der Anzeige. */
 const KLANG_GRUPPEN = ['Waffen', 'Mechanik', 'Hülsen', 'Schritte', 'Einschläge', 'Treffer', 'Foley', 'Explosion', 'Funk-Signale', 'Umgebung', 'Musik', 'Zustände', 'Spaß-Paket'];
 const klangGruppe = (n) => (/^schuss\./.test(n) ? 'Waffen' : /^(mech|ausklang)\.|^leer$/.test(n) ? 'Mechanik' : /^huelse\./.test(n) ? 'Hülsen'
@@ -2965,7 +3158,7 @@ function klangPut(name, v, d) {
  */
 function klangBake(first = [], onProgress = null) {
   if (!bakeJob) {
-    const names = Object.keys(KLANG).filter((n) => !KLANG[n].loop), seen = new Set(), todo = [];
+    const names = Object.keys(KLANG).filter((n) => !KLANG[n].loop && !KLANG[n].later), seen = new Set(), todo = [];
     for (const n of [...names.filter((x) => /^(ui|signal)\./.test(x)), ...first.filter((x) => KLANG[x]), ...names]) {
       if (seen.has(n)) continue;
       seen.add(n);
@@ -3009,6 +3202,7 @@ function klangBake(first = [], onProgress = null) {
         KBAKE.wall = performance.now() - job.t0;
         job.cbs.length = 0;
         resolve();
+        klangLater(Object.keys(KLANG).filter((n) => KLANG[n].later && /^musik\./.test(n)));       // danach die Musik, im Hintergrund
       };
       setTimeout(slice, 0);
     });
@@ -3048,10 +3242,13 @@ function klangLater(names) {
       if (v >= KLANG[n].n) { loopQ.shift(); v = 0; gen = null; res(); return 0; }
       if (klangHas(n, v)) { gen = null; v++; }
       else if (!gen) { const out = klangStart(n, v); if (isGen(out)) gen = out; else { klangPut(n, v, klangFinish(n, out)); v++; } }
-      else { const r = gen.next(); if (r.done) { klangPut(n, v, klangFinish(n, r.value)); gen = null; v++; } }
+      else if (gen.out) { klangPut(n, v, klangFinish(n, gen.out)); gen = null; v++; }          // Abschluss (Gleichanteil, Spitze) als eigener Schritt
+      else { const r = gen.next(); if (r.done) gen.out = r.value; }
       const dt = performance.now() - a;
       KLOOP.ms += dt; KLOOP.by[n] = (KLOOP.by[n] || 0) + dt;
       if (dt > KLOOP.maxStep) { KLOOP.maxStep = dt; KLOOP.maxStepOf = n; }
+      if (dt > 4) (KLOOP.slow ||= []).push(`${n} ${dt.toFixed(1)} (Schritt ${KLOOP.steps})`);
+      KLOOP.steps = (KLOOP.steps || 0) + 1;
       return dt;
     };
     const slice = () => {
@@ -3159,6 +3356,8 @@ function createSound(getPrefs) {
   let ambIn = null, ambLp = null, lastListen = 0, tickId = 0;
   /** Ortsfeste Quellen der Karte: { name, x, y, z, reach, v (laufende Stimme oder null) } – sie klingen nur in Reichweite (Schritt 7.2). */
   const srcs = [];
+  /** Musik: want = gewünschte Dauermusik (Rezeptname oder null), v = laufende Stimme (Schritt 7.4). */
+  const mus = { want: null, v: null };
   const hallIn = {}, lzone = {}, zcache = new Map();
   const burst = { kind: null, n: 0, t: 0, dt: 0 }, ladder = { n: 0, t: -9 }, progStep = new WeakMap();
   let sprintN = 0;         // eigener Feuerstoß: Art, Schüsse, letzter Schuss (s), Schussabstand (s)
@@ -3394,7 +3593,7 @@ function createSound(getPrefs) {
     const want = (amb.want = (w && AMB_KARTE[w.name]) || null);
     amb.ready = false;
     amb.t = 5 + 8 * Math.random();
-    if (want) klangLater(want.loops).then(() => { if (amb.want === want) amb.ready = true; });
+    if (want) klangLater([...want.loops, ...want.einzel]).then(() => { if (amb.want === want) amb.ready = true; });
   }
   /** Beide Schleifen starten, die zweite um 5 s versetzt; sanft eingeblendet. */
   function ambStart() {
@@ -3451,8 +3650,18 @@ function createSound(getPrefs) {
    * Alle 100 ms (ab dem ersten Klang): ruft listen nicht mehr (Partie verlassen, Fenster verdeckt), enden die Umgebung und die Quellen der Karte;
    * ruft es wieder, beginnen sie neu.
    */
+  /** Dauermusik dem Wunsch angleichen: alte ausblenden (1,5 s), neue einblenden, sobald berechnet. Während der Hörprobe (Raum vorgegeben) still. */
+  function musicPump() {
+    const want = forced ? null : mus.want, cur = mus.v && !mus.v.off && !mus.v.ending ? mus.v.name : null;
+    if (cur === want) return;
+    if (mus.v) { stop(mus.v, 1.5); mus.v = null; }
+    if (!want || !ok()) return;
+    if (!klangHas(want, 0)) { klangLater([want]); return; }
+    mus.v = play(want, { bed: true, fadeIn: 1.5 });
+  }
   function tick() {
     if (gone) return;
+    musicPump();
     if (performance.now() - lastListen > 600) { if (amb.on.length) ambStop(1); srcStop(); }
   }
 
@@ -3482,8 +3691,18 @@ function createSound(getPrefs) {
       if (amb.want && amb.ready && !amb.on.length && ok()) ambStart();
       if (amb.on.length && (amb.t -= dt) <= 0) { amb.t = 6 + 14 * Math.random(); ambOne(); }
     },
-    /** Raum vorgeben (Hörprobe): 'hof' | 'halle' | 'gasse' | 'raum' | 'aus' (ohne Hall) – null: wieder selbst bestimmen. */
-    room(z) { forced = z && (z === 'aus' || RAUM[z]) ? z : null; fadeZone(); },
+    /** Raum vorgeben (Hörprobe): 'hof' | 'halle' | 'gasse' | 'raum' | 'aus' (ohne Hall) – null: wieder selbst bestimmen. Solange vorgegeben, schweigt die Musik. */
+    room(z) { forced = z && (z === 'aus' || RAUM[z]) ? z : null; fadeZone(); if (ctx) musicPump(); },
+    /** Dauermusik: 'menue' (Schleife im Hauptmenü) oder null (aus). Darf je Bild gerufen werden. */
+    music(name) {
+      const want = name && KLANG[`musik.${name}`] ? `musik.${name}` : null;
+      if (want === mus.want && (ctx || !want)) return;
+      mus.want = want;
+      if (!ctx && want && ok()) graph();             // nach der ersten Geste: das Mischpult anlegen, auch wenn noch kein Klang lief
+      if (ctx) musicPump();
+    },
+    /** Motiv: 'start' | 'spannung' | 'sieg' | 'niederlage' | 'stufe', nach when s. */
+    motif(name, when = 0) { if (KLANG[`musik.${name}`]) play(`musik.${name}`, { when }); },
     zone: () => forced || zoneL,
     voices() { purge(performance.now()); return pool.length; },
     state(o) { Object.assign(st, o); },
@@ -6936,6 +7155,7 @@ function createApp(win) {
   let scale = 1, slow = 0, fast = 0, fpsAcc = 0, fpsN = 0, endTimer = 0, faults = 0, wheelAt = 0, lostEl = null, bg = null, simAt = performance.now();
   let hitT = 0, hitKill = false, hitHead = false, hurtK = 0, lastWarm = 9, boardT = 0, hudT = 0, crouchOn = false, adsOn = false, radarMap = null;
   const arcs = [], keys = new Set(), P3 = [0, 0, 0];
+  const tense = new WeakSet();                     // Partien, in denen das Motiv „Spannung“ schon lief
   const playing = () => !!M && !paused && M.state !== 'over';
 
   function applyPrefs() {
@@ -7101,6 +7321,7 @@ function createApp(win) {
       clockL.textContent = `${MODES[M.mode].name.split('-')[0]} · ${M.cfg.limit}`;
       menus.show(null);
       hud.hidden = false;
+      S.motif?.('start');
       keys.clear();
       simAt = performance.now();                 // die Ladezeit zählt nicht als Spielzeit
       if (M.net) bgStart();
@@ -7191,7 +7412,8 @@ function createApp(win) {
       g2.clearRect(0, 0, fxc.width, fxc.height);
       M = null;
       bgStop();
-      if (result.levelUp) S.jingle('level');
+      S.motif?.(result.win ? 'sieg' : 'niederlage');
+      if (result.levelUp) S.motif?.('stufe', 2.6);
       menus.show('end', result);
     }, 4600);
   }
@@ -7419,6 +7641,7 @@ function createApp(win) {
     if (M.teams) { own = M.scores[me.team]; foe = M.scores[1 - me.team]; }
     else { own = me.kills; foe = 0; for (const s of M.soldiers) if (s !== me && s.kills > foe) foe = s.kills; }
     scoreOwn.textContent = own; scoreFoe.textContent = foe;
+    if (!tense.has(M) && M.state === 'live' && (M.clock < 60 || Math.max(own, foe) >= 0.9 * lim)) { tense.add(M); S.motif?.('spannung'); }     // Musik: die Partie wird knapp
     teamOwn.style.setProperty('--p', clamp(own / lim, 0, 1));
     teamFoe.style.setProperty('--p', clamp(foe / lim, 0, 1));
     clockT.textContent = mmss(M.clock);
@@ -7646,6 +7869,7 @@ function createApp(win) {
       R.render(M.frame(prefs.shadows));
       if (!hud.hidden) drawHud(live ? real : 0);
     } else if (menuWorld) {
+      S.music?.(menus.screen === 'main' ? 'menue' : null);      // Musik nur im Hauptmenü, im Einsatz keine Dauermusik
       menuT += dt;
       const b = menuWorld.bounds, r = Math.max(b.x1 - b.x0, b.z1 - b.z0) * 0.36, a = menuT * 0.045;
       const x = Math.sin(a) * r, z = Math.cos(a) * r, y = 9 + Math.sin(menuT * 0.11) * 2.5;
