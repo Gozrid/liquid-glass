@@ -352,6 +352,8 @@ function unitCube() {
 
 // ==========================================================================
 // 4 · Renderer (WebGL2): Schattenkarte der Sonne, Welt, bewegliche Quader, Himmel, Effekte, Waffe in der Hand
+//     Bildkette (Vertrag V4): Schatten → Szene (HDR, Tiefe; auf „Hoch“ 4-fach abgetastet) → Auflösen → Durchsichtiges (fboFx,
+//     Tiefentest im Shader) → Belichtung → Glühen → Schluss (ACES, Farbstimmung, Vignette, Korn; sonst FXAA danach).
 // ==========================================================================
 const MAX_LIGHTS = 8;
 const ISTRIDE = 20;      // je Quader: Matrix 16 · Farbe 3 · Art 1
@@ -977,13 +979,24 @@ function createRenderer(canvas, { shadowSize = 2048, ldr: forceLdr = false } = {
   }
 
   /**
-   * Zeichnet ein Bild. f: { cam: {x, y, z, yaw, pitch, roll, fov}, inst, instCount, vm, vmCount, vmFov,
-   *   quads, quadCount (Welt), vmQuadCount (danach im Puffer, mit der Waffe gezeichnet), lights: [[x, y, z, r, cr, cg, cb]], time }
+   * Zeichnet ein Bild. f: { cam: {x, y, z, yaw, pitch, roll, fov}, inst, instCount, instShadowCount (≥ instCount: dahinter Quader nur
+   *   für die Schattenkarte), vm, vmCount, vmFov, quads, quadCount (Welt), vmQuadCount (danach im Puffer, mit der Waffe gezeichnet),
+   *   lights: [[x, y, z, r, cr, cg, cb]], time, shadows, post: { …, dt } (Bildwirkungen ab Phase 5; dt ersetzt die eigene Bildzeit) }
    */
+  const tq = gl.getExtension('EXT_disjoint_timer_query_webgl2'), queries = [];
+  let gpuMs = null;
   function render(f) {
     if (!worldVao || gl.isContextLost()) return;
     const t0 = performance.now();
+    const q = tq && queries.length < 4 ? gl.createQuery() : null;      // Zeit auf der Grafikkarte, sofern der Browser sie misst
+    if (q) gl.beginQuery(tq.TIME_ELAPSED_EXT, q);
     draw(f);
+    if (q) { gl.endQuery(tq.TIME_ELAPSED_EXT); queries.push(q); }
+    while (queries.length && gl.getQueryParameter(queries[0], gl.QUERY_RESULT_AVAILABLE)) {
+      const done = queries.shift();
+      if (!gl.getParameter(tq.GPU_DISJOINT_EXT)) { const ms = gl.getQueryParameter(done, gl.QUERY_RESULT) / 1e6; gpuMs = gpuMs === null ? ms : gpuMs + (ms - gpuMs) * 0.1; }
+      gl.deleteQuery(done);
+    }
     drawMs += (performance.now() - t0 - drawMs) * 0.1;      // Zeit auf der CPU, geglättet (für _sz.bild.stats)
   }
   function draw(f) {
@@ -1249,7 +1262,8 @@ function createRenderer(canvas, { shadowSize = 2048, ldr: forceLdr = false } = {
         gl.bindFramebuffer(gl.FRAMEBUFFER, null);
         exposure = Math.round(px[0] * 1000) / 1000; mean = Math.round(px[1] * 1000) / 1000;
       }
-      return { hdr: !ldr, msaa, fxaa: !msaa, glow: T.glow.length, floatOk, exposure, mean, drawMs: Math.round(drawMs * 100) / 100, w: tW, h: tH };
+      return { hdr: !ldr, msaa, fxaa: !msaa, glow: T.glow.length, floatOk, exposure, mean, drawMs: Math.round(drawMs * 100) / 100,
+        gpuMs: gpuMs === null ? null : Math.round(gpuMs * 100) / 100, w: tW, h: tH, features: { ...tier } };
     },
     dispose() { gl.getExtension('WEBGL_lose_context')?.loseContext(); },
   };
@@ -5158,7 +5172,7 @@ function createMenus(root, api) {
           row('Ducken umschalten', 'C wechselt, statt gehalten zu werden', toggle('Ducken umschalten', P.toggleCrouch, live('toggleCrouch')))),
         sec('Bild',
           row('Sichtfeld', '', slider('Sichtfeld', 60, 100, 1, P.fov, (v) => `${Math.round(v)}°`, live('fov'))),
-          row('Qualität', 'Auto passt die Auflösung an die Bildrate an', seg('Qualität', [['auto', 'Auto'], ['low', 'Niedrig'], ['medium', 'Mittel'], ['high', 'Hoch']], P.quality, live('quality'))),
+          row('Qualität', 'Auto passt Auflösung und Effekte an die Bildrate an', seg('Qualität', [['auto', 'Auto'], ['low', 'Niedrig'], ['medium', 'Mittel'], ['high', 'Hoch']], P.quality, live('quality'))),
           row('Schatten', '', toggle('Schatten', P.shadows, live('shadows'))),
           row('Bildrate anzeigen', '', toggle('Bildrate anzeigen', P.fps, live('fps'))),
           row('Vollbild', 'Das Spiel füllt den ganzen Bildschirm', bFull)),
@@ -5533,7 +5547,9 @@ const HUD_CSS = `
 const WNAME = { nade: 'Granate', knife: 'Messer', fall: 'Sturz' };
 const weaponLabel = (id) => WNAME[id] || WEAPONS[id]?.name || '';
 const mmss = (t) => { t = Math.max(0, Math.ceil(t)); return `${Math.floor(t / 60)}:${String(t % 60).padStart(2, '0')}`; };
-const SCALES = { low: 0.6, medium: 0.8, high: 1 }, SHADOW_RES = { low: 1024, medium: 2048, high: 4096, auto: 2048 };
+const SHADOW_RES = { low: 1024, medium: 2048, high: 4096, auto: 2048 };
+// „Auto“: Merkmale wie „Mittel“. Zuerst sinkt die Auflösung bis 0,7, dann fallen SSAO und Sonnenstrahlen weg (ab AUTO_LITE), erst danach sinkt sie weiter.
+const AUTO = [1, 0.94, 0.88, 0.82, 0.76, 0.7, 0.7, 0.64, 0.58, 0.52, 0.5], AUTO_LITE = 6;
 
 function createApp(win) {
   style('shooter', HUD_CSS + MENU_CSS + NET_CSS);
@@ -5596,6 +5612,7 @@ function createApp(win) {
   let net = null, lobbyOff = null, starting = false, startSeq = 0, startNet = false;
   const netQueue = [];            // Nachrichten, die eintreffen, während die Karte noch gebaut wird
   let forceLdr = false;           // Rückfall ohne Float-Ziele erzwungen (_sz.bild.ldr)
+  let autoLvl = 0, lastQuality = '';   // Stufe auf der Leiter AUTO
   let scale = 1, slow = 0, fast = 0, fpsAcc = 0, fpsN = 0, endTimer = 0, faults = 0, wheelAt = 0, lostEl = null, bg = null, simAt = performance.now();
   let hitT = 0, hitKill = false, hitHead = false, hurtK = 0, lastWarm = 9, boardT = 0, hudT = 0, crouchOn = false, adsOn = false, radarMap = null;
   const arcs = [], keys = new Set(), P3 = [0, 0, 0];
@@ -5603,8 +5620,15 @@ function createApp(win) {
 
   function applyPrefs() {
     R.setShadowSize(SHADOW_RES[prefs.quality] || 2048);
-    R.setTier(TIERS[prefs.quality] || TIERS.medium);
-    if (prefs.quality !== 'auto') scale = SCALES[prefs.quality];
+    if (prefs.quality === 'auto') {
+      if (lastQuality !== 'auto') autoLvl = 0;          // „Auto“ beginnt mit voller Auflösung
+      scale = AUTO[autoLvl];
+      R.setTier(autoLvl >= AUTO_LITE ? { ...TIERS.medium, ssao: 0, rays: false } : TIERS.medium);
+    } else {
+      scale = TIERS[prefs.quality].scale;
+      R.setTier(TIERS[prefs.quality]);
+    }
+    lastQuality = prefs.quality;
     fpsEl.hidden = !prefs.fps;
     size();
   }
@@ -6281,11 +6305,11 @@ function createApp(win) {
   function draw(dt) {
     const real = elapsed();
     if (devicePixelRatio !== dprSeen) { dprSeen = devicePixelRatio; size(); }       // anderer Monitor oder Zoom: die Fenstergröße bleibt, die Pixeldichte nicht
-    // Auflösung der Leistung anpassen
+    // Auflösung und Merkmale der Leistung anpassen (Leiter AUTO)
     if (prefs.quality === 'auto') {
       if (dt > 1 / 45) { slow += dt; fast = 0; } else if (dt < 1 / 57) { fast += dt; slow = Math.max(0, slow - dt * 0.5); }
-      if (slow > 1.5 && scale > 0.5) { scale = Math.max(0.5, scale - 0.12); slow = 0; size(); }
-      else if (fast > 8 && scale < 1) { scale = Math.min(1, scale + 0.06); fast = 0; size(); }
+      if (slow > 1.5 && autoLvl < AUTO.length - 1) { autoLvl = Math.min(AUTO.length - 1, autoLvl + 2); slow = 0; applyPrefs(); }
+      else if (fast > 8 && autoLvl > 0) { autoLvl--; fast = 0; applyPrefs(); }
     }
     if (prefs.fps) { fpsAcc += dt; fpsN++; if (fpsAcc > 0.5) { fpsEl.textContent = `${Math.round(fpsN / fpsAcc)} B/s · ${Math.round(scale * 100)} %`; fpsAcc = 0; fpsN = 0; } }
     if (M) {
