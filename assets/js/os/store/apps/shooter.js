@@ -2243,7 +2243,7 @@ function klangGet(name, v) {
 }
 
 // --------------------------------------------------------------------------
-// 8c · Mischpult: Stimmen-Pool, Busse, Begrenzer, Entfernung, Verdeckung und Raumhall.
+// 8c · Mischpult: Stimmen-Pool, Busse, Begrenzer, Entfernung, Verdeckung, Raumzonen und Hall.
 // Je Stimme: BufferSource → Tiefpass (ortsgebunden) → Gain → StereoPanner (ortsgebunden oder mit Seitenlage) → Bus, dazu Gain → Hall.
 // Busse und Hall → Summe (prefs.volume) → Begrenzer → audio().out. Die Klänge selbst kommen fertig berechnet aus der Klangschmiede.
 // --------------------------------------------------------------------------
@@ -2257,6 +2257,51 @@ const LIMIT = { threshold: -4, knee: 2, ratio: 20, attack: 0.002, release: 0.09 
 const LIMIT_TRIM = 10 ** (-1.94 / 20);
 const IMPACT_SND = { concrete: 'beton', metal: 'metall', wood: 'holz', body: 'koerper' };
 const RELOAD_SND = { out: 'raus', in: 'rein', shell: 'patrone', bolt: 'verschluss' };
+/**
+ * Raumantworten der vier Zonen: Länge (s), Impulsdichte je s (Anfang → Ende), RT60 (s), Filter (Bandpass bp oder gleitender Tiefpass lp, Hz),
+ * frühe Echos [ms, dB] (earlyLp: eigener Tiefpass, spread: links und rechts versetzt, s), Flatterecho comb [links s, rechts s, Rückkopplung], Rückweg (dB).
+ */
+const RAUM = {
+  hof: { len: 1.6, dens: [1500, 300], rt: 1.3, bp: [250, 3000], early: [[47, -8], [83, -11], [131, -13], [197, -16], [263, -19]], earlyLp: 2500, spread: 0.004, ret: -10 },
+  halle: { len: 1.0, dens: [3000, 3000], rt: 0.9, lp: [9000, 2200], early: [[9, -4], [14, -6], [22, -7], [31, -9], [43, -11]], ret: -7 },
+  gasse: { len: 0.7, dens: [2000, 2000], rt: 0.55, bp: [400, 5000], comb: [0.017, 0.021, 0.55], ret: -9 },
+  raum: { len: 0.35, dens: [4000, 4000], rt: 0.28, lp: [6000, 3000], early: [[4, -3], [7, -5], [11, -7]], ret: -8 },
+};
+const ZONEN = Object.keys(RAUM);
+/** Berechnete Raumantworten je Abtastrate: sr → { zone: [links, rechts] } (der ConvolverNode verlangt die Rate des AudioContext). */
+const RAUM_IR = new Map();
+/**
+ * Stereo-Raumantwort: dünnes Impulsrauschen (±1 mit der Dichte der Tabelle) mal exp(−t/tau), tau = RT60/6,91, gefiltert,
+ * auf Energie 1 gebracht (der Rückweg bestimmt die Lautstärke), dazu die frühen Echos. Links und rechts aus verschiedenen Saaten.
+ */
+function raumAntwort(name, sr) {
+  const D = RAUM[name], K = forge(sr), tau = D.rt / 6.91, ch = [];
+  const shape = (x) => { if (D.bp) { K.hp(x, { f: D.bp[0] }); K.lp(x, { f: D.bp[1] }); } else K.lp(x, { f: D.lp[0], f2: D.lp[1] }); return x; };
+  for (let c = 0; c < 2; c++) {
+    const rnd = K.rng(klangHash(`raum.${name}`) + c), a = K.buf(D.len), n = a.length;
+    for (let i = 0; i < n; i++) {
+      const t = i / sr;
+      if (rnd() < (D.dens[0] * (D.dens[1] / D.dens[0]) ** (t / D.len)) / sr) a[i] = (rnd() < 0.5 ? -1 : 1) * Math.exp(-t / tau);
+    }
+    shape(a);
+    if (D.comb) K.comb(a, { delay: D.comb[c], fb: D.comb[2], damp: 0.2 });
+    K.fade(a, { inT: 0.002, outT: Math.min(0.1, D.len * 0.2) });
+    const e = Math.sqrt(a.reduce((q, x) => q + x * x, 0)) || 1;
+    for (let i = 0; i < n; i++) a[i] /= e;
+    if (D.early) {
+      const ea = K.buf(D.len);
+      D.early.forEach(([ms, db], j) => {
+        const i = Math.round((ms / 1000 + (D.spread ? (c ? 1 : -1) * (j % 2 ? -1 : 1) * D.spread : 0)) * sr);
+        if (i >= 0 && i < n) ea[i] += 10 ** (db / 20);
+      });
+      if (D.earlyLp) K.lp(ea, { f: D.earlyLp }); else shape(ea);
+      K.mix(a, ea);
+    }
+    ch.push(a);
+  }
+  return ch;
+}
+const raumIR = (sr) => { let m = RAUM_IR.get(sr); if (!m) RAUM_IR.set(sr, (m = Object.fromEntries(ZONEN.map((z) => [z, raumAntwort(z, sr)])))); return m; };
 
 /**
  * Klang des Spiels. getPrefs() liefert die Vorgaben (volume …). Alle alten Methoden (shot, explosion, …) bleiben mit ihren Signaturen
@@ -2264,7 +2309,9 @@ const RELOAD_SND = { out: 'raus', in: 'rein', shell: 'patrone', bolt: 'verschlus
  */
 function createSound(getPrefs) {
   let ctx = null, sum = null, gone = false, phys = null, LL = { x: 0, y: 1.6, z: 0, yaw: 0 };
+  let lsend = null, zoneL = 'hof', shown = 'hof', zoneT = 0, forced = null;
   const bus = {}, pool = [], last = {}, stat = { plays: 0, steals: 0, drops: 0, max: 0 }, st = { hp: 100, boom: 0 };
+  const hallIn = {}, lzone = {}, zcache = new Map();
   const vol = () => getPrefs().volume;
   const ok = () => !gone && sfx.enabled && audioReady() && vol() > 0;
 
@@ -2282,6 +2329,23 @@ function createSound(getPrefs) {
     lim.connect(trim);
     trim.connect(a.out);
     for (const [b, db] of Object.entries(BUSSE)) { bus[b] = ctx.createGain(); bus[b].gain.value = 10 ** (db / 20); bus[b].connect(sum); }
+    // Hall: je Zone ein ConvolverNode. Ortsgebundene Stimmen senden in die Zone der Quelle, alles andere über lsend in die Zone des Hörers
+    // (lzone blendet beim Zonenwechsel über).
+    const ir = raumIR(ctx.sampleRate), hallOut = ctx.createGain();
+    hallOut.connect(sum);
+    lsend = ctx.createGain();
+    for (const z of ZONEN) {
+      const ab = ctx.createBuffer(2, ir[z][0].length, ctx.sampleRate), cv = ctx.createConvolver(), ret = ctx.createGain();
+      ab.copyToChannel(ir[z][0], 0); ab.copyToChannel(ir[z][1], 1);
+      cv.normalize = false;
+      cv.buffer = ab;
+      ret.gain.value = 10 ** (RAUM[z].ret / 20);
+      hallIn[z] = ctx.createGain();
+      hallIn[z].connect(cv); cv.connect(ret); ret.connect(hallOut);
+      lzone[z] = ctx.createGain();
+      lzone[z].gain.value = z === shown ? 1 : 0;
+      lsend.connect(lzone[z]); lzone[z].connect(hallIn[z]);
+    }
     S.tap = trim;
   }
 
@@ -2317,7 +2381,7 @@ function createSound(getPrefs) {
     return w;
   }
   /** Platz schaffen. false: die neue Stimme ist zu unwichtig. */
-  function room(list, prio, prot, now) {
+  function vacate(list, prio, prot, now) {
     let w = weakest(list, now);
     if (!w && prot) w = list.filter((v) => v.prot).sort((a, b) => a.t0 - b.t0)[0];     // ein eigener Schuss weicht nur einem neueren eigenen
     if (!w || (w.prio > prio && !prot)) return false;
@@ -2347,9 +2411,38 @@ function createSound(getPrefs) {
     return { d, vol, fc, pan: side * 0.85, delay: Math.min(d / 343, 0.35) };
   }
 
+  // ---------- Raumzonen ----------
+  /**
+   * Zone an einer Stelle (y = Fußhöhe): ein Strahl nach oben (überdacht?), acht waagerechte in Augenhöhe (mittlere freie Weite w, höchstens 30).
+   * Überdacht: w < 5 raum, sonst halle. Offen: w < 7 gasse, sonst hof. Je Meter-Zelle zwischengespeichert; RAY bleibt unberührt.
+   */
+  function zoneAt(x, y, z) {
+    if (!phys) return zoneL;
+    const key = `${Math.round(x)}|${Math.round(y)}|${Math.round(z)}`;
+    let zn = zcache.get(key);
+    if (zn) return zn;
+    const t = RAY.t, i = RAY.i, ax = RAY.axis, roof = phys.raycast(x, y + 1.7, z, 0, 1, 0, 14) !== Infinity;
+    let w = 0;
+    for (let k = 0; k < 8; k++) { const r = phys.raycast(x, y + 1.6, z, Math.cos((k * Math.PI) / 4), 0, Math.sin((k * Math.PI) / 4), 30); w += r === Infinity ? 30 : r; }
+    RAY.t = t; RAY.i = i; RAY.axis = ax;
+    w /= 8;
+    zn = roof ? (w < 5 ? 'raum' : 'halle') : w < 7 ? 'gasse' : 'hof';
+    if (zcache.size > 4000) zcache.clear();
+    zcache.set(key, zn);
+    return zn;
+  }
+  /** Hall des Hörers auf seine (oder die vorgegebene) Zone überblenden, rund 0,3 s. */
+  function fadeZone() {
+    const z = forced || zoneL;
+    if (!ctx || z === shown) return;
+    shown = z;
+    const t = ctx.currentTime;
+    for (const k of ZONEN) { lzone[k].gain.cancelScheduledValues(t); lzone[k].gain.setTargetAtTime(k === z ? 1 : 0, t, 0.1); }
+  }
+
   /**
    * Spielt ein Rezept. o: { x, y, z (ohne: nicht ortsgebunden), gain (Faktor), rate, when (s), own,
-   *   L (Hörer, sonst der letzte aus listen), v (Variante), pan, bus, send, free (ohne Verdeckung) }.
+   *   L (Hörer, sonst der letzte aus listen), v (Variante), pan, bus, send (Hall-Anteil), zone (der Quelle), free (ohne Verdeckung) }.
    * Liefert die Stimme ({ stop(fade) }) oder null.
    */
   function play(name, o = {}) {
@@ -2362,7 +2455,7 @@ function createSound(getPrefs) {
     if (o.x !== undefined && R.reach > 0 && !pl) return null;
     const prio = R.prio, prot = !!o.own && R.bus === 'waffe';
     const mine = pool.filter((v) => v.name === name);
-    if ((mine.length >= R.cap && !room(mine, prio, prot, now)) || (pool.length >= VOICES_MAX && !room(pool, prio, prot, now))) { stat.drops++; return null; }
+    if ((mine.length >= R.cap && !vacate(mine, prio, prot, now)) || (pool.length >= VOICES_MAX && !vacate(pool, prio, prot, now))) { stat.drops++; return null; }
     let vi = o.v ?? (Math.random() * R.n) | 0;
     if (o.v === undefined && R.n > 1 && vi === last[name]) vi = (vi + 1 + ((Math.random() * (R.n - 1)) | 0)) % R.n;
     last[name] = vi;
@@ -2388,6 +2481,19 @@ function createSound(getPrefs) {
     const v = { name, prio, prot, vol, t0: now, len, until: now + ((o.when || 0) + (pl ? pl.delay : 0) + len + 1.5) * 1000, loop: R.loop, src, g, nodes, off: false, ending: false };
     v.stop = (fade) => stop(v, fade);
     src.onended = () => release(v);
+    // Hall: in die Zone der Quelle; liegt der Hörer woanders, die Hälfte zusätzlich in seine
+    const send = o.send ?? R.send + (pl ? (R.sendD * pl.d) / R.reach : 0), zl = forced || zoneL;
+    if (send > 0 && zl !== 'aus') {
+      const sg = ctx.createGain();
+      sg.gain.value = send;
+      g.connect(sg);
+      nodes.push(sg);
+      if (pl) {
+        const zs = forced || o.zone || zoneAt(o.x, Math.max(0, (o.y ?? L.y) - 1.2), o.z ?? L.z);
+        sg.connect(hallIn[zs]);
+        if (zs !== zl) { const s2 = ctx.createGain(); s2.gain.value = 0.5; sg.connect(s2); s2.connect(lsend); nodes.push(s2); }
+      } else sg.connect(lsend);
+    }
     src.start(t);
     pool.push(v);
     stat.plays++;
@@ -2397,9 +2503,18 @@ function createSound(getPrefs) {
 
   const S = {
     play,
-    setWorld(p) { phys = p || null; },
-    /** Einmal je Bild (am Ende von M.aim): Hörer merken, Lautstärke nachführen. */
-    listen(L) { LL = L; if (ctx && sum.gain.value !== vol()) sum.gain.setTargetAtTime(vol(), ctx.currentTime, 0.02); },
+    /** Welt der Partie (nach createPhysics): Verdeckung und Raumzonen. null: ohne Welt. */
+    setWorld(p) { phys = p || null; zcache.clear(); zoneT = 0; },
+    /** Einmal je Bild (am Ende von M.aim): Hörer merken, Lautstärke nachführen, alle 0,25 s die Zone des Hörers bestimmen. */
+    listen(L, dt = 0) {
+      LL = L;
+      if (!ctx) return;
+      if (sum.gain.value !== vol()) sum.gain.setTargetAtTime(vol(), ctx.currentTime, 0.02);
+      if ((zoneT -= dt) <= 0) { zoneT = 0.25; zoneL = zoneAt(L.x, Math.max(0, L.y - 1.6), L.z); fadeZone(); }
+    },
+    /** Raum vorgeben (Hörprobe): 'hof' | 'halle' | 'gasse' | 'raum' | 'aus' (ohne Hall) – null: wieder selbst bestimmen. */
+    room(z) { forced = z && (z === 'aus' || RAUM[z]) ? z : null; fadeZone(); },
+    zone: () => forced || zoneL,
     voices() { purge(performance.now()); return pool.length; },
     state(o) { Object.assign(st, o); },
     stats: () => ({ ...stat, voices: pool.length }),
@@ -6391,6 +6506,9 @@ function createApp(win) {
     play: (name, o) => !!S.play(name, o),
     stats: () => S.stats(),
     tap: () => S.out(),
+    zone: () => S.zone(),
+    room: (z) => S.room(z),
+    ir: (zone, sr = KSR) => raumIR(sr)[zone],
   };
 
   return {
