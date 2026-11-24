@@ -179,9 +179,14 @@ defMat('asphalt', 4, 'concrete', (u, v, o, N) => {
   let c = 0.17 + (n - 0.5) * 0.1 + (f - 0.5) * 0.05 + (w - 0.5) * 0.08;
   let h = (f - 0.5) * 0.5 + (w - 0.5) * 0.12;                               // Korn
   if (w > 0.982) c += 0.13;
-  const cr = Math.abs(N.fbm(u, v, 3, 3, 4) - 0.5);
-  if (cr < 0.0045) c *= 0.5;
-  h -= 0.9 * (1 - sstep(0.002, 0.007, cr));                                 // Risse (weich auslaufende Rinne)
+  // Risse: Höhenlinie eines Rauschens, Abstand in Metern über den Anstieg (gleich breit, statt dort fett, wo das Rauschen flach ist);
+  // ein zweites Rauschen lässt sie abbrechen, damit keine geschlossenen Schlingen entstehen. Fein und flach: in der Ferne verschwinden sie.
+  // Kleine Verwerfung des Orts macht den Verlauf zackig statt glatt geschwungen.
+  const e = 1 / 1024, cf = (a, b) => N.fbm(a + 0.012 * (N.at(3, a * 40, b * 40, 40, 40) - 0.5), b + 0.012 * (N.at(2, a * 40, b * 40, 40, 40) - 0.5), 3, 3, 4);
+  const gr = Math.hypot(cf(u + e, v) - cf(u - e, v), cf(u, v + e) - cf(u, v - e)) / (2 * e);
+  const dm = (Math.abs(cf(u, v) - 0.5) / Math.max(gr, 0.4)) * 4, seg = sstep(0.22, 0.36, N.at(5, u * 5, v * 5, 5, 5));
+  c *= 1 - 0.36 * (1 - sstep(0.004, 0.012, dm)) * seg;
+  h -= 0.28 * (1 - sstep(0.002, 0.011, dm)) * seg;                           // Risse (schmale, flache Rinne)
   o[0] = c; o[1] = c; o[2] = c * 1.04; o[3] = 0.1 + 0.3 * n;
   o[4] = hgt(h); o[5] = 0.82 + (n - 0.5) * 0.2;
 });
