@@ -2633,7 +2633,7 @@ for (const [name, seq] of Object.entries(SIGNALE)) {
 
 // ---------- Umgebung je Karte (Schritt 7.1) ----------
 /** Abtastwerte je Rechenstück langer Schleifen: ein Stück dauert wenige Millisekunden, dazwischen gibt der Generator ab. */
-const STUECK = 48000;
+const STUECK = 24000;
 /** Stückweise rechnen: fn(i0, i1) für alle Stücke von höchstens STUECK Abtastwerten, mit yield dazwischen. */
 function* stuecke(n, fn) { for (let i = 0; i < n; i += STUECK) { fn(i, Math.min(n, i + STUECK)); yield; } }
 /**
@@ -2695,14 +2695,17 @@ function blepSaw(a, sr, { f, at = 0, dur, gain = 1, ph0 = 0, vib = 0, vibF = 5 }
  */
 function* loopify(chs, sr, len, xf = 0.5, period = 1) {
   const n0 = Math.round(len * sr), X = Math.round(xf * sr), w = Math.floor(Math.round(0.2 * sr) / period), W = Math.round(0.1 * sr), pre = [];
+  // Leistungssummen nur um die gesuchte Naht (lo … hi), nicht über das ganze Feld: spart zwei große Felder (und damit Pausen der Speicherbereinigung)
+  const lo = n0 - period * w - W, hi = n0 + period * w + W;
   let peak = 0;
   for (const c of chs) {
-    const p = new Float64Array(c.length + 1);
-    for (let i = 0; i < c.length; i++) { const v = c[i]; p[i + 1] = p[i] + v * v; if (v > peak) peak = v; else if (-v > peak) peak = -v; }
+    for (let i = 0; i < c.length; i++) { const v = c[i]; if (v > peak) peak = v; else if (-v > peak) peak = -v; }
+    const p = new Float64Array(hi - lo + 1);
+    for (let i = lo; i < hi; i++) p[i - lo + 1] = p[i - lo] + c[i] * c[i];
     pre.push(p);
     yield;
   }
-  const energy = (a, b) => pre.reduce((s, p) => s + p[b] - p[a], 0);
+  const energy = (a, b) => pre.reduce((s, p) => s + p[b - lo] - p[a - lo], 0);
   let best = n0, bestS = Infinity;
   for (let k = 0; k <= 2 * w; k++) {
     const L = n0 + period * (k & 1 ? (k + 1) / 2 : -k / 2);            // tonale Schleifen: die Naht nur auf ganzen Perioden
@@ -2837,11 +2840,13 @@ rezept('amb.moewe', {
 });
 rezept('amb.horn', {
   n: 2, later: true, bus: 'amb', gain: spitze(-20, 'amb'), prio: 1, cap: 1, reach: 400, send: 0.8,
-  make(K, rnd, v) {
+  *make(K, rnd, v) {                                  // Generator: je Schicht ein Rechenschritt (am Stück bis zu 7 ms)
     const fk = v ? 1.04 : 0.97, a = K.buf(2.6);
     blepSaw(a, K.SR, { f: 110 * fk, dur: 2.2, gain: 0.5, ph0: rnd() });
+    yield;
     blepSaw(a, K.SR, { f: 165 * fk, dur: 2.2, gain: 0.4, ph0: rnd() });
-    K.lp(a, { f: 500 }); K.lp(a, { f: 500 });
+    yield;
+    K.lp(a, { f: 500 }); yield; K.lp(a, { f: 500 });
     K.env(a, [[0, 0.001], [0.18, 1], [1.8, 0.85], [2.3, 0.001]]);
     return K.norm(K.fade(a, { outT: 0.3 }), 1);
   },
@@ -2879,7 +2884,8 @@ const QUELLE = {
     blepSaw(a, K.SR, { f: 100, dur: a.length / K.SR, gain: 0.5 });
     yield;
     K.sine(a, { f: 200, gain: 0.35 }); K.sine(a, { f: 300, gain: 0.12, phase: 1 });
-    K.hp(a, { f: 70 }); K.lp(a, { f: 2400 });
+    yield;
+    K.hp(a, { f: 70 }); yield; K.lp(a, { f: 2400 });
     const fl = drift(rnd, 3), amp = shapeRun(K.SR, (t) => 0.8 + 0.2 * fl(t));
     yield* stuecke(a.length, (i0, i1) => amp(a, i0, i1));
     for (let i = 0; i < 9; i++) K.click(a, rnd, { at: rnd() * (a.length / K.SR - 0.01), dur: 0.002 + 0.002 * rnd(), gain: 0.25 + 0.3 * rnd() });
@@ -3185,7 +3191,8 @@ rezept('jet', {
     const bp = biquadRun(sr, 'bandpass', fOf, 1.2), bpw = biquadRun(sr, 'bandpass', (t) => fOf(t) * 1.8, 2);
     yield* stuecke(a.length, (i0, i1) => { nz(a, i0, i1); nw(w, i0, i1); bp(a, i0, i1); bpw(w, i0, i1); for (let i = i0; i < i1; i++) a[i] += 0.35 * w[i]; });
     const lo = K.noise(K.buf(len), rnd, 'brown');
-    K.lp(lo, { f: 140 }); K.lp(lo, { f: 140 }); K.hp(lo, { f: 30 });
+    K.lp(lo, { f: 140 }); yield; K.lp(lo, { f: 140 }); K.hp(lo, { f: 30 });
+    yield;
     K.mix(a, K.norm(lo, K.peak(a) * 0.8));
     K.env(a, [[0, 0.01], [0.6, 0.12], [mid, 1], [mid + 0.25, 0.75], [2.1, 0.12], [len, 0.002]]);
     return K.norm(K.fade(a, { inT: 0.05, outT: 0.08 }), 1);
@@ -3891,9 +3898,10 @@ function createSound(getPrefs) {
       if (o.boom > 0) boomFx(clamp(o.boom, 0, 1), o.delay || 0);
       if (o.hp !== undefined) lowHp(o.hp);
     },
-    /** Pegel und Tiefpass der Busse (Prüfungen): je Bus { gain, duck, lp }, welt zusätzlich hpLp; hall. */
+    /** Pegel und Tiefpass der Busse (Prüfungen): je Bus { gain, duck, lp }, welt zusätzlich hpLp; hall; innen: Dämpfung der Umgebung. */
     busse: () => ({
       ...Object.fromEntries([...Object.keys(BUSSE), 'hall'].map((b) => [b, { gain: bus[b]?.gain.value ?? null, duck: zst[b]?.duck.gain.value ?? 1, lp: zst[b]?.lp.frequency.value ?? null, ...(b === 'welt' ? { hpLp: hp.lp?.frequency.value } : {}) }])),
+      innen: ambIn ? { on: amb.inside, duck: ambIn.gain.value, lp: ambLp.frequency.value } : null,
       limit: lim ? { threshold: lim.threshold.value, ratio: lim.ratio.value, trim: trim.gain.value } : null,
     }),
     stats: () => ({ ...stat, by: { ...stat.by }, voices: pool.length, beds: beds.length, bedNames: beds.map((v) => v.name) }),
