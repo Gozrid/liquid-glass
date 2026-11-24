@@ -1016,6 +1016,7 @@ uniform float uLdr, uGlowK, uSatt, uKontrast, uVig, uKornHier, uAoAn, uStrahlenK
 uniform vec3 uTonS, uTonL;
 uniform vec4 uWelle[4];             // Bildwellen (f.post.ripples): Mitte und Radius in halben Bildhöhen, Stärke
 uniform float uWellen, uAsp, uSaum;  // Zahl der Wellen, Seitenverhältnis, Farbsaum (f.post.chroma)
+uniform float uRot, uWenig, uPuls, uRohr, uHoehe;   // Treffer (hurt), wenig Leben (lowHp), Herzschlag 0 … 1, Zielfernrohr (scope), Bildhöhe in Pixeln
 in vec2 vUV; out vec4 o;
 ${GLSL_ACES}
 ${GLSL_KORN}
@@ -1029,8 +1030,10 @@ void main() {
     uv -= d / max(l, 1e-4) * vec2(1. / uAsp, 1.) * x * exp(-x * x) * w.w * .014;
   }
   vec3 c = texture(uFarbe, uv).rgb, g = texture(uGlow, uv).rgb * uGlowK;
-  if (uSaum > 0.) {                                                       // Farbsaum: Rot und Blau gegeneinander versetzt, zum Rand hin stärker
-    vec2 q = uv - .5, s = q / max(length(q), 1e-3) * vec2(1., uAsp) * (.002 + .004 * uSaum) * uSaum * (.35 + 1.3 * length(q));
+  vec2 qr = (vUV - .5) * vec2(uAsp, 1.);                                  // Zielfernrohr: Abstand zur Mitte in Bildhöhen, Kreis mit Radius 0,42
+  float rr = length(qr), saum = max(uSaum, uRohr * smoothstep(.3, .42, rr) * .9);
+  if (saum > 0.) {                                                        // Farbsaum: Rot und Blau gegeneinander versetzt, zum Rand hin stärker
+    vec2 q = uv - .5, s = q / max(length(q), 1e-3) * vec2(1., uAsp) * (.002 + .004 * saum) * saum * (.35 + 1.3 * length(q));
     c.r = texture(uFarbe, uv + s).r; c.b = texture(uFarbe, uv - s).b;
     g.r = texture(uGlow, uv + s).r * uGlowK; g.b = texture(uGlow, uv - s).b * uGlowK;
   }
@@ -1047,9 +1050,16 @@ void main() {
   else c = min(c + g, 1.);
   float l = dot(c, vec3(.2126, .7152, .0722));
   c *= mix(uTonS, uTonL, smoothstep(.15, .85, l));                       // Farbstimmung: Schatten und Lichter getönt
-  c = clamp((mix(vec3(l), c, uSatt) - .5) * uKontrast + .5, 0., 1.);    // Sättigung, Kontrast
+  c = clamp((mix(vec3(l), c, uSatt * (1. - .4 * uWenig)) - .5) * uKontrast + .5, 0., 1.);   // Sättigung (wenig Leben: bis 60 %), Kontrast
   vec2 q = vUV - .5;
-  c *= 1. - uVig * pow(dot(q, q) * 2., 1.5);                             // Vignette
+  c *= 1. - (uVig + uWenig * (.2 + .35 * uPuls)) * pow(dot(q, q) * 2., 1.5);   // Vignette, bei wenig Leben im Takt des Herzschlags
+  float rand = smoothstep(.45, 1.25, length(q) * 2.) * uRot;              // Treffer: Rand rot gefärbt
+  c = mix(c, c * vec3(1., .25, .2) + vec3(.09, 0., 0.), rand);
+  if (uRohr > .5) {                                                       // Zielfernrohr: außen schwarz, Rand über 3 % weich, innen leicht abgedunkelt
+    float px = 1. / uHoehe, kreuz = max(1. - smoothstep(.75 * px, 1.25 * px, abs(qr.x)), 1. - smoothstep(.75 * px, 1.25 * px, abs(qr.y)));
+    c *= smoothstep(.42, .407, rr) * mix(1., .86, smoothstep(.3, .42, rr));   // Rand über 3 % des Radius weich
+    c *= 1. - .92 * kreuz;                                                 // Fadenkreuz 1,5 Pixel
+  }
   o = vec4(uKornHier > .5 ? korn(c) : c, 1.);
 }`;
 // Kantenglättung ohne Mehrfachabtastung (FXAA nach Lottes, schlanke Fassung): liest das fertige RGBA8-Bild, schreibt auf die Bildfläche
@@ -1726,6 +1736,12 @@ function createRenderer(canvas, { shadowSize = 2048, ldr: forceLdr = false } = {
     gl.uniform1f(P.final.u.uWellen, nW);
     gl.uniform1f(P.final.u.uAsp, aspect);
     gl.uniform1f(P.final.u.uSaum, clamp(pf.chroma || 0, 0, 1));
+    gl.uniform1f(P.final.u.uRot, clamp(pf.hurt || 0, 0, 1));
+    gl.uniform1f(P.final.u.uWenig, clamp(pf.lowHp || 0, 0, 1));
+    const hb = ((f.time || 0) * 1.2) % 1;                                // Herzschlag: zwei Schläge je Takt, 72 je Minute
+    gl.uniform1f(P.final.u.uPuls, Math.exp(-hb * 14) + 0.6 * (hb > 0.2 ? Math.exp(-(hb - 0.2) * 14) : 0));
+    gl.uniform1f(P.final.u.uRohr, pf.scope ? 1 : 0);
+    gl.uniform1f(P.final.u.uHoehe, H);
     gl.uniform1i(P.final.u.uBel, 4);
     gl.uniform1f(P.final.u.uLdr, ldr ? 1 : 0);
     if (aoOn) { bindTex(5, T.ao); bindTex(6, T.tiefe); }
@@ -3041,22 +3057,6 @@ function createFx(prefs = null, phys = null, world = null) {
     sand: { v: 3, s: [0.08, 0.1], life: 8, fade: 3, n: [0, 0] },
     cloth: { v: 4, s: [0.012, 0.016], life: 40, fade: 4, n: [2, 2], box: [0.004, 0.004, 0.05], col: [0.45, 0.45, 0.43, K_MATTE] },
   };
-  /** Blut nur mit Einstellung „Blut“ (prefs.blood, Vorgabe an); Flecken: höchstens FX_MAX.blood, 20 s sichtbar, dann 4 s verblassend */
-  const bloodOn = () => prefs?.blood !== false;
-  function splat(x, y, z, axis, sign, s) {
-    if (blood.length >= FX_MAX.blood) blood.shift();
-    blood.push({ x, y, z, axis, sign, s, life: 24, fade: 4, a: 0.85, k: Q_BLOOD, c: [0.25, 0.035, 0.03], seed: seedOf(), rot: rnd(TAU) });
-  }
-  /** Trümmerstück: kleiner Quader mit Drall, Schwerkraft 14, ein Aufprall auf der Höhe, die beim Entstehen einmal bestimmt wird */
-  function chunk(x, y, z, vx, vy, vz, box, col, life) {
-    if (chunks.length >= capOf(FX_MAX.chunks)) chunks.shift();
-    const f = phys ? phys.floorBelow(x, y + 0.02, z, 0.02) : 0, k = rnd(0.7, 1.3);
-    chunks.push({ x, y, z, vx, vy, vz, rx: rnd(TAU), ry: rnd(TAU), wx: rnd(-25, 25), wy: rnd(-25, 25), sx: box[0] * k, sy: box[1] * k, sz: box[2] * k, col, life, floor: f, hit: 0 });
-  }
-
-  const F = {
-    quads, lights,
-    light(x, y, z, r, col, life) { if (lights.length > 5) lights.shift(); lights.push({ x, y, z, r, c: col, life, max: life }); },
   /**
    * Schwebstaub (TIERS.dust): 160 Teilchen in einem 12-m-Würfel um die Kamera, Orte aus einer festen Streufolge mit Umlauf (das Feld
    * wandert mit, ohne neu zu entstehen), am Würfelrand ausgeblendet. Sie sind beleuchtet wie Staub – sichtbar also vor allem im Licht
@@ -3088,6 +3088,22 @@ function createFx(prefs = null, phys = null, world = null) {
       if (a > 0.004) quad(x, VEILS[o + 2], z, (rx / l) * w, 0, (rz / l) * w, 0, w * 0.3, 0, 0.84, 0.72, 0.54, a, Q_DUST, (i * 7) & 63, 0.5);
     }
   }
+  /** Blut nur mit Einstellung „Blut“ (prefs.blood, Vorgabe an); Flecken: höchstens FX_MAX.blood, 20 s sichtbar, dann 4 s verblassend */
+  const bloodOn = () => prefs?.blood !== false;
+  function splat(x, y, z, axis, sign, s) {
+    if (blood.length >= FX_MAX.blood) blood.shift();
+    blood.push({ x, y, z, axis, sign, s, life: 24, fade: 4, a: 0.85, k: Q_BLOOD, c: [0.25, 0.035, 0.03], seed: seedOf(), rot: rnd(TAU) });
+  }
+  /** Trümmerstück: kleiner Quader mit Drall, Schwerkraft 14, ein Aufprall auf der Höhe, die beim Entstehen einmal bestimmt wird */
+  function chunk(x, y, z, vx, vy, vz, box, col, life) {
+    if (chunks.length >= capOf(FX_MAX.chunks)) chunks.shift();
+    const f = phys ? phys.floorBelow(x, y + 0.02, z, 0.02) : 0, k = rnd(0.7, 1.3);
+    chunks.push({ x, y, z, vx, vy, vz, rx: rnd(TAU), ry: rnd(TAU), wx: rnd(-25, 25), wy: rnd(-25, 25), sx: box[0] * k, sy: box[1] * k, sz: box[2] * k, col, life, floor: f, hit: 0 });
+  }
+
+  const F = {
+    quads, lights,
+    light(x, y, z, r, col, life) { if (lights.length > 5) lights.shift(); lights.push({ x, y, z, r, c: col, life, max: life }); },
     tracer(x0, y0, z0, x1, y1, z1, thin) {
       const len = Math.hypot(x1 - x0, y1 - y0, z1 - z0);
       if (len < 1.5) return;
@@ -3230,6 +3246,7 @@ function createFx(prefs = null, phys = null, world = null) {
     wisp(x, y, z) { puff(x, y, z, rnd(-0.2, 0.2), rnd(0.3, 0.7), rnd(-0.2, 0.2), { life: rnd(0.5, 0.9), s: 0.05, grow: 0.3, c: [0.7, 0.7, 0.7], a: 0.22, k: Q_SMOKE, drag: 1 }); },
 
     update(dt) {
+      clock += dt;
       for (let i = parts.length - 1; i >= 0; i--) {
         const p = parts[i];
         if ((p.life -= dt) <= 0) { parts[i] = parts[parts.length - 1]; parts.pop(); continue; }
@@ -3246,7 +3263,6 @@ function createFx(prefs = null, phys = null, world = null) {
         if ((c.t += dt) > c.dur) { columns.splice(i, 1); continue; }
         if ((c.next -= dt) > 0) continue;
         c.next = 0.15;
-      clock += dt;
         const k = 1 - c.t / c.dur;
         puff(c.x + rnd(-0.4, 0.4), c.y + rnd(0, 0.5), c.z + rnd(-0.4, 0.4), rnd(-0.3, 0.3), rnd(1.2, 2), rnd(-0.3, 0.3),
           { life: rnd(2.5, 3.5), s: rnd(0.5, 0.8), grow: 0.7, c: [0.55, 0.53, 0.5], a: 0.5 * k + 0.1, k: Q_SMOKE, drag: 0.6, grav: -0.25 });
@@ -3281,6 +3297,7 @@ function createFx(prefs = null, phys = null, world = null) {
         const t = p.life / p.max;
         bill(p.x, p.y, p.z, p.s, p.r, p.g, p.b, p.a * Math.min(1, t * 2), p.k, p.seed + Math.min(0.999, 1 - t));
       }
+      motes();
       if (extra) extra();
       for (const p of parts) {
         if (p.k === Q_SMOKE || p.k === Q_DUST || p.k === Q_BLOOD) continue;
@@ -3297,7 +3314,6 @@ function createFx(prefs = null, phys = null, world = null) {
       }
       for (const t of tracers) {
         const k = t.t / t.dur, dx = (t.x1 - t.x0) / t.len, dy = (t.y1 - t.y0) / t.len, dz = (t.z1 - t.z0) / t.len;
-      motes();
         const head = k * t.len, tail = Math.max(0, head - Math.min(10, t.len * 0.5));
         const mx = t.x0 + dx * (head + tail) / 2, my = t.y0 + dy * (head + tail) / 2, mz = t.z0 + dz * (head + tail) / 2;
         const w = t.w * (1 + Math.hypot(cx - mx, cy - my, cz - mz) * 0.03);       // Breite quer zur Blickrichtung, in der Ferne breiter
@@ -4448,6 +4464,8 @@ function createMatch(cfg, hooks) {
     basis(cam.yaw, cam.pitch, cam.roll || 0);
     const th = Math.tan((cam.fov * DEG) / 2);
     post.ripples.length = 0; post.chroma = 0; post.flash = 0;
+    post.scope = M.scoped ? 1 : 0;
+    post.lowHp = me.alive && !M.spec && !M.fixedCam ? clamp((40 - me.hp) / 30, 0, 1) : 0;   // ab 40 Lebenspunkten, voll bei 10
     for (const b of fx.booms) {
       const dx = b.x - cam.x, dy = b.y - cam.y, dz = b.z - cam.z, d = Math.hypot(dx, dy, dz);
       if (d < 12) { post.chroma = Math.max(post.chroma, 1 - b.t / 0.4); if (b.t < 0.3) post.flash = Math.max(post.flash, 1 - b.t / 0.3); }
@@ -6434,6 +6452,8 @@ function createApp(win) {
   let forceLdr = false;           // Rückfall ohne Float-Ziele erzwungen (_sz.bild.ldr)
   let autoLvl = 0, lastQuality = '';   // Stufe auf der Leiter AUTO
   let scale = 1, slow = 0, fast = 0, fpsAcc = 0, fpsN = 0, endTimer = 0, faults = 0, wheelAt = 0, lostEl = null, bg = null, simAt = performance.now();
+  let hurtOut = 0;                                     // Stärke des Trefferrahmens für den Schlussschritt (f.post.hurt)
+  let ovClip = false;                                  // Auflage gerade auf den Kreis des Zielfernrohrs beschnitten
   let hitT = 0, hitKill = false, hitHead = false, hurtK = 0, lastWarm = 9, boardT = 0, hudT = 0, crouchOn = false, adsOn = false, radarMap = null;
   const arcs = [], keys = new Set(), P3 = [0, 0, 0];
   const playing = () => !!M && !paused && M.state !== 'over';
@@ -6788,8 +6808,10 @@ function createApp(win) {
   /** Fadenkreuz, Treffermarken, Schadensrichtung, Namen, Stellungen, Granatenwarnung */
   function drawOverlay(dt) {
     const W = fxc.width, H = fxc.height, me = M.me, cam = M.cam, u = H / 720;
+    if (ovClip) { g2.restore(); ovClip = false; }
     g2.setTransform(1, 0, 0, 1, 0, 0);
     g2.clearRect(0, 0, W, H);
+    if (M.scoped) { g2.save(); g2.beginPath(); g2.arc(W / 2, H / 2, 0.42 * H, 0, TAU); g2.clip(); ovClip = true; }   // Zielfernrohr (Schlussschritt): Schilder nur im Kreis
     if (!me.alive && M.state !== 'over') return;
     const cx = W / 2, cy = H / 2;
     g2.textAlign = 'center';
@@ -6903,8 +6925,8 @@ function createApp(win) {
   function drawHud(dt) {
     const me = M.me;
     hurtK = damp(hurtK, 0, 1.6, dt);
-    hurtEl.style.opacity = clamp(hurtK * 0.75 + (me.alive ? (1 - me.hp / 100) ** 1.6 * 0.85 : 0.5), 0, 1).toFixed(3);
-    scopeEl.hidden = !M.scoped;
+    // Trefferrahmen und Zielfernrohr zeichnet der Schlussschritt (f.post.hurt, f.post.scope); .szh-hurt und .szh-scope bleiben leer im Baum
+    hurtOut = clamp(hurtK * 0.75 + (me.alive ? (1 - me.hp / 100) ** 1.6 * 0.85 : 0.5), 0, 1);
     drawOverlay(dt);
     drawRadar();
     if ((hudT -= dt) > 0) return;
@@ -7137,7 +7159,9 @@ function createApp(win) {
       if (live) simulate(real, paused);
       if (!M) return;
       M.aim(live ? real : 0.0001, prefs.fov);
-      R.render(M.frame(prefs.shadows));
+      const fr = M.frame(prefs.shadows);
+      fr.post.hurt = hud.hidden ? 0 : hurtOut;      // Trefferrahmen aus der App (hurtK, in drawHud abklingend)
+      R.render(fr);
       if (!hud.hidden) drawHud(live ? real : 0);
     } else if (menuWorld) {
       menuT += dt;
@@ -7184,11 +7208,13 @@ function createApp(win) {
     cam(pose) { if (M) M.fixedCam = pose ? [...pose] : null; },
     freeze(on) { if (M) M.warm = on ? 999 : 0; },
   };
-  // Prüfhaken Bild: tier('high'|'medium'|'low'|'auto') stellt die Qualität (ohne zu speichern), ldr(true) erzwingt den Rückfall ohne Float-Ziele
+  // Prüfhaken Bild: tier('high'|'medium'|'low'|'auto') stellt die Qualität (ohne zu speichern), ldr(true) erzwingt den Rückfall ohne Float-Ziele,
+  // hurt(k) setzt die Trefferstärke der Anzeige (f.post.hurt)
   stage._sz.bild = {
     tier(name) { if (Object.hasOwn(SHADOW_RES, name)) { prefs.quality = name; applyPrefs(); } },
     ldr(on) { forceLdr = !!on; R.setLdr(forceLdr); },
     stats: () => ({ tier: prefs.quality, scale, ...R.stats() }),
+    hurt(k) { hurtK = clamp(k, 0, 1); },             // Trefferrahmen auslösen wie ein Treffer (klingt in drawHud ab)
   };
 
   return {
