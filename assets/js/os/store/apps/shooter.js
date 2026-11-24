@@ -2577,7 +2577,7 @@ function funk(K, rnd, a, end) {
   K.norm(a, 1);
   K.drive(a, 1.5);
   const n = K.noise(K.buf(0.045), rnd, 'white');
-  K.hp(n, { f: 500 }); K.lp(n, { f: 3000 });
+  K.hp(n, { f: 500 }); K.hp(n, { f: 500 }); K.lp(n, { f: 3000 }); K.lp(n, { f: 3000 });     // so steil wie das Signal
   K.env(n, [[0, 0.02], [0.004, 1], [0.04, 0.05], [0.045, 0.001]]);
   K.mix(a, K.norm(n, 0.35), { at: end });
   return K.norm(K.fade(a, { outT: 0.004 }), 1);
