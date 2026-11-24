@@ -791,7 +791,7 @@ void main() {
   else if (k < 7.5) {                                                                      // Feuerball: Rauschen frisst ihn mit dem Alter auf
     float n = fbm(q * 1.6 + saat + vec2(0., -alter * 1.3)), s = (1. - d) * (.5 + .75 * n), e = mix(.04, .6, alter);
     a = smoothstep(e, e + .22, s);
-    c = mix(vec3(.85, .22, .05), vec3(1., .8, .45), clamp((s - e) * 2.4, 0., 1.)) * c; hdr = 4. * (1. - .65 * alter);
+    c = mix(vec3(.75, .16, .03), vec3(1., .78, .42), clamp((s - e) * 2.2, 0., 1.)) * c; hdr = 2.4 * (1. - .6 * alter);
   }
   else if (k < 8.5) { a = smoothstep(1., .93, d) * smoothstep(.62, .9, d) * (.45 + .55 * vn(q * 7. + saat)); wrap = .5; }   // Druckring
   else if (k < 9.5) { float w = mix(1., .14, vUV.y); a = smoothstep(w, w * .2, abs(p.x)) * pow(vUV.y, 1.3) * smoothstep(1., .9, vUV.y); hdr = 1.; }   // Lichtkegel
@@ -1014,11 +1014,26 @@ uniform sampler2D uFarbe, uGlow, uBel, uAo, uStrahlen;
 uniform highp sampler2D uTiefe;
 uniform float uLdr, uGlowK, uSatt, uKontrast, uVig, uKornHier, uAoAn, uStrahlenK;
 uniform vec3 uTonS, uTonL;
+uniform vec4 uWelle[4];             // Bildwellen (f.post.ripples): Mitte und Radius in halben Bildhöhen, Stärke
+uniform float uWellen, uAsp, uSaum;  // Zahl der Wellen, Seitenverhältnis, Farbsaum (f.post.chroma)
 in vec2 vUV; out vec4 o;
 ${GLSL_ACES}
 ${GLSL_KORN}
 void main() {
-  vec3 c = texture(uFarbe, vUV).rgb, g = texture(uGlow, vUV).rgb * uGlowK;
+  vec2 uv = vUV;
+  for (int i = 0; i < 4; i++) {                                           // Bildwelle: Ring, der das Bild nach außen schiebt und dahinter zurückzieht
+    if (float(i) >= uWellen) break;
+    vec4 w = uWelle[i];
+    vec2 d = (uv - (.5 + .5 * w.xy * vec2(1. / uAsp, 1.))) * vec2(uAsp, 1.) * 2.;
+    float l = length(d), b = .03 + .05 * w.z, x = (l - w.z) / b;
+    uv -= d / max(l, 1e-4) * vec2(1. / uAsp, 1.) * x * exp(-x * x) * w.w * .014;
+  }
+  vec3 c = texture(uFarbe, uv).rgb, g = texture(uGlow, uv).rgb * uGlowK;
+  if (uSaum > 0.) {                                                       // Farbsaum: Rot und Blau gegeneinander versetzt, zum Rand hin stärker
+    vec2 q = uv - .5, s = q / max(length(q), 1e-3) * vec2(1., uAsp) * (.002 + .004 * uSaum) * uSaum * (.35 + 1.3 * length(q));
+    c.r = texture(uFarbe, uv + s).r; c.b = texture(uFarbe, uv - s).b;
+    g.r = texture(uGlow, uv + s).r * uGlowK; g.b = texture(uGlow, uv - s).b * uGlowK;
+  }
   float bel = uLdr < .5 ? texelFetch(uBel, ivec2(0), 0).r : 1.;
   if (uAoAn > .5) {                                                       // SSAO: wirkt im Schatten, kaum im Sonnenlicht
     float d = texelFetch(uTiefe, ivec2(gl_FragCoord.xy), 0).r;
@@ -1435,6 +1450,7 @@ function createRenderer(canvas, { shadowSize = 2048, ldr: forceLdr = false } = {
    *   lights: [[x, y, z, r, cr, cg, cb]], time, shadows, post: { …, dt } (Bildwirkungen ab Phase 5; dt ersetzt die eigene Bildzeit) }
    */
   const tq = gl.getExtension('EXT_disjoint_timer_query_webgl2'), queries = [];
+  const welle = new Float32Array(16);
   let gpuMs = null;
   function render(f) {
     if (!worldVao || gl.isContextLost()) return;
@@ -1702,7 +1718,14 @@ function createRenderer(canvas, { shadowSize = 2048, ldr: forceLdr = false } = {
     gl.useProgram(P.final.p);
     gl.uniform1i(P.final.u.uFarbe, 2);
     gl.uniform1i(P.final.u.uGlow, 3);
-    gl.uniform1f(P.final.u.uGlowK, 0.1);
+    const pf = f.post || {};
+    gl.uniform1f(P.final.u.uGlowK, 0.1 * (1 + (pf.flash || 0)));      // nahe Explosion: Glühen 0,3 s lang bis doppelt
+    const rp = pf.ripples || [], nW = Math.min(4, rp.length);
+    for (let i = 0; i < nW; i++) welle.set(rp[i], i * 4);
+    gl.uniform4fv(P.final.u.uWelle, welle);
+    gl.uniform1f(P.final.u.uWellen, nW);
+    gl.uniform1f(P.final.u.uAsp, aspect);
+    gl.uniform1f(P.final.u.uSaum, clamp(pf.chroma || 0, 0, 1));
     gl.uniform1i(P.final.u.uBel, 4);
     gl.uniform1f(P.final.u.uLdr, ldr ? 1 : 0);
     if (aoOn) { bindTex(5, T.ao); bindTex(6, T.tiefe); }
@@ -2951,12 +2974,12 @@ const MUZZLE = {
 };
 /**
  * Effekte einer Partie. prefs: Einstellungen der App (quality für die Obergrenze, blood), phys: Kollision (Boden unter Trümmern,
- * Strahl für Blutflecken). Partikel: puff(x, y, z, vx, vy, vz, o) mit o = { life, s, grow, c, a, k, grav, drag, frames, seed }
- * (frames: höchstens so viele Bilder sichtbar, seed: Saat des Rauschens im Shader, sonst zufällig).
+ * Strahl für Blutflecken). Partikel: puff(x, y, z, vx, vy, vz, o) mit o = { life, s, grow, c, a, k, grav, drag, frames, seed, damp }
+ * (frames: höchstens so viele Bilder sichtbar, seed: Saat des Rauschens im Shader, sonst zufällig, damp: das Wachsen klingt mit dieser Rate ab).
  */
 function createFx(prefs = null, phys = null) {
   const quads = new Float32Array(MAX_QUADS * 4 * QSTRIDE);
-  const parts = [], tracers = [], decals = [], lights = [], chunks = [], blood = [];
+  const parts = [], tracers = [], decals = [], lights = [], chunks = [], blood = [], booms = [], columns = [];
   const counts = new Int32Array(12);                 // Vierecke je Art im letzten Bild (Prüfungen, etwa Q_BLOOD)
   let qn = 0, rx = 1, ry = 0, rz = 0, ux = 0, uy = 1, uz = 0, cx = 0, cy = 0, cz = 0;
   const seedOf = () => (Math.random() * 64) | 0;
@@ -2999,7 +3022,7 @@ function createFx(prefs = null, phys = null) {
   function puff(x, y, z, vx, vy, vz, o) {
     if (parts.length >= capOf(FX_MAX.parts)) parts.shift();
     parts.push({ x, y, z, vx, vy, vz, life: o.life, max: o.life, s: o.s, grow: o.grow || 0, r: o.c[0], g: o.c[1], b: o.c[2], a: o.a ?? 1, k: o.k,
-      grav: o.grav || 0, drag: o.drag || 0, frames: o.frames || 0, seed: o.seed ?? seedOf(), dir: o.dir || null, len: o.len || 0 });
+      grav: o.grav || 0, drag: o.drag || 0, frames: o.frames || 0, seed: o.seed ?? seedOf(), dir: o.dir || null, len: o.len || 0, damp: o.damp || 0 });
   }
   let own = { kind: 'rifle', seed: 0 };              // letzter eigener Schuss: Art und Saat des Mündungsfeuers in der Hand
   /** Seitenflammen und Flamme nach vorn eines fremden Mündungsfeuers: gestreckt, der helle Kopf sitzt an der Mündung, die Spitze zeigt nach außen */
@@ -3090,14 +3113,36 @@ function createFx(prefs = null, phys = null) {
       if (!bloodOn() || !phys) return;
       splat(x + rnd(-0.15, 0.15), phys.floorBelow(x, y + 0.3, z, 0.05), z + rnd(-0.15, 0.15), 1, 1, rnd(0.23, 0.36));
     },
+    /**
+     * Explosion: zwei Bilder weißer Blitz (HDR 12), Feuerball (wächst in 0,25 s auf 3 m, das Rauschen frisst ihn mit dem Alter),
+     * Druckring am Boden (0 → 7 m in 0,3 s), 24 Funken, 8–12 Trümmerstücke, Staubring, Rauchsäule über 4–6 s, Brandfleck.
+     * booms merkt sich Ort und Alter für die Bildwirkungen (Bildwelle, Farbsaum, Glühen) in M.frame.
+     */
     explosion(x, y, z) {
+      const f = phys ? phys.floorBelow(x, y + 0.3, z, 0.1) : 0, low = y - f < 1.2;
+      if (booms.length > 5) booms.shift();
+      booms.push({ x, y: y + 0.6, z, t: 0 });
       F.light(x, y + 0.6, z, 18, [5, 3.2, 1.6], 0.4);
-      puff(x, y + 0.5, z, 0, 0, 0, { life: 0.14, s: 4.5, c: [1, 0.85, 0.6], k: Q_GLOW });
-      for (let i = 0; i < 9; i++) puff(x + rnd(-0.6, 0.6), y + rnd(0.2, 1), z + rnd(-0.6, 0.6), rnd(-2.5, 2.5), rnd(0.5, 4), rnd(-2.5, 2.5), { life: rnd(0.25, 0.45), s: rnd(0.7, 1.2), grow: 3.5, c: [1, 0.5, 0.14], k: Q_GLOW, drag: 3 });
-      for (let i = 0; i < 12; i++) puff(x + rnd(-0.8, 0.8), y + rnd(0.2, 1.2), z + rnd(-0.8, 0.8), rnd(-2, 2), rnd(0.8, 3.2), rnd(-2, 2), { life: rnd(1.2, 2.4), s: rnd(0.8, 1.4), grow: 1.5, c: [0.42, 0.4, 0.38], a: 0.75, k: Q_SMOKE, drag: 1.6, grav: -0.5 });
-      for (let i = 0; i < 18; i++) puff(x, y + 0.3, z, rnd(-11, 11), rnd(2, 12), rnd(-11, 11), { life: rnd(0.3, 0.8), s: 0.04, c: [1, 0.7, 0.3], k: Q_GLOW, grav: 16, drag: 0.6 });
-      for (let i = 0; i < 10; i++) { const a = rnd(TAU); puff(x, y + 0.15, z, Math.cos(a) * rnd(3, 7), rnd(0.2, 1), Math.sin(a) * rnd(3, 7), { life: rnd(0.7, 1.3), s: 0.5, grow: 2.2, c: [0.5, 0.45, 0.38], a: 0.5, k: Q_DUST, drag: 2.6 }); }
-      if (y < 0.4) decals.push({ x, y: 0, z, axis: 1, sign: 1, s: rnd(1.5, 2.1), life: 60, k: Q_DECAL, c: [0.015, 0.015, 0.015], seed: seedOf() });
+      puff(x, y + 0.6, z, 0, 0, 0, { life: 0.2, s: 3.2, c: [1.88, 1.85, 1.8], k: Q_GLOW, frames: 2 });     // Blitz: 1,88^2,2 · 3 ≈ 12
+      puff(x, y + 0.7, z, 0, 0.6, 0, { life: 0.65, s: 0.3, grow: 11, damp: 8, c: [1, 0.85, 0.7], k: Q_FIRE, drag: 3 });
+      for (let i = 0; i < 5; i++) {
+        const a = rnd(TAU), r = rnd(0.3, 0.8);
+        puff(x + Math.cos(a) * r, y + rnd(0.3, 1.1), z + Math.sin(a) * r, Math.cos(a) * rnd(1, 3), rnd(0.8, 3), Math.sin(a) * rnd(1, 3), { life: rnd(0.4, 0.6), s: rnd(0.25, 0.4), grow: rnd(5, 7), damp: 7, c: [1, 0.8, 0.6], k: Q_FIRE, drag: 3.5 });
+      }
+      if (low) puff(x, f + 0.05, z, 0, 0, 0, { life: 0.3, s: 0.2, grow: 23, c: [0.62, 0.58, 0.52], a: 0.55, k: Q_RING });
+      for (let i = 0; i < 24; i++) {
+        const v = rnd(8, 20), a = rnd(TAU), e = rnd(0.1, 1);
+        puff(x, y + 0.4, z, Math.cos(a) * v * (1 - e * 0.6), v * e, Math.sin(a) * v * (1 - e * 0.6), { life: rnd(0.35, 0.9), s: 0.012, c: [1, 0.68, 0.3], k: Q_SPARK, grav: 14, drag: 0.8 });
+      }
+      for (let i = 0, m = Math.round(rnd(8, 12)); i < m; i++) {
+        const a = rnd(TAU), v = rnd(3, 8);
+        chunk(x + Math.cos(a) * 0.2, y + 0.2, z + Math.sin(a) * 0.2, Math.cos(a) * v, rnd(3, 8), Math.sin(a) * v, [0.05, 0.035, 0.06], [0.16, 0.15, 0.14, K_MATTE], rnd(1.4, 2.4));
+      }
+      for (let i = 0; i < 12; i++) { const a = rnd(TAU); puff(x, f + 0.15, z, Math.cos(a) * rnd(3, 7), rnd(0.2, 1), Math.sin(a) * rnd(3, 7), { life: rnd(0.8, 1.5), s: 0.5, grow: 2.2, c: [0.6, 0.55, 0.48], a: 0.45, k: Q_DUST, drag: 2.6 }); }
+      for (let i = 0; i < 8; i++) puff(x + rnd(-0.8, 0.8), y + rnd(0.3, 1.4), z + rnd(-0.8, 0.8), rnd(-1.5, 1.5), rnd(0.8, 2.6), rnd(-1.5, 1.5), { life: rnd(1.5, 2.6), s: rnd(0.8, 1.3), grow: 1.4, c: [0.58, 0.56, 0.53], a: 0.7, k: Q_SMOKE, drag: 1.6, grav: -0.4 });
+      if (columns.length > 4) columns.shift();
+      columns.push({ x, y: y + 0.8, z, t: 0, dur: rnd(4, 6), next: 0 });
+      if (low) decals.push({ x, y: f, z, axis: 1, sign: 1, s: rnd(1.5, 2.1), life: 60, k: Q_DECAL, c: [0.03, 0.028, 0.026], seed: seedOf() });
     },
     /**
      * Schuss an der Mündung (x, y, z) in Richtung (dx, dy, dz), kind = Waffenart (MUZZLE): Licht, Rauchwolke, bei fremden Waffen das
@@ -3162,6 +3207,17 @@ function createFx(prefs = null, phys = null) {
         p.x += p.vx * dt; p.y += p.vy * dt; p.z += p.vz * dt;
         if (p.y < 0.02 && p.grav > 0) { p.y = 0.02; p.vy *= -0.3; p.vx *= 0.5; p.vz *= 0.5; }
         p.s += p.grow * dt;
+        if (p.damp) p.grow *= Math.exp(-p.damp * dt);
+      }
+      for (let i = booms.length - 1; i >= 0; i--) if ((booms[i].t += dt) > 1) booms.splice(i, 1);
+      for (let i = columns.length - 1; i >= 0; i--) {                    // Rauchsäule: alle 0,15 s eine Wolke, nach oben dünner werdend
+        const c = columns[i];
+        if ((c.t += dt) > c.dur) { columns.splice(i, 1); continue; }
+        if ((c.next -= dt) > 0) continue;
+        c.next = 0.15;
+        const k = 1 - c.t / c.dur;
+        puff(c.x + rnd(-0.4, 0.4), c.y + rnd(0, 0.5), c.z + rnd(-0.4, 0.4), rnd(-0.3, 0.3), rnd(1.2, 2), rnd(-0.3, 0.3),
+          { life: rnd(2.5, 3.5), s: rnd(0.5, 0.8), grow: 0.7, c: [0.55, 0.53, 0.5], a: 0.5 * k + 0.1, k: Q_SMOKE, drag: 0.6, grav: -0.25 });
       }
       for (let i = tracers.length - 1; i >= 0; i--) if ((tracers[i].t += dt) > tracers[i].dur) tracers.splice(i, 1);
       for (let i = decals.length - 1; i >= 0; i--) if ((decals[i].life -= dt) <= 0) decals.splice(i, 1);
@@ -3232,9 +3288,11 @@ function createFx(prefs = null, phys = null) {
       }
       return qn - before;
     },
-    clear() { parts.length = 0; tracers.length = 0; decals.length = 0; lights.length = 0; chunks.length = 0; blood.length = 0; },
+    clear() { parts.length = 0; tracers.length = 0; decals.length = 0; lights.length = 0; chunks.length = 0; blood.length = 0; booms.length = 0; columns.length = 0; },
     /** Trümmerstücke: zeichnet M.frame über den Instanz-Schreiber (Quader mit Drall, werfen Schatten) */
     chunks,
+    /** Explosionen der letzten Sekunde { x, y, z, t = Alter in s } für die Bildwirkungen in M.frame */
+    booms,
     /** Zahl der Vierecke je Art im letzten Bild (Prüfungen) und der Partikel */
     counts, get partCount() { return parts.length; },
   };
@@ -4347,6 +4405,24 @@ function createMatch(cfg, hooks) {
   const FLAG_COL = { n: [0.85, 0.85, 0.85, K_MATTE], f: [0.1, 0.42, 1, K_GLOW], e: [1, 0.12, 0.06, K_GLOW] };
   const PACK = [0.2, 0.24, 0.14, K_MATTE], PACK_L = [1, 0.75, 0.2, K_GLOW], NADE_C = [0.13, 0.17, 0.1, K_MATTE], POLE = [0.1, 0.1, 0.11, K_METAL];
   const lightsOut = [], flickOut = [0, 0, 0, 0, 0, 0, 0];
+  /**
+   * Bildwirkungen für den Schlussschritt (Vertrag V4). ripples: [sx, sy, r, k] – Bildort und Radius in halben Bildhöhen ab der Mitte
+   * (der Renderer rechnet das Seitenverhältnis ein), k = Stärke. hurt kommt aus der App (Trefferrahmen), alles andere aus der Partie.
+   */
+  const post = { hurt: 0, lowHp: 0, chroma: 0, flash: 0, scope: 0, ripples: [] };
+  /** Explosionen → Bildwelle (wächst über 0,5 s, schwächer mit dem Abstand), näher als 12 m Farbsaum (0,4 s) und doppeltes Glühen (0,3 s) */
+  function postFx() {
+    basis(cam.yaw, cam.pitch, cam.roll || 0);
+    const th = Math.tan((cam.fov * DEG) / 2);
+    post.ripples.length = 0; post.chroma = 0; post.flash = 0;
+    for (const b of fx.booms) {
+      const dx = b.x - cam.x, dy = b.y - cam.y, dz = b.z - cam.z, d = Math.hypot(dx, dy, dz);
+      if (d < 12) { post.chroma = Math.max(post.chroma, 1 - b.t / 0.4); if (b.t < 0.3) post.flash = Math.max(post.flash, 1 - b.t / 0.3); }
+      const vz = dx * B[6] + dy * B[7] + dz * B[8], k = b.t / 0.5;
+      if (k >= 1 || vz < 0.5 || post.ripples.length >= 4) continue;
+      post.ripples.push([(dx * B[0] + dy * B[1] + dz * B[2]) / (vz * th), (dx * B[3] + dy * B[4] + dz * B[5]) / (vz * th), (1.5 + 16 * k) / (vz * th), (1 - k) * clamp(1 - d / 45, 0, 1)]);
+    }
+  }
   /** Sammelt alles Bewegliche für den Renderer. */
   M.frame = (shadows) => {
     I.reset(); V.reset();
@@ -4388,7 +4464,8 @@ function createMatch(cfg, hooks) {
       flickOut[0] = l[0]; flickOut[1] = l[1]; flickOut[2] = l[2]; flickOut[3] = l[3]; flickOut[4] = l[4] * k; flickOut[5] = l[5] * k; flickOut[6] = l[6] * k;
       lightsOut.push(flickOut);
     }
-    return { cam, inst: I.buf, instCount, instShadowCount: I.count, vm: V.buf, vmCount: V.count, vmFov: VM_FOV, quads: fx.quads, quadCount, vmQuadCount, lights: lightsOut, time: M.time, shadows };
+    postFx();
+    return { cam, inst: I.buf, instCount, instShadowCount: I.count, vm: V.buf, vmCount: V.count, vmFov: VM_FOV, quads: fx.quads, quadCount, vmQuadCount, lights: lightsOut, time: M.time, shadows, post };
   };
 
   /** Aufklärung einsetzen (ab drei Abschüssen in Folge): Gegner erscheinen eine Weile auf dem Radar. */
