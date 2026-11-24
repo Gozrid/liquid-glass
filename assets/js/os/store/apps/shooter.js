@@ -1811,6 +1811,9 @@ const KNIFE = [[0, 0.02, -0.16, 0.006, 0.034, 0.19, 's'], [0, 0.02, -0.05, 0.03,
 const NADE = { fuse: 2.7, radius: 6.8, dmg: 165, speed: 16.5, count: 2 };
 // Explosive Fässer: Lebenspunkte, Explosion (Radius, Schaden), Zischen von/bis (s), Wiederkehr (s), Rauch danach (s), Schaden durch eine Explosion daneben
 const FASS = { hp: 60, radius: 5.5, dmg: 130, fuse: [0.12, 0.22], back: 45, smoke: 10, chain: 100 };
+// Luftschlag: Serie, Reichweite des Zielstrahls (beim Gastgeber geprüft: netRange), Überflug ab (s), erste Bombe ab (s), Abstand (s), Zahl, Abstand (m),
+// Abwurfhöhe (m), Explosion (Radius, Schaden; cover 0 = ein Dach schützt ganz)
+const LUFT = { streak: 5, range: 120, netRange: 130, jet: 1.2, drop: 3.0, gap: 0.18, n: 5, step: 5, height: 40, radius: 7.5, dmg: 180, cover: 0 };
 const MELEE = { range: 2.3, dmg: 100, time: 0.62 };
 // Rutschen: Dauer, Tempo von/bis (mal w.move), Abbruch darunter, Sperre danach, Tempo nach Sprung, Streuung aus der Hüfte, Kamera, Bots je Sekunde
 const SLIDE = { dur: 0.75, v0: 8.0, v1: 4.0, min: 3.2, cd: 0.6, keep: 0.85, spread: 1.3, roll: 0.06, fov: 3, dust: 0.08, botRate: 0.25 };
@@ -2381,6 +2384,7 @@ function createMatch(cfg, hooks) {
       mx: 0, my: 0, mzz: 0, vmx: 0, vmy: 0, vmz: 0, uavReady: false, uavT: 0, primary: 'falke', peer: null, ext: false, spawnAt: 0,
       sliding: false, slideT: 0, slideCd: 0, slideDx: 0, slideDz: 0, slideFx: 0, crouchWas: false,       // Rutschen
       gg: 0,                                                                                             // Waffenmeister: Stufe
+      strikeReady: false,                                                                                // Luftschlag bereit
     };
     soldiers.push(s);
     return s;
@@ -2543,6 +2547,7 @@ function createMatch(cfg, hooks) {
       if (info.dist > 45 && info.weapon !== 'nade') { pts += 25; medals.push('Fernschuss'); }
       if ([3, 5, 7, 10, 15, 20].includes(a.streak)) { pts += a.streak * 10; medals.push(`Serie ×${a.streak}`); }
       if (a.streak === 3) a.uavReady = true;
+      if (a.streak === LUFT.streak) a.strikeReady = true;          // Luftschlag
       a.score += pts;
       for (const [id, d] of v.damagers) {
         const hlp = soldiers[id];
@@ -2806,6 +2811,38 @@ function createMatch(cfg, hooks) {
     return phys.raycast(s.x, ey, s.z, dx / l, dy / l, dz / l, l) === Infinity || RAY.i === b.col;      // freie Sicht: der erste Treffer ist das Fass selbst
   }
 
+  // ---------- Luftschlag: Leuchtfleck sofort, Überflug nach 1,2 s, ab 3,0 s fünf Bomben in einer Linie durchs Ziel ----------
+  const strikes = [];
+  M.strikes = strikes;
+  /** Luftschlag beginnen: auf allen Geräten Fleck und Klang; die Bomben rechnet nur, wer die Partie rechnet (sichtbar über „boom“) */
+  function startStrike(s, x, y, z, yaw) {
+    s.strikeReady = false;
+    strikes.push({ x, y, z, yaw, owner: s, t: 0, jet: false, n: 0, fx: 0 });
+    if (strikes.length > 8) strikes.shift();
+    if (hosting) net.send({ t: 'luft', id: s.id, p: [r2(x), r2(y), r2(z)], yaw: r3(yaw) }, null, true);
+    emit('luft', { s });
+  }
+  function stepStrikes(dt) {
+    for (let i = strikes.length - 1; i >= 0; i--) {
+      const k = strikes[i], end = LUFT.drop + LUFT.n * LUFT.gap;
+      k.t += dt;
+      if (k.t < end + 0.4 && (k.fx -= dt) <= 0) {           // roter Leuchtfleck mit Rauchsäule
+        k.fx = 0.07;
+        fx.glow?.(k.x + rnd(-0.08, 0.08), k.y + 0.18, k.z + rnd(-0.08, 0.08), rnd(0.3, 0.5), [1, 0.1, 0.05], 0.12);
+        fx.smoke?.(k.x + rnd(-0.15, 0.15), k.y + 0.3, k.z + rnd(-0.15, 0.15), [0.72, 0.17, 0.13], 0.42, 0.3);
+        if (Math.random() < 0.35) fx.light(k.x, k.y + 0.7, k.z, 9, [2.4, 0.3, 0.15], 0.22);
+      }
+      if (!k.jet && k.t >= LUFT.jet) { k.jet = true; S.jet?.(L, k.x, k.y, k.z, k.yaw); }
+      while (!client && k.n < LUFT.n && k.t >= LUFT.drop + k.n * LUFT.gap) {
+        const off = (k.n - (LUFT.n - 1) / 2) * LUFT.step, bx = k.x + Math.sin(k.yaw) * off, bz = k.z - Math.cos(k.yaw) * off;
+        k.n++;
+        const d = phys.raycast(bx, LUFT.height, bz, 0, -1, 0, LUFT.height + 1);        // fällt senkrecht: Dächer fangen die Bombe ab
+        blast(bx, d === Infinity ? 0 : LUFT.height - d, bz, k.owner, LUFT, 'luft');
+      }
+      if (k.t > end + 3) strikes.splice(i, 1);
+    }
+  }
+
   // ---------- Bewegung und Handlungen einer Figur ----------
   function stepSoldier(s, dt, frozen) {
     const inp = s.in;
@@ -3010,6 +3047,15 @@ function createMatch(cfg, hooks) {
       if (d > 9 && d < 17 && q < 1 && Math.random() < 0.35) { b.nade = { yaw: Math.atan2(dx, -dz), pitch: 0.5 * Math.asin(q) + 0.02, t: 0.45 }; b.nadeCd = rnd(14, 28); }
     }
 
+    // Luftschlag: bereit und eine letzte Gegnerposition bekannt – nach 1–4 s dorthin rufen (nur, wenn sie mehr als 10 m entfernt ist)
+    if (s.strikeReady && M.state === 'live') {
+      if (!b.strikeAt) b.strikeAt = M.time + rnd(1, 4);
+      else if (M.time >= b.strikeAt && b.last && Math.hypot(b.last.x - s.x, b.last.z - s.z) > 10) {
+        b.strikeAt = 0;
+        startStrike(s, b.last.x, b.last.y || 0, b.last.z, Math.atan2(b.last.x - s.x, -(b.last.z - s.z)));
+      }
+    } else b.strikeAt = 0;
+
     // Wohin gehen?
     b.repath -= THINK;
     let goal = null, why = '';
@@ -3178,7 +3224,7 @@ function createMatch(cfg, hooks) {
   const vec3 = (a, lim) => (Array.isArray(a) && Number.isFinite(a[0]) && Number.isFinite(a[1]) && Number.isFinite(a[2])
     ? [clamp(a[0], -lim, lim), clamp(a[1], -lim, lim), clamp(a[2], -lim, lim)] : null);
   const bits = (s) => (s.alive ? 1 : 0) | (s.crouching ? 2 : 0) | (s.sprinting ? 4 : 0) | (s.ads > 0.5 ? 8 : 0) | (s.reloadT > 0 ? 16 : 0) | (s.protect > 0 ? 32 : 0) | (s.uavT > M.time ? 64 : 0) | (s.uavReady ? 128 : 0)
-    | (s.sliding ? 256 : 0);                         // Phase 8: 256 rutscht
+    | (s.sliding ? 256 : 0) | (s.strikeReady ? 512 : 0);      // Phase 8: 256 rutscht, 512 Luftschlag bereit
   function sendTable() { net.send({ t: 'tbl', r: soldiers.map((s) => [s.id, s.kills, s.deaths, s.assists, s.score, s.best]) }, null, true); }
   let netAcc = 0, tblAcc = 0;
   function netTick(dt) {
@@ -3253,6 +3299,12 @@ function createMatch(cfg, hooks) {
         if (M.state === 'warmup' && s.guns[0]?.id !== m.p) spawn(s);          // vor dem Start gleich mit der gewählten Waffe
       }
       else if (m.t === 'uav') useUav(s);
+      else if (m.t === 'luft') {                   // Luftschlag: bereit, lebt, Ziel in der Karte und höchstens 130 m entfernt
+        const p = vec3(m.p, 600), bd = world.bounds;
+        if (!p || !Number.isFinite(m.yaw) || !s.strikeReady || !s.alive || M.state !== 'live') return;
+        if (p[0] < bd.x0 || p[0] > bd.x1 || p[2] < bd.z0 || p[2] > bd.z1 || Math.hypot(p[0] - s.x, p[1] - s.y, p[2] - s.z) > LUFT.netRange) return;
+        startStrike(s, p[0], clamp(p[1], 0, bd.y1 || 12), p[2], m.yaw);
+      }
       return;
     }
     // ----- Mitspieler: Zustand und Ereignisse vom Gastgeber -----
@@ -3277,6 +3329,7 @@ function createMatch(cfg, hooks) {
         if (!s) continue;
         const fl = a[6] | 0, hp = clamp(fin(a[7], s.hp), 0, 100);
         s.uavT = fl & 64 ? M.time + 0.5 : 0; s.protect = fl & 32 ? 0.3 : 0;
+        if (s === me) me.strikeReady = !!(fl & 512);              // Luftschlag
         if (s === me) { me.hp = hp; me.uavReady = !!(fl & 128); continue; }
         const p = vec3(a.slice(1, 4), 600);
         if (!p || !Number.isFinite(a[4]) || !Number.isFinite(a[5])) continue;
@@ -3314,6 +3367,7 @@ function createMatch(cfg, hooks) {
     }
     else if (m.t === 'pts') { const pts = fin(m.p, 0); me.score += pts; emit('points', { label: String(m.l), pts }); }
     else if (m.t === 'boom') { const p = vec3(m.p, 600); if (p) boom(p[0], p[1], p[2]); }
+    else if (m.t === 'luft') { const s = Number.isInteger(m.id) ? soldiers[m.id] : null, p = vec3(m.p, 600); if (s && p && Number.isFinite(m.yaw)) startStrike(s, p[0], p[1], p[2], m.yaw); }
     else if (m.t === 'gg') { const s = Number.isInteger(m.id) ? soldiers[m.id] : null; if (gunGame && s && Number.isInteger(m.l) && m.l >= 0 && m.l <= GG.length) ggSet(s, m.l); }
     else if (m.t === 'fass') { const i = Number.isInteger(m.i) ? m.i : -1; if (barrels[i] && (m.s === 0 || m.s === 1 || m.s === 2) && barrels[i].st !== m.s) fassState(i, m.s); }
     else if (m.t === 'flag') { const f = Number.isInteger(m.i) ? M.flags[m.i] : null; if (f && (m.o === 0 || m.o === 1)) { f.owner = m.o; emit('flag', { f, was: m.was }); } }
@@ -3351,6 +3405,7 @@ function createMatch(cfg, hooks) {
       if (me.alive) stepSoldier(me, dt, M.state !== 'live'); else me.respawnT -= dt;
       for (const s of soldiers) if (s.ext && s.alive) extStep(s, dt);
       stepBarrels(dt);                             // Fässer
+      stepStrikes(dt);                             // Luftschlag
       fx.update(dt);
       stepCorpses(dt);
       netTick(dt);
@@ -3372,6 +3427,7 @@ function createMatch(cfg, hooks) {
     if (hosting) netTick(dt);
     stepNades(dt);
     stepBarrels(dt);                               // Fässer
+    stepStrikes(dt);                               // Luftschlag
     stepFlags(dt);
     fx.update(dt);
     stepCorpses(dt);
@@ -3463,6 +3519,8 @@ function createMatch(cfg, hooks) {
         const c = f.owner < 0 ? [0.9, 0.9, 0.9] : f.owner === me.team ? [0.2, 0.5, 1] : [1, 0.2, 0.12];
         fx.disc(f.x, f.y + 0.03, f.z, 3.4, c, 0.22 + (f.capBy >= 0 ? 0.12 * Math.sin(M.time * 8) : 0));
       }
+      // Luftschlag: roter Leuchtfleck am Ziel
+      for (const k of strikes) if (k.t < LUFT.drop + LUFT.n * LUFT.gap) fx.disc(k.x, k.y + 0.04, k.z, 1.2 + Math.sin(M.time * 11) * 0.18, [1, 0.12, 0.06], 0.55);
     });
     const vmQuadCount = me.alive && M.flashT > 0 && V.count ? fx.flash(me.vmx, me.vmy, me.vmz, 0.085 + Math.random() * 0.03) : 0;
     lightsOut.length = 0;
@@ -3484,6 +3542,18 @@ function createMatch(cfg, hooks) {
     if (client) { if (me.uavReady) { net.send({ t: 'uav' }, null, true); emit('uav'); } return me.uavReady; }
     if (!useUav(me)) return false;
     emit('uav');
+    return true;
+  };
+  /** Luftschlag rufen (ab fünf Abschüssen in Folge): Ziel ist, was in der Bildmitte liegt, höchstens 120 m. Kein Ziel: nichts geschieht, die Serie bleibt bereit. */
+  M.useStrike = () => {
+    if (!me.strikeReady || !me.alive || M.state !== 'live') return false;
+    basis(cam.yaw, cam.pitch);
+    const d = phys.raycast(cam.x, cam.y, cam.z, B[6], B[7], B[8], LUFT.range), bd = world.bounds;
+    if (d === Infinity) return false;
+    const x = cam.x + B[6] * d, z = cam.z + B[8] * d, y = phys.floorBelow(x, cam.y + B[7] * d + 0.1, z, 0.05);
+    if (x < bd.x0 || x > bd.x1 || z < bd.z0 || z > bd.z1) return false;
+    if (client) net.send({ t: 'luft', p: [r2(x), r2(y), r2(z)], yaw: r3(cam.yaw) }, null, true);
+    else startStrike(me, x, y, z, cam.yaw);
     return true;
   };
   /** Sekunden, die die eigene Aufklärung noch läuft */
@@ -4586,11 +4656,12 @@ function createMenus(root, api) {
     'Duck dich aus dem Sprint heraus (C), dann rutschst du ein Stück – schießen kannst du dabei.',
     'Rote Fässer explodieren nach ein paar Treffern – und reißen Fässer daneben mit.',
     'Waffenmeister: Jeder Abschuss bringt die nächste Waffe. Ein Messerangriff wirft den Gegner eine Stufe zurück.',
+    'Fünf Abschüsse in Folge bringen dir den Luftschlag – Taste 4. Unter einem Dach bist du davor sicher.',
   ];
   const KEYS = [
     [['W', 'A', 'S', 'D'], 'Bewegen'], [['Maus'], 'Zielen'], [['Linksklick'], 'Feuern'], [['Rechtsklick'], 'Anlegen'], [['R'], 'Nachladen'],
     [['Umschalt'], 'Sprinten'], [['C'], 'Ducken'], [['Umschalt', 'C'], 'Rutschen (aus dem Sprint)'], [['Leertaste'], 'Springen, Klettern'], [['1', '2', 'Q', 'Mausrad'], 'Waffe wechseln'],
-    [['G'], 'Granate'], [['V'], 'Messer'], [['3'], 'Aufklärung'], [['Tab'], 'Punktetafel'], [['Esc'], 'Pause'],
+    [['G'], 'Granate'], [['V'], 'Messer'], [['3'], 'Aufklärung'], [['4', 'X'], 'Luftschlag'], [['Tab'], 'Punktetafel'], [['Esc'], 'Pause'],
   ];
   const NAV = {
     main: [['play', 'Einsatz'], ['multi', 'Mehrspieler'], ['loadout', 'Ausrüstung'], ['career', 'Laufbahn'], ['settings', 'Einstellungen']],
@@ -5339,7 +5410,7 @@ const HUD_CSS = `
 @media (prefers-reduced-motion: reduce) { .szh-flag.on, .szh-streak { animation: none; } }
 `;
 
-const WNAME = { nade: 'Granate', knife: 'Messer', fall: 'Sturz', fass: 'Fass' };
+const WNAME = { nade: 'Granate', knife: 'Messer', fall: 'Sturz', fass: 'Fass', luft: 'Luftschlag' };
 const weaponLabel = (id) => WNAME[id] || WEAPONS[id]?.name || '';
 const mmss = (t) => { t = Math.max(0, Math.ceil(t)); return `${Math.floor(t / 60)}:${String(t % 60).padStart(2, '0')}`; };
 const SCALES = { low: 0.6, medium: 0.8, high: 1 }, SHADOW_RES = { low: 1024, medium: 2048, high: 4096, auto: 2048 };
@@ -5688,7 +5759,7 @@ function createApp(win) {
     else if (type === 'died') {
       adsOn = false; crouchOn = false;
       const self = d.by === M.me;
-      deadEl.replaceChildren(h('small', self ? 'Ausgeschaltet' : 'Ausgeschaltet von'), h('b', self ? ({ fall: 'Sturz', fass: 'Fass' }[d.weapon] || 'eigene Granate') : d.by.name), self ? '' : h('span', weaponLabel(d.weapon)));
+      deadEl.replaceChildren(h('small', self ? 'Ausgeschaltet' : 'Ausgeschaltet von'), h('b', self ? ({ fall: 'Sturz', fass: 'Fass', luft: 'eigener Luftschlag' }[d.weapon] || 'eigene Granate') : d.by.name), self ? '' : h('span', weaponLabel(d.weapon)));
       deadEl.hidden = false;
     } else if (type === 'spawn') { if (d.me) deadEl.hidden = true; }
     else if (type === 'feed') paintFeed();
@@ -5697,6 +5768,7 @@ function createApp(win) {
       big(`Stellung ${d.f.name}`, 1.6, mine ? 'win' : 'lose', mine ? 'erobert' : 'verloren');
       S.jingle(mine ? 'capture' : 'lost');
     } else if (type === 'uav') { pop('Aufklärung aktiv', 0, 'medal'); S.jingle('uav'); }
+    else if (type === 'luft') pop(d.s === M.me ? 'Luftschlag angefordert' : M.friendly(d.s) ? `Luftschlag von ${d.s.name}` : 'Feindlicher Luftschlag!', 0, 'medal');
     else if (type === 'end') onEnd();
   }
   function paintFeed() {
@@ -5901,8 +5973,13 @@ function createApp(win) {
     numEl.className = `num${gun.mag === 0 ? ' out' : gun.mag <= w.mag * 0.25 ? ' low' : ''}`;
     const other = me.guns[1 - me.cur];
     rowEl.replaceChildren(other ? h('span', { style: { opacity: 0.7 } }, WEAPONS[other.id].name) : '', h('span', [0, 1].map((i) => h(`i.nade${i < me.nades ? '' : '.off'}`))));
-    streakEl.hidden = !me.uavReady;
-    if (me.uavReady && !streakEl.firstChild) streakEl.append('Aufklärung bereit', h('kbd', '3'));
+    // Serien: Aufklärung (3) und Luftschlag (4), je eine Zeile
+    const ready = (me.uavReady ? 1 : 0) | (me.strikeReady ? 2 : 0);
+    streakEl.hidden = !ready;
+    if (ready !== streakEl._ready) {
+      streakEl._ready = ready;
+      streakEl.replaceChildren(...(ready & 1 ? [h('div', 'Aufklärung bereit', h('kbd', '3'))] : []), ...(ready & 2 ? [h('div', 'Luftschlag bereit', h('kbd', '4'))] : []));
+    }
     const uavLeft = M.uavLeft();
     uavEl.hidden = uavLeft <= 0;
     if (uavLeft > 0) uavEl.textContent = `Aufklärung ${Math.ceil(uavLeft)} s`;
@@ -5958,7 +6035,7 @@ function createApp(win) {
     const me = M.me, inp = me.in;
     if (!me.alive) {                  // gefallen: nichts vormerken, was beim Wiedereinstieg von selbst losginge (Granate, Waffenwechsel …)
       if (code === 'Tab') { boardEl.hidden = false; boardT = 0; }
-      return /^(Key[WASDCRQGVFE]|Digit[123]|Arrow|Shift|Mouse|Tab|Space)/.test(code);
+      return /^(Key[WASDCRQGVFEX]|Digit[1234]|Arrow|Shift|Mouse|Tab|Space)/.test(code);
     }
     if (code === 'KeyC' && inp.sprint && inp.mz > 0) slideTap = true;       // Rutschen
     if (code === 'KeyC') { if (prefs.toggleCrouch) crouchOn = !crouchOn; }
@@ -5970,6 +6047,7 @@ function createApp(win) {
     else if (code === 'KeyG') inp.nade = true;
     else if (code === 'KeyV' || code === 'KeyF') inp.melee = true;
     else if (code === 'Digit3' || code === 'KeyE') M.useUav();
+    else if (code === 'Digit4' || code === 'KeyX') M.useStrike();       // Luftschlag
     else if (code === 'Mouse2') { if (prefs.toggleAds) adsOn = !adsOn; }
     else if (code === 'Tab') { boardEl.hidden = false; boardT = 0; }
     else return /^(Key[WASD]|Arrow|Shift|Mouse)/.test(code);
