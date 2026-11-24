@@ -2921,9 +2921,10 @@ function createSound(getPrefs) {
 
   // ---------- Raumzonen ----------
   /**
-   * Zone an einer Stelle (y = Fußhöhe): ein Strahl nach oben (überdacht?), acht waagerechte in Augenhöhe (freie Weite w = Median, höchstens 30;
-   * der Median, weil sonst die zwei Strahlen längs einer Gasse das Mittel hochziehen).
-   * Überdacht: w < 5 raum, sonst halle. Offen: w < 7 gasse, sonst hof. Je Meter-Zelle zwischengespeichert; RAY bleibt unberührt.
+   * Zone an einer Stelle (y = Fußhöhe): ein Strahl nach oben (überdacht?), acht waagerechte in Augenhöhe (je höchstens 30 m).
+   * Überdacht: freie Weite w = Median der acht Strahlen, w < 5 raum, sonst halle. Offen: die acht Strahlen bilden vier gegenüberliegende
+   * Paare, die Breite eines Paars ist die Summe seiner zwei Entfernungen; ist die kleinste Breite unter 8 m, gasse, sonst hof (Mittel und
+   * Median erkannten Gassen, die nur zu einer Seite eng sind, als Hof). Je Meter-Zelle zwischengespeichert; RAY bleibt unberührt.
    */
   function zoneAt(x, y, z) {
     if (!phys) return zoneL;
@@ -2934,9 +2935,10 @@ function createSound(getPrefs) {
     const ws = [];
     for (let k = 0; k < 8; k++) { const r = phys.raycast(x, y + 1.6, z, Math.cos((k * Math.PI) / 4), 0, Math.sin((k * Math.PI) / 4), 30); ws.push(r === Infinity ? 30 : r); }
     RAY.t = t; RAY.i = i; RAY.axis = ax;
-    ws.sort((a, b) => a - b);
-    const w = (ws[3] + ws[4]) / 2;
-    zn = roof ? (w < 5 ? 'raum' : 'halle') : w < 7 ? 'gasse' : 'hof';
+    if (roof) {
+      const so = [...ws].sort((a, b) => a - b), w = (so[3] + so[4]) / 2;
+      zn = w < 5 ? 'raum' : 'halle';
+    } else zn = Math.min(ws[0] + ws[4], ws[1] + ws[5], ws[2] + ws[6], ws[3] + ws[7]) < 8 ? 'gasse' : 'hof';
     if (zcache.size > 4000) zcache.clear();
     zcache.set(key, zn);
     return zn;
