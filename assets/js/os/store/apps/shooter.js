@@ -1797,6 +1797,8 @@ const PRIMARIES = ['falke', 'wespe', 'rammbock', 'luchs', 'habicht', 'amboss'];
 const KNIFE = [[0, 0.02, -0.16, 0.006, 0.034, 0.19, 's'], [0, 0.02, -0.05, 0.03, 0.012, 0.012, 'd'], [0, 0.02, 0.01, 0.024, 0.03, 0.11, 'd']];
 const NADE = { fuse: 2.7, radius: 6.8, dmg: 165, speed: 16.5, count: 2 };
 const MELEE = { range: 2.3, dmg: 100, time: 0.62 };
+// Rutschen: Dauer, Tempo von/bis (mal w.move), Abbruch darunter, Sperre danach, Tempo nach Sprung, Streuung aus der Hüfte, Kamera, Bots je Sekunde
+const SLIDE = { dur: 0.75, v0: 8.0, v1: 4.0, min: 3.2, cd: 0.6, keep: 0.85, spread: 1.3, roll: 0.06, fov: 3, dust: 0.08, botRate: 0.25 };
 
 const RANKS = ['Rekrut', 'Gefreiter', 'Obergefreiter', 'Stabsgefreiter', 'Unteroffizier', 'Stabsunteroffizier', 'Feldwebel', 'Oberfeldwebel', 'Hauptfeldwebel',
   'Stabsfeldwebel', 'Leutnant', 'Oberleutnant', 'Hauptmann', 'Stabshauptmann', 'Major', 'Oberstleutnant', 'Oberst', 'Brigadegeneral', 'Generalmajor', 'General'];
@@ -2117,6 +2119,13 @@ function createFx() {
       return qn - before;
     },
     clear() { parts.length = 0; tracers.length = 0; decals.length = 0; lights.length = 0; },
+
+    // ---------- Phase 8 (Spaß-Paket): einzelne Teilchen für Rutschen, Fässer und Luftschlag ----------
+    /** Staub am Boden (Rutschen); kind = Untergrund wie bei impact() */
+    dust(x, y, z, kind) {
+      const c = DUST[kind] || DUST.concrete;
+      for (let i = 0; i < 2; i++) puff(x + rnd(-0.2, 0.2), y + 0.06, z + rnd(-0.2, 0.2), rnd(-0.5, 0.5), rnd(0.2, 0.7), rnd(-0.5, 0.5), { life: rnd(0.45, 0.8), s: rnd(0.1, 0.18), grow: 0.9, c, a: kind === 'metal' ? 0.2 : 0.45, k: Q_DUST, drag: 2.5, grav: -0.2 });
+    },
   };
   return F;
 }
@@ -2169,12 +2178,14 @@ const PAL = {
   foe: { cloth: [0.23, 0.17, 0.095, K_CAMO], vest: [0.085, 0.03, 0.022, K_MATTE], helm: [0.16, 0.12, 0.07, K_CAMO], mark: [1, 0.1, 0.05, K_GLOW], skin: [0.42, 0.26, 0.18, K_MATTE], boot: [0.02, 0.015, 0.012, K_MATTE], glove: [0.035, 0.026, 0.018, K_MATTE] },
 };
 const eyeOf = (s) => lerp(EYE_STAND, EYE_CROUCH, s.crouchK);
+const SLIDE_LEAN = 0.8;                            // Rutschen: so weit legt sich die Figur zurück (rad)
 
 /** Figur aus Quadern. fall 0 … 1 lässt sie umkippen (dir: +1 nach hinten, −1 nach vorn). Merkt sich die Mündung der Waffe. */
 function drawSoldier(I, s, pal, fall = 0, dir = 1) {
   const c = s.crouchK, hipY = 0.93 - 0.42 * c;
   mIdent(TR); mTrans(TR, s.x, s.y, s.z); mRotY(TR, -s.yaw);
   if (fall) { mRotX(TR, fall * dir * 1.52); mTrans(TR, 0, fall * 0.1, 0); }
+  if (s.sliding) mRotX(TR, SLIDE_LEAN);             // Rutschen: geduckte Figur nach hinten gelegt – Beine vorn, Oberkörper zurück
   const amp = clamp(s.speed / 4, 0, 1.25) * (s.ground ? 1 : 0.35) * (1 - fall);
   for (const side of [-1, 1]) {
     const ph = s.phase + (side > 0 ? Math.PI : 0);
@@ -2204,6 +2215,7 @@ function drawSoldier(I, s, pal, fall = 0, dir = 1) {
   // Waffe im Anschlag, Arme greifen an Griff und Vorderschaft
   const w = WEAPONS[s.guns[s.cur].id];
   mCopy(TG, TR); mTrans(TG, 0, hipY + 0.5, 0);
+  if (s.sliding) mRotX(TG, -SLIDE_LEAN);            // Rutschen: die Waffe bleibt im Anschlag
   mRotX(TG, fall ? -0.9 * fall : s.pitch - (s.sprinting ? 0.55 : 0) - (s.reloadT > 0 ? 0.3 : 0));
   mTrans(TG, 0.13, -0.07, -0.36);
   if (!fall) drawGun(I, TG, w.model);
@@ -2345,6 +2357,7 @@ function createMatch(cfg, hooks) {
       kills: 0, deaths: 0, assists: 0, score: 0, streak: 0, best: 0, lastKillAt: -99, multi: 0, shots: 0, hits: 0, heads: 0, byWeapon: {},
       in: { mx: 0, mz: 0, jump: false, crouch: false, sprint: false, fire: false, ads: false, reload: false, swap: -1, nade: false, melee: false },
       mx: 0, my: 0, mzz: 0, vmx: 0, vmy: 0, vmz: 0, uavReady: false, uavT: 0, primary: 'falke', peer: null, ext: false, spawnAt: 0,
+      sliding: false, slideT: 0, slideCd: 0, slideDx: 0, slideDz: 0, slideFx: 0, crouchWas: false,       // Rutschen
     };
     soldiers.push(s);
     return s;
@@ -2396,6 +2409,7 @@ function createMatch(cfg, hooks) {
     s.hp = 100; s.alive = true; s.protect = 1.6; s.crouching = false; s.crouchK = 0; s.h = STAND_H; s.ads = 0; s.sprinting = false;
     s.fireT = 0.25; s.reloadT = 0; s.switchT = 0; s.meleeT = 0; s.nadeT = 0; s.bloomK = 0; s.mantle = null; s.ground = true; s.stepOff = 0;
     s.damagers.clear(); s.spawnAt = M.time;
+    s.sliding = false; s.slideCd = 0;              // Rutschen
     Object.assign(s.in, { swap: -1, nade: false, melee: false, reload: false });      // nichts ausführen, was vor dem Einstieg gedrückt wurde
     guns = (Array.isArray(guns) ? guns : []).filter((id) => WEAPONS[id]).slice(0, 2);
     if (!guns.length) guns = ['falke', 'marder'];          // ohne Waffe gäbe es nichts zu zeichnen und nichts zu rechnen
@@ -2535,7 +2549,7 @@ function createMatch(cfg, hooks) {
     gun.mag--; s.fireT = 60 / w.rpm; s.shotAt = M.time; s.reloadT = 0; s.shots++;
     s.protect = 0;                    // wer selbst angreift, gibt den Schutz nach dem Einstieg auf
     const move = clamp(s.speed / 4.6, 0, 1.5);
-    const hip = w.hip * (1 + move * 0.6) * (s.ground ? 1 : 1.9) * (s.crouching ? 0.78 : 1) + s.bloomK;
+    const hip = (s.sliding ? w.hip * SLIDE.spread : w.hip * (1 + move * 0.6) * (s.ground ? 1 : 1.9) * (s.crouching ? 0.78 : 1)) + s.bloomK;     // Rutschen: Hüfte mal 1,3
     const spread = lerp(hip, w.adsSpr + s.bloomK * 0.25, s.ads * s.ads) + (s.bot ? skill.err * 0.22 : 0);
     basis(s.yaw + s.kickY, s.pitch + s.kickP);
     const rx = B[0], ry = B[1], rz = B[2], ux = B[3], uy = B[4], uz = B[5], fwx = B[6], fwy = B[7], fwz = B[8];
@@ -2669,6 +2683,18 @@ function createMatch(cfg, hooks) {
     }
   }
 
+  // ---------- Rutschen: Untergrund und Staub (auch für Figuren, die anderswo gerechnet werden) ----------
+  /** Untergrund unter einer Figur: Einschlag-Art des Materials ('concrete', 'metal', 'wood', 'sand', 'cloth') */
+  function groundKind(s) {
+    phys.raycast(s.x, s.y + 0.2, s.z, 0, -1, 0, 0.6);
+    return (RAY.i >= 0 && MAT_DEF[world.colMat[RAY.i]]?.hit) || world.groundHit;
+  }
+  function slideDust(s, dt) {
+    if ((s.slideFx -= dt) > 0) return;
+    s.slideFx = SLIDE.dust;
+    fx.dust?.(s.x - s.slideDx * 0.3, s.y, s.z - s.slideDz * 0.3, groundKind(s));
+  }
+
   // ---------- Bewegung und Handlungen einer Figur ----------
   function stepSoldier(s, dt, frozen) {
     const inp = s.in;
@@ -2691,6 +2717,18 @@ function createMatch(cfg, hooks) {
       return;
     }
 
+    // Rutschen: Sprint plus Ducken (Flanke von inp.crouch) – geduckt und schnell in die Richtung, die beim Start galt
+    s.slideCd -= dt;
+    const crouchEdge = inp.crouch && !s.crouchWas;
+    s.crouchWas = inp.crouch;
+    if (crouchEdge && !s.sliding && s.slideCd <= 0 && s.ground && !frozen && (s.sprinting || (s.sprintOut > 0.1 && s.speed > 5.5))) {
+      const sp = Math.hypot(s.vx, s.vz);
+      s.sliding = true; s.slideT = 0; s.slideFx = 0; s.sprinting = false; s.sprintOut = 0;      // Schießen ist erlaubt
+      s.slideDx = sp > 1 ? s.vx / sp : Math.sin(s.yaw); s.slideDz = sp > 1 ? s.vz / sp : -Math.cos(s.yaw);
+      S.slide?.(L, s.x, s.y, s.z, s.me, groundKind(s));
+    }
+    if (s.sliding) inp.crouch = true;              // Trefferfläche und Augenhöhe wie geduckt, solange gerutscht wird
+
     // Haltung
     if (inp.crouch) s.crouching = true;
     else if (s.crouching && !phys.bodyBlocked(s.x, s.y, s.z, s.r, STAND_H)) s.crouching = false;
@@ -2711,6 +2749,16 @@ function createMatch(cfg, hooks) {
     const wx = (cy * mx + sy * mz) * top, wz = (sy * mx - cy * mz) * top;
     const k = Math.min(1, dt * (s.ground ? 11 : 1.6));
     s.vx += (wx - s.vx) * k; s.vz += (wz - s.vz) * k;
+    // Rutschen: Tempo fällt von 8 auf 4 m/s (mal w.move); Springen bricht ab und behält 85 % davon
+    if (s.sliding) {
+      s.slideT += dt;
+      const q = Math.min(1, s.slideT / SLIDE.dur), v = lerp(SLIDE.v0, SLIDE.v1, q * q) * w.move;
+      s.vx = s.slideDx * v; s.vz = s.slideDz * v;
+      if (inp.jump && !s.jumpHeld && s.ground && !frozen && !phys.bodyBlocked(s.x, s.y, s.z, s.r, STAND_H)) {
+        s.sliding = false; s.slideCd = SLIDE.cd; s.crouching = false; s.h = STAND_H;
+        s.vx *= SLIDE.keep; s.vz *= SLIDE.keep; s.vy = 6.4; s.ground = false; s.jumpHeld = true;
+      }
+    }
     if (inp.jump && !s.jumpHeld && s.ground && !frozen && !s.crouching) { s.vy = 6.4; s.ground = false; }
     s.jumpHeld = inp.jump;
     s.vy -= GRAVITY * dt;
@@ -2727,6 +2775,9 @@ function createMatch(cfg, hooks) {
     if (s.landed > 14) damage(s, s, (s.landed - 14) * 7, { weapon: 'fall', dist: 0 });
     if (!s.alive) return;
     s.speed = Math.hypot(s.vx, s.vz);
+    // Rutschen: Ende nach 0,75 s, unter 3,2 m/s, beim Anstoßen oder ohne Boden – danach 0,6 s Sperre; Staub statt Schritten
+    if (s.sliding && (s.slideT >= SLIDE.dur || s.speed < SLIDE.min || s.bump || !s.ground || frozen)) { s.sliding = false; s.slideCd = SLIDE.cd; }
+    if (s.sliding) { s.stepAcc = 0; slideDust(s, dt); }
     s.phase += s.speed * dt * 2.4;
     if (s.ground && (s.stepAcc += s.speed * dt) > (s.sprinting ? 2.3 : 1.75)) { s.stepAcc = 0; S.step(L, s.x, s.y, s.z, s.me, s.sprinting ? 1.3 : s.crouching ? 0.35 : 1); }
     // Kante vor der Brust: hochziehen
@@ -2921,6 +2972,11 @@ function createMatch(cfg, hooks) {
         if (b.last && Math.hypot(b.last.x - s.x, b.last.z - s.z) < 14) lookYaw = Math.atan2(b.last.x - s.x, -(b.last.z - s.z));
         else if (ax * ax + az * az > 0.3) lookYaw = Math.atan2(ax, -az);
         inp.sprint = !b.last && p.length - b.pi > 5;
+        // Rutschen: im Sprint auf langer, freier Strecke ab und zu (ein Bild lang ducken)
+        if (inp.sprint && p.length - b.pi > 6 && Math.random() < dt * SLIDE.botRate) {
+          const n6 = p[b.pi + 6];
+          if (Math.abs(nav.Y[n6] - s.y) < 0.3 && nav.walkable(s.x, s.y, s.z, nav.X[n6], nav.Z[n6])) inp.crouch = true;
+        }
         turn *= 0.7;
       } else {
         if ((b.scanT -= dt) <= 0) { b.scanT = rnd(0.7, 1.8); b.scanYaw = s.yaw + rnd(-1.7, 1.7); }
@@ -2934,6 +2990,8 @@ function createMatch(cfg, hooks) {
       const dx = s.x - g.x, dz = s.z - g.z, d = Math.hypot(dx, dz);
       if (d < 6.5 && g.fuse < 1.7 && d > 0.05) { wx = dx / d; wz = dz / d; inp.sprint = !t; inp.crouch = false; break; }
     }
+    // Rutschen: auch beim Ausweichen vor einer Granate
+    if (!t && Math.random() < dt * SLIDE.botRate && nades.some((g) => g.fuse < 1.7 && Math.hypot(s.x - g.x, s.z - g.z) < 6.5)) inp.crouch = true;
     if (lookYaw !== null) {
       s.yaw += clamp(angDiff(s.yaw, lookYaw) * Math.min(1, dt * 10), -turn * dt, turn * dt);
       s.pitch += clamp((lookPitch - s.pitch) * Math.min(1, dt * 10), -turn * dt, turn * dt);
@@ -2992,6 +3050,7 @@ function createMatch(cfg, hooks) {
     s.kickAnim = damp(s.kickAnim, 0, 13, dt);
     if (s.ground && (s.stepAcc += s.speed * dt) > (s.sprinting ? 2.3 : 1.75)) { s.stepAcc = 0; S.step(L, s.x, s.y, s.z, false, s.sprinting ? 1.3 : s.crouching ? 0.35 : 1); }
     if (!client) { s.protect -= dt; if (s.hp < 100 && M.time - s.hurtAt > 4.5) s.hp = Math.min(100, s.hp + 38 * dt); }
+    if (s.sliding) slideDust(s, dt);               // Rutschen
   }
   const r2 = (v) => Math.round(v * 100) / 100, r3 = (v) => Math.round(v * 1000) / 1000;
   /** Zahl aus dem Netz – oder der Ersatz, wenn dort keine endliche Zahl steht */
@@ -2999,7 +3058,8 @@ function createMatch(cfg, hooks) {
   /** Drei endliche Zahlen aus dem Netz, dem Betrag nach begrenzt – sonst null */
   const vec3 = (a, lim) => (Array.isArray(a) && Number.isFinite(a[0]) && Number.isFinite(a[1]) && Number.isFinite(a[2])
     ? [clamp(a[0], -lim, lim), clamp(a[1], -lim, lim), clamp(a[2], -lim, lim)] : null);
-  const bits = (s) => (s.alive ? 1 : 0) | (s.crouching ? 2 : 0) | (s.sprinting ? 4 : 0) | (s.ads > 0.5 ? 8 : 0) | (s.reloadT > 0 ? 16 : 0) | (s.protect > 0 ? 32 : 0) | (s.uavT > M.time ? 64 : 0) | (s.uavReady ? 128 : 0);
+  const bits = (s) => (s.alive ? 1 : 0) | (s.crouching ? 2 : 0) | (s.sprinting ? 4 : 0) | (s.ads > 0.5 ? 8 : 0) | (s.reloadT > 0 ? 16 : 0) | (s.protect > 0 ? 32 : 0) | (s.uavT > M.time ? 64 : 0) | (s.uavReady ? 128 : 0)
+    | (s.sliding ? 256 : 0);                         // Phase 8: 256 rutscht
   function sendTable() { net.send({ t: 'tbl', r: soldiers.map((s) => [s.id, s.kills, s.deaths, s.assists, s.score, s.best]) }, null, true); }
   let netAcc = 0, tblAcc = 0;
   function netTick(dt) {
@@ -3014,6 +3074,15 @@ function createMatch(cfg, hooks) {
     }, null, false);
     if ((tblAcc += 0.05) >= 1) { tblAcc = 0; sendTable(); }
   }
+  /** Rutschen einer Figur, die anderswo gerechnet wird: Haltung zeigen, beim Beginn Klang, Richtung aus der Bewegung */
+  function remoteSlide(s, on) {
+    if (on && !s.sliding) {
+      const dx = s.tx - s.x, dz = s.tz - s.z, d = Math.hypot(dx, dz);
+      s.slideDx = d > 0.05 ? dx / d : Math.sin(s.yaw); s.slideDz = d > 0.05 ? dz / d : -Math.cos(s.yaw); s.slideFx = 0;
+      S.slide?.(L, s.x, s.y, s.z, false, groundKind(s));
+    }
+    s.sliding = on;
+  }
   /** Nachricht aus dem Netz. from = Absender (beim Mitspieler immer der Gastgeber). */
   M.onNet = (from, m) => {
     if (!net || !m || typeof m.t !== 'string') return;
@@ -3025,6 +3094,7 @@ function createMatch(cfg, hooks) {
         if (!s.alive || ![x, y, z, yaw, pitch].every(Number.isFinite) || (M.time - s.spawnAt < 1 && Math.hypot(x - s.x, z - s.z) > 5)) return;
         s.tx = clamp(x, world.bounds.x0, world.bounds.x1); s.ty = clamp(y, 0, 40); s.tz = clamp(z, world.bounds.z0, world.bounds.z1); s.tyaw = yaw; s.tpitch = clamp(pitch, -1.55, 1.55);
         s.crouching = !!(fl & 2); s.sprinting = !!(fl & 4); s.ads = fl & 8 ? 1 : 0; s.reloadT = fl & 16 ? 1 : 0;
+        remoteSlide(s, !!(fl & 256));               // Rutschen
         if (s.guns[c]) s.cur = c;
       } else if (m.t === 'fire') {
         const w = s.guns.some((g) => g.id === m.w) ? WEAPONS[m.w] : null;       // nur Waffen, die die Figur wirklich trägt
@@ -3087,6 +3157,7 @@ function createMatch(cfg, hooks) {
         if (!p || !Number.isFinite(a[4]) || !Number.isFinite(a[5])) continue;
         s.tx = p[0]; s.ty = p[1]; s.tz = p[2]; s.tyaw = a[4]; s.tpitch = clamp(a[5], -1.55, 1.55);
         s.crouching = !!(fl & 2); s.sprinting = !!(fl & 4); s.ads = fl & 8 ? 1 : 0; s.reloadT = fl & 16 ? 1 : 0; s.hp = hp;
+        remoteSlide(s, !!(fl & 256));               // Rutschen
         if (Number.isInteger(a[8]) && s.guns[a[8]]) s.cur = a[8];
       }
       nades.length = 0;
@@ -3210,6 +3281,9 @@ function createMatch(cfg, hooks) {
       const z = lerp(1, w.zoom, s.ads * s.ads * (3 - 2 * s.ads));
       cam.fov = (2 * Math.atan(Math.tan((fovBase * DEG) / 2) / z)) / DEG + v.sprintK * 4;
       M.scoped = !!w.scope && s.ads > 0.86;
+      // Rutschen: Kamera rollt leicht, Sichtfeld etwas weiter
+      v.slideK = damp(v.slideK || 0, s.sliding ? 1 : 0, 12, dt);
+      cam.roll += v.slideK * SLIDE.roll; cam.fov += v.slideK * SLIDE.fov;
     } else {
       // gefallen: die Kamera sinkt und dreht sich zum Schützen
       const kx = s.lastKiller && s.lastKiller !== s ? s.lastKiller : null;
@@ -4368,10 +4442,11 @@ function createMenus(root, api) {
     'Aus der Hüfte triffst du nur auf kurze Entfernung – leg mit Rechtsklick an.',
     'Schüsse verraten deine Stellung auf der Karte der Gegner.',
     'Das Messer (V) erledigt Gegner in Reichweite mit einem einzigen Hieb.',
+    'Duck dich aus dem Sprint heraus (C), dann rutschst du ein Stück – schießen kannst du dabei.',
   ];
   const KEYS = [
     [['W', 'A', 'S', 'D'], 'Bewegen'], [['Maus'], 'Zielen'], [['Linksklick'], 'Feuern'], [['Rechtsklick'], 'Anlegen'], [['R'], 'Nachladen'],
-    [['Umschalt'], 'Sprinten'], [['C'], 'Ducken'], [['Leertaste'], 'Springen, Klettern'], [['1', '2', 'Q', 'Mausrad'], 'Waffe wechseln'],
+    [['Umschalt'], 'Sprinten'], [['C'], 'Ducken'], [['Umschalt', 'C'], 'Rutschen (aus dem Sprint)'], [['Leertaste'], 'Springen, Klettern'], [['1', '2', 'Q', 'Mausrad'], 'Waffe wechseln'],
     [['G'], 'Granate'], [['V'], 'Messer'], [['3'], 'Aufklärung'], [['Tab'], 'Punktetafel'], [['Esc'], 'Pause'],
   ];
   const NAV = {
@@ -5718,6 +5793,7 @@ function createApp(win) {
   }
 
   // ---------- Eingabe ----------
+  let slideTap = false;           // Rutschen: Ducken im Sprint gedrückt (mit „Ducken umschalten“ setzt der Sprint es sonst gleich wieder zurück)
   function readInput() {
     const me = M.me, inp = me.in;
     const k = (c) => keys.has(c);
@@ -5727,6 +5803,7 @@ function createApp(win) {
     inp.sprint = k('ShiftLeft') || k('ShiftRight');
     if (inp.sprint && inp.mz > 0) crouchOn = false;
     inp.crouch = prefs.toggleCrouch ? crouchOn : k('KeyC');
+    if (slideTap) { inp.crouch = true; slideTap = false; }       // Rutschen: im Sprint ist „Ducken“ nur ein Anstoß
     inp.fire = k('Mouse0');
     inp.ads = prefs.toggleAds ? adsOn : k('Mouse2');
   }
@@ -5737,6 +5814,7 @@ function createApp(win) {
       if (code === 'Tab') { boardEl.hidden = false; boardT = 0; }
       return /^(Key[WASDCRQGVFE]|Digit[123]|Arrow|Shift|Mouse|Tab|Space)/.test(code);
     }
+    if (code === 'KeyC' && inp.sprint && inp.mz > 0) slideTap = true;       // Rutschen
     if (code === 'KeyC') { if (prefs.toggleCrouch) crouchOn = !crouchOn; }
     else if (code === 'Space') { if (crouchOn) { crouchOn = false; keys.delete('Space'); return true; } }
     else if (code === 'KeyR') inp.reload = true;
