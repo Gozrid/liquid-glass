@@ -2395,6 +2395,117 @@ rezept('schaden', {
     return K.norm(K.fade(a, { outT: 0.015 }), 1);
   },
 });
+// ---------- Nachladen, Wechsel, Anlegen, Foley, Messer, fallender Körper, Munition (Schritt 2.6) ----------
+/** Stoff-Rauschen: Bandpass f (→ f2), Anstieg und Abfall in s. */
+function cloth(K, rnd, len, { f = 900, f2 = 0, q = 0.8, rise = 0.06, fall = 0.18 }) {
+  const x = K.noise(K.buf(len), rnd, 'white');
+  K.bp(x, { f, f2, q });
+  K.env(x, [[0, 0.02], [rise, 1], [Math.min(len, rise + fall), 0.03]]);
+  for (let i = 1; i < x.length; i++) x[i] *= 0.75 + 0.5 * Math.abs(Math.sin(i * 0.0021 + Math.sin(i * 0.00037) * 3));    // unruhiges Reiben
+  return K.norm(x, 1);
+}
+const NACHLADEN = {
+  raus: [0.18, (K, rnd, a, fk) => {
+    clank(K, rnd, a, 0, MECH.bolt, 0.8, fk);
+    scrape(K, rnd, a, { at: 0.004, dur: 0.08, f: 1500 * fk, q: 1.5, gain: 0.5, attack: 0.002 });
+    K.tone(a, { f: 300 * fk, f2: 180 * fk, dur: 0.025, gain: 0.5, attack: 0.001 });
+  }],
+  rein: [0.2, (K, rnd, a, fk) => {
+    const sc = K.mix(K.buf(0.06), cloth(K, rnd, 0.06, { f: 1600 * fk, q: 1.2, rise: 0.055, fall: 0.005 }));
+    K.mix(a, sc, { at: 0.01, gain: 0.35 });
+    clank(K, rnd, a, 0.07, [[950, 14, 1], [2100, 9, 0.7], [3400, 5, 0.4]], 1, fk);
+    K.tone(a, { at: 0.07, f: 220 * fk, f2: 140 * fk, dur: 0.035, gain: 0.6, attack: 0.001 });
+  }],
+  verschluss: [0.22, (K, rnd, a, fk) => {
+    clank(K, rnd, a, 0, MECH.bolt, 0.6, fk);
+    clank(K, rnd, a, 0.085, MECH.bolt, 1, fk * 0.97);
+    const b = K.sine(K.buf(0.05), { f: 160 * fk, dur: 0.05, gain: 1 });
+    K.decay(b, { attack: 0.001, tau: 0.015 }); K.fade(b, { outT: 0.01 }); K.dc(b);
+    K.mix(a, b, { at: 0.085, gain: 0.6 });
+  }],
+  patrone: [0.14, (K, rnd, a, fk) => {
+    scrape(K, rnd, a, { dur: 0.04, f: 2200 * fk, q: 1.8, gain: 0.4, attack: 0.02 });
+    clank(K, rnd, a, 0.045, [[1200, 10, 1], [2600, 6, 0.5]], 1, fk);
+  }],
+};
+for (const [name, [len, fn]] of Object.entries(NACHLADEN)) {
+  rezept(`nachladen.${name}`, {
+    bus: 'foley', gain: spitze(-18, 'foley'), prio: 6, cap: 2, send: 0.1,
+    make(K, rnd, v) { const a = K.buf(len); fn(K, rnd, a, vary(v, 3, rnd, 0.06)); return K.norm(K.fade(a, { outT: 0.01 }), 1); },
+  });
+}
+rezept('wechsel', {
+  bus: 'foley', gain: spitze(-21, 'foley'), prio: 5, cap: 2, send: 0.1,
+  make(K, rnd, v) {
+    const fk = vary(v, 3, rnd, 0.08), a = K.mix(K.buf(0.3), cloth(K, rnd, 0.26, { f: 900 * fk, q: 0.8, rise: 0.06, fall: 0.18 }));
+    clank(K, rnd, a, 0.12, [[2400 * fk, 8, 0.3]], 1);
+    clank(K, rnd, a, 0.19, [[2400 * fk * 1.08, 8, 0.3]], 0.8);
+    return K.norm(K.fade(a, { outT: 0.02 }), 1);
+  },
+});
+for (const [name, up] of [['anlegen', true], ['absetzen', false]]) {
+  rezept(name, {
+    n: 2, bus: 'foley', gain: spitze(-27, 'foley'), prio: 3, cap: 2,
+    make(K, rnd, v) {
+      const fk = v ? 1.07 : 0.94, a = K.mix(K.buf(0.16), cloth(K, rnd, 0.15, { f: (up ? 1400 : 700) * fk, f2: (up ? 700 : 1400) * fk, q: 1, rise: up ? 0.05 : 0.02, fall: up ? 0.1 : 0.12 }));
+      clank(K, rnd, a, up ? 0.13 : 0.003, [[2900 * fk, 4, 0.35]], 1);
+      return K.norm(K.fade(a, { outT: 0.01 }), 1);
+    },
+  });
+}
+rezept('stoff', {
+  bus: 'foley', gain: spitze(-26, 'foley'), prio: 2, cap: 2,
+  make(K, rnd, v) { const fk = vary(v, 3, rnd, 0.1); return K.norm(K.fade(K.mix(K.buf(0.26), cloth(K, rnd, 0.25, { f: 1100 * fk, q: 0.7, rise: 0.05, fall: 0.2 })), { outT: 0.02 }), 1); },
+});
+rezept('klappern', {
+  n: 4, bus: 'foley', gain: spitze(-28, 'foley'), prio: 2, cap: 2,
+  make(K, rnd, v) {
+    const a = K.mix(K.buf(0.08), cloth(K, rnd, 0.07, { f: 1300, q: 0.9, rise: 0.015, fall: 0.05 }), { gain: 0.6 });
+    for (const at of [0.004, 0.02 + rnd() * 0.03]) clank(K, rnd, a, at, [[pick(v % 3, rnd, 1700, 2600) * (v === 3 ? 1.04 : 1), 6, 1]], 10 ** (-20 / 20) * 6);
+    return K.norm(K.fade(a, { outT: 0.025 }), 1);
+  },
+});
+rezept('munition', {
+  n: 2, bus: 'foley', gain: spitze(-19, 'foley'), prio: 5, cap: 1,
+  make(K, rnd, v) {
+    const fk = v ? 1.06 : 0.95, a = K.buf(0.3);
+    [0, 0.06, 0.12].forEach((at, i) => clank(K, rnd, a, at, [[1500 * 1.12 ** i, 10, 1], [3300 * 1.12 ** i, 6, 0.5]], 1, fk));
+    K.mix(a, cloth(K, rnd, 0.08, { f: 1300, q: 0.9, rise: 0.015, fall: 0.05 }), { at: 0.17, gain: 0.3 });
+    clank(K, rnd, a, 0.18, [[2100 * fk, 6, 1]], 0.3);
+    return K.norm(K.fade(a, { outT: 0.02 }), 1);
+  },
+});
+rezept('messer.schwung', {
+  bus: 'foley', gain: spitze(-20, 'foley'), prio: 6, cap: 2, send: 0.1,
+  make(K, rnd, v) {
+    const fk = vary(v, 3, rnd, 0.08), x = K.noise(K.buf(0.16), rnd, 'white');
+    K.bp(x, { f: 1200 * fk, f2: 3200 * fk, q: 1.2 });
+    K.env(x, [[0, 0.02], [0.04, 1], [0.16, 0.003]]);
+    return K.norm(K.fade(x, { outT: 0.03 }), 1);
+  },
+});
+rezept('messer.treffer', {
+  bus: 'foley', gain: spitze(-15, 'foley'), prio: 6, cap: 2, send: 0.15,
+  make(K, rnd, v) {
+    const fk = vary(v, 3, rnd, 0.08), a = K.buf(0.15);
+    EINSCHLAG.koerper[2](K, rnd, a, fk);
+    K.mix(a, noiseHit(K, rnd, 0.15, { lp: 2000 * fk, tau: 0.04 }), { gain: 0.5 });
+    return K.norm(K.fade(a, { outT: 0.05 }), 1);
+  },
+});
+rezept('messer.wand', {
+  bus: 'foley', gain: spitze(-16, 'foley'), prio: 6, cap: 2, send: 0.2,
+  make(K, rnd, v) { const a = K.buf(0.2); clank(K, rnd, a, 0, [[2100, 40, 1], [3350, 25, 0.6], [5100, 14, 0.3]], 1, vary(v, 3, rnd, 0.06)); return K.norm(K.fade(a, { outT: 0.02 }), 1); },
+});
+rezept('koerper.fall', {
+  bus: 'welt', gain: spitze(-15, 'welt'), prio: 4, cap: 3, reach: 22, send: 0.2,
+  make(K, rnd, v) {
+    const fk = vary(v, 3, rnd, 0.08), a = K.mix(K.buf(0.5), noiseHit(K, rnd, 0.3, { lp: 200 * fk, attack: 0.003, tau: 0.06 }));
+    for (let i = 0; i < 3; i++) clank(K, rnd, a, 0.04 + i * 0.035 + rnd() * 0.02, [[1500 + rnd() * 1500, 6, 1]], 10 ** (-14 / 20));
+    K.mix(a, cloth(K, rnd, 0.35, { f: 800 * fk, q: 0.7, rise: 0.03, fall: 0.3 }), { at: 0.02, gain: 0.25 });
+    return K.norm(K.fade(a, { outT: 0.03 }), 1);
+  },
+});
 rezept('explosion.nah', {
   bus: 'welt', gain: altDb(0.9, 'welt'), prio: 8, cap: 4, reach: 140, send: 0.9,
   make(K, rnd, v) {
@@ -2406,20 +2517,9 @@ rezept('explosion.nah', {
     return a;
   },
 });
-for (const [name, len, fn] of [
-  ['raus', 0.07, (K, rnd, a, s) => { K.burst(a, rnd, { type: 'bandpass', f: 1900 * s, q: 3, dur: 0.05, gain: 0.9 }); K.tone(a, { type: 'square', f: 420 * s, f2: 210 * s, dur: 0.05, gain: 0.12 }); }],
-  ['rein', 0.09, (K, rnd, a, s) => { K.burst(a, rnd, { type: 'bandpass', f: 1300 * s, q: 2.5, dur: 0.07, gain: 1 }); K.tone(a, { type: 'square', f: 260 * s, f2: 150 * s, dur: 0.07, gain: 0.2 }); }],
-  ['patrone', 0.07, (K, rnd, a, s) => { K.burst(a, rnd, { type: 'bandpass', f: 1500 * s, q: 3, dur: 0.05, gain: 0.8 }); K.tone(a, { type: 'triangle', f: 520 * s, f2: 300 * s, dur: 0.05, gain: 0.2 }); }],
-  ['verschluss', 0.16, (K, rnd, a, s) => { K.burst(a, rnd, { type: 'bandpass', f: 2600 * s, q: 4, dur: 0.04, gain: 0.9 }); K.burst(a, rnd, { type: 'bandpass', f: 1700 * s, q: 4, dur: 0.05, gain: 0.9, at: 0.09 }); }],
-]) rezept(`nachladen.${name}`, { bus: 'foley', gain: altDb(0.3, 'foley'), prio: 6, cap: 2, send: 0.1, make(K, rnd, v) { const a = K.buf(len); fn(K, rnd, a, spread(v, rnd)); return a; } });
 rezept('leer', {
   n: 2, bus: 'foley', gain: spitze(-22, 'foley'), prio: 6, cap: 2, send: 0.1,
   make(K, rnd, v) { const a = K.buf(0.06); clank(K, rnd, a, 0, [[3300, 5, 1], [5200, 3, 0.5], [1400, 8, 0.4]], 1, v ? 1.07 : 0.95); return K.norm(K.fade(a, { outT: 0.005 }), 1); },
-});
-rezept('wechsel', { bus: 'foley', gain: altDb(0.14, 'foley'), prio: 5, cap: 2, send: 0.1, make: (K, rnd, v) => K.burst(K.buf(0.18), rnd, { type: 'bandpass', f: 900 * spread(v, rnd), q: 0.8, dur: 0.16, gain: 0.9, attack: 0.05 }) });
-rezept('messer.schwung', {
-  bus: 'foley', gain: altDb(0.25, 'foley'), prio: 6, cap: 2, send: 0.1,
-  make(K, rnd, v) { const s = spread(v, rnd); return K.burst(K.buf(0.18), rnd, { type: 'bandpass', f: 1200 * s, f2: 3200 * s, q: 1.2, dur: 0.16, gain: 0.9, attack: 0.04 }); },
 });
 rezept('pfeifen', {
   bus: 'welt', gain: spitze(-20, 'welt'), prio: 4, cap: 3, send: 0.2,
@@ -2475,6 +2575,12 @@ for (const [name, seq] of Object.entries(SIGNALE)) {
     },
   });
 }
+
+/** Gruppen der Rezepte (Hörprobe): Name → Gruppe; KLANG_GRUPPEN in der Reihenfolge der Anzeige. */
+const KLANG_GRUPPEN = ['Waffen', 'Mechanik', 'Hülsen', 'Schritte', 'Einschläge', 'Treffer', 'Foley', 'Explosion', 'Oberfläche'];
+const klangGruppe = (n) => (/^schuss\./.test(n) ? 'Waffen' : /^(mech|ausklang)\.|^leer$/.test(n) ? 'Mechanik' : /^huelse\./.test(n) ? 'Hülsen'
+  : /^(schritt|landung)\./.test(n) ? 'Schritte' : /^(einschlag\.|querschlaeger$|knall$|pfeifen$)/.test(n) ? 'Einschläge'
+    : /^(treffer|kopfschuss|abschuss|schaden)$/.test(n) ? 'Treffer' : /^(explosion|granate)\./.test(n) ? 'Explosion' : /^(ui|signal)\./.test(n) ? 'Oberfläche' : 'Foley');
 
 /** Berechnete Varianten: Name → [{ data: [Kanäle …] mit Spitze 0,9, lvl: Spitze aus make() / 0,9, ab: AudioBuffer }] */
 const BANK = new Map();
@@ -2592,6 +2698,8 @@ const IMPACT_SND = { concrete: 'beton', metal: 'metall', wood: 'holz', body: 'ko
 /** Überschall-Munition: vorbeifliegende Kugeln knallen vor dem Pfeifen */
 const UEBERSCHALL = { rifle: true, dmr: true, sniper: true, lmg: true };
 const RELOAD_SND = { out: 'raus', in: 'rein', shell: 'patrone', bolt: 'verschluss' };
+/** Abspielrate der Nachlade-Klänge je Waffenklasse */
+const RELOAD_RATE = { pistol: 1.25, smg: 1.1, rifle: 1, dmr: 0.95, lmg: 0.8 };
 /** Hülsen: Zeit bis zum Aufprall (s) und Abspielrate je Waffenart */
 const HUELSE_T = { shotgun: 0.75, sniper: 0.95 }, HUELSE_RATE = { pistol: 1.15, smg: 1.08, shotgun: 0.8, sniper: 0.9, lmg: 0.92 };
 /** Automatische Waffen mit Ausklang nach einem Feuerstoß */
@@ -2657,7 +2765,8 @@ function createSound(getPrefs) {
   let lsend = null, zoneL = 'hof', shown = 'hof', zoneT = 0, forced = null, shownVol = -1;
   const bus = {}, pool = [], last = {}, stat = { plays: 0, steals: 0, drops: 0, max: 0, by: {} }, st = { hp: 100, boom: 0 };
   const hallIn = {}, lzone = {}, zcache = new Map();
-  const burst = { kind: null, n: 0, t: 0, dt: 0 }, ladder = { n: 0, t: -9 };         // eigener Feuerstoß: Art, Schüsse, letzter Schuss (s), Schussabstand (s)
+  const burst = { kind: null, n: 0, t: 0, dt: 0 }, ladder = { n: 0, t: -9 };
+  let sprintN = 0;         // eigener Feuerstoß: Art, Schüsse, letzter Schuss (s), Schussabstand (s)
   const vol = () => getPrefs().volume;
   const ok = () => !gone && sfx.enabled && audioReady() && vol() > 0;
 
@@ -2924,7 +3033,10 @@ function createSound(getPrefs) {
     /** Schritt; surf = Trefferart des Untergrunds (phys.surface). Eigene Schritte auf dem Bus foley, 4 dB leiser als fremde aus nächster Nähe. */
     step(L, x, y, z, own, loud = 1, surf) {
       const name = `schritt.${GRUND[surf] || 'stein'}`;
-      if (own) play(name, { own: true, bus: 'foley', gain: loud * 10 ** ((BUSSE.welt - BUSSE.foley - 4) / 20) });
+      if (own) {
+        play(name, { own: true, bus: 'foley', gain: loud * 10 ** ((BUSSE.welt - BUSSE.foley - 4) / 20) });
+        if (loud > 1.2 && (sprintN = (sprintN + 1) % 2) === 0) play('klappern', { own: true });          // Ausrüstung klappert bei jedem zweiten Sprintschritt
+      }
       else play(name, { L, x, y, z, gain: loud });
     },
     /** Landung der eigenen Figur; k = Stärke 0 … 1. */
@@ -2934,10 +3046,27 @@ function createSound(getPrefs) {
      * Scharfschützengewehr werfen erst beim Repetieren aus). Phase 6 ruft es beim Aufprall der sichtbaren Hülse mit when = 0.
      */
     shell(surf, kind, when) { play(`huelse.${GRUND[surf] || 'stein'}`, { own: true, when: when ?? HUELSE_T[kind] ?? 0.5, rate: HUELSE_RATE[kind] || 1 }); },
-    reload(part) { play(`nachladen.${RELOAD_SND[part] || 'verschluss'}`, { own: true, pan: 0.1 }); },
+    /**
+     * Nachladen der eigenen Waffe: part 'out' | 'in' | 'shell' | 'bolt', kind = Waffenart (Abspielrate je Klasse). Der Verschluss der
+     * Schrotflinte ist der Vorderschaft (mech.pump), der des Scharfschützengewehrs der Kammerstängel (mech.bolt). Phase 6 ruft es aus der Zeitleiste.
+     */
+    reload(part, kind) {
+      if (part === 'bolt' && (kind === 'shotgun' || kind === 'sniper')) { play(kind === 'shotgun' ? 'mech.pump' : 'mech.bolt', { own: true }); return; }
+      play(`nachladen.${RELOAD_SND[part] || 'verschluss'}`, { own: true, pan: 0.1, rate: RELOAD_RATE[kind] || 1 });
+    },
     dry() { play('leer', { own: true }); },
     swap() { play('wechsel', { own: true }); },
     swing() { play('messer.schwung', { own: true }); },
+    /** Messer: 'schwung' | 'treffer' | 'wand' */
+    knife(art) { play(`messer.${art === 'treffer' || art === 'wand' ? art : 'schwung'}`, { own: true }); },
+    /** Anlegen (true) oder Absetzen (false) der eigenen Waffe */
+    ads(on) { play(on ? 'anlegen' : 'absetzen', { own: true }); },
+    jump() { play('stoff', { own: true }); play('klappern', { own: true, gain: 0.7 }); },
+    mantle() { play('stoff', { own: true, rate: 0.85, gain: 1.3 }); play('klappern', { own: true }); },
+    /** Stoff der eigenen Kleidung (Ducken, Aufstehen) */
+    cloth() { play('stoff', { own: true, gain: 0.7 }); },
+    bodyfall(L, x, y, z) { play('koerper.fall', { L, x, y, z }); },
+    pickup() { play('munition', { own: true }); },
     /** Treffer-Bestätigung. Leiter: jeder weitere Treffer binnen 0,4 s hebt die Tonhöhe um 6 %, höchstens fünfmal. */
     hit(head, kill) {
       const now = performance.now() / 1000;
@@ -3444,6 +3573,7 @@ function createMatch(cfg, hooks) {
     if (corpses.length > 14) corpses.shift();
     feed.push({ a: a === v ? null : a, v, weapon, head, t: M.time });
     if (feed.length > 6) feed.shift();
+    S.bodyfall(L, v.x, v.y + 0.3, v.z);
   }
   function kill(v, a, info) {
     fall(v, a, info.weapon, !!info.head);
@@ -3506,7 +3636,7 @@ function createMatch(cfg, hooks) {
     if (s.reloadT > 0 || gun.mag >= w.mag || gun.reserve <= 0 || s.switchT > 0) return;
     s.reloadT = s.reloadMax = w.reload + (w.shells ? 0.2 : 0);
     s.reloadStage = 0;
-    if (s.me) S.reload('out');
+    if (s.me) S.reload('out', w.snd);
   }
   function fire(s) {
     const gun = s.guns[s.cur], w = WEAPONS[gun.id];
@@ -3584,7 +3714,7 @@ function createMatch(cfg, hooks) {
   }
   function melee(s) {
     s.meleeT = MELEE.time; s.reloadT = 0; s.protect = 0;
-    if (s.me) S.swing();
+    if (s.me) S.knife('schwung');
     basis(s.yaw, s.pitch);
     const fwx = B[6], fwy = B[7], fwz = B[8], ey = s.y + eyeOf(s);
     let best = null, bd = MELEE.range;
@@ -3594,9 +3724,10 @@ function createMatch(cfg, hooks) {
       if (d < bd && (dx * fwx + dy * fwy + dz * fwz) / d > 0.5 && phys.los(s.x, ey, s.z, e.x, e.y + 1, e.z)) { best = e; bd = d; }
     }
     if (best) {
-      fx.flesh(best.x, best.y + 1.2, best.z, fwx, 0, fwz); S.impact(L, best.x, best.y + 1, best.z, 'body');
+      fx.flesh(best.x, best.y + 1.2, best.z, fwx, 0, fwz);
+      if (s.me) S.knife('treffer'); else S.impact(L, best.x, best.y + 1, best.z, 'body');
       if (client) net.send({ t: 'melee', v: best.id }, null, true); else damage(best, s, MELEE.dmg, { weapon: 'knife', dist: bd });
-    }
+    } else if (s.me && phys.raycast(s.x, ey, s.z, fwx, fwy, fwz, MELEE.range) !== Infinity) S.knife('wand');      // Klinge trifft die Wand
   }
   function throwNade(s) {
     s.nades--; s.nadeT = 1; s.protect = 0;
@@ -3677,6 +3808,8 @@ function createMatch(cfg, hooks) {
     s.h = s.crouching ? CROUCH_H : STAND_H;
     const wantAds = inp.ads && s.reloadT <= 0 && s.switchT <= 0 && s.meleeT <= 0;
     s.ads = approach(s.ads, wantAds ? 1 : 0, dt / w.ads);
+    if (s.me && wantAds !== !!s.adsOn) { s.adsOn = wantAds; S.ads(wantAds); }            // Klang: Anlegen und Absetzen
+    if (s.me && s.crouching !== !!s.crouchWas) { s.crouchWas = s.crouching; S.cloth(); }
 
     // Bewegung
     let mx = inp.mx, mz = inp.mz;
@@ -3690,7 +3823,7 @@ function createMatch(cfg, hooks) {
     const wx = (cy * mx + sy * mz) * top, wz = (sy * mx - cy * mz) * top;
     const k = Math.min(1, dt * (s.ground ? 11 : 1.6));
     s.vx += (wx - s.vx) * k; s.vz += (wz - s.vz) * k;
-    if (inp.jump && !s.jumpHeld && s.ground && !frozen && !s.crouching) { s.vy = 6.4; s.ground = false; }
+    if (inp.jump && !s.jumpHeld && s.ground && !frozen && !s.crouching) { s.vy = 6.4; s.ground = false; if (s.me) S.jump(); }
     s.jumpHeld = inp.jump;
     s.vy -= GRAVITY * dt;
     for (const o of soldiers) {          // nicht ineinander stehen
@@ -3714,6 +3847,7 @@ function createMatch(cfg, hooks) {
       if (hh > STEP_H && hh <= 1.65 && !phys.bodyBlocked(fx2, topY, fz2, s.r, STAND_H) && !phys.blocked(s.x - s.r, s.y + s.h, s.z - s.r, s.x + s.r, topY + STAND_H, s.z + s.r)) {
         s.mantle = { t: 0, dur: 0.34 + hh * 0.16, x0: s.x, y0: s.y, z0: s.z, x1: fx2, y1: topY, z1: fz2 };
         s.reloadT = 0;
+        if (s.me) S.mantle();
       }
     }
     if (frozen) { s.held = inp.fire; return; }
@@ -3729,16 +3863,16 @@ function createMatch(cfg, hooks) {
     // Nachladen
     if (s.reloadT > 0) {
       s.reloadT -= dt;
-      if (!w.shells && s.reloadStage === 0 && s.reloadT < s.reloadMax * 0.45) { s.reloadStage = 1; if (s.me) S.reload('in'); }
+      if (!w.shells && s.reloadStage === 0 && s.reloadT < s.reloadMax * 0.45) { s.reloadStage = 1; if (s.me) S.reload('in', w.snd); }
+      if (!w.shells && s.reloadStage === 1 && s.reloadT < s.reloadMax * 0.1) { s.reloadStage = 2; if (s.me) S.reload('bolt', w.snd); }      // Stufe 2: Verschluss bei 90 %
       if (s.reloadT <= 0) {
         if (w.shells) {
           gun.mag++; gun.reserve--;
-          if (s.me) S.reload('shell');
-          if (gun.mag < w.mag && gun.reserve > 0 && !inp.fire) s.reloadT = s.reloadMax = w.reload; else if (s.me) S.reload('bolt');
+          if (s.me) S.reload('shell', w.snd);
+          if (gun.mag < w.mag && gun.reserve > 0 && !inp.fire) s.reloadT = s.reloadMax = w.reload; else if (s.me) S.reload('bolt', w.snd);
         } else {
           const n = Math.min(w.mag - gun.mag, gun.reserve);
           gun.mag += n; gun.reserve -= n;
-          if (s.me) S.reload('bolt');
         }
       }
     }
@@ -5195,12 +5329,19 @@ const MENU_CSS = `
 
 /* ---------- Hörprobe ---------- */
 .szm-hear-dim { grid-template: minmax(0, 1fr) / minmax(0, 1fr); }
-.szm-hear { display: grid; grid-template-rows: auto auto minmax(0, 1fr) auto; gap: .7em; width: min(42em, 100%); max-height: min(40em, 100%); padding: 1.2em 1.3em 1.1em; border-radius: 1.1em;
+.szm-hear { display: grid; grid-template-rows: auto auto auto minmax(0, 1fr) auto; gap: .7em; width: min(42em, 100%); max-height: min(40em, 100%); padding: 1.2em 1.3em 1.1em; border-radius: 1.1em;
   background: rgba(14, 17, 26, .96); box-shadow: inset 0 0 0 .5px var(--glass-edge), 0 2em 5em -1.5em rgba(0, 0, 0, .9); animation: szm-rise .3s var(--ease-out) both; }
 .szm-hear > b { font-size: 1.15em; font-weight: 800; }
 .szm-hear-opts { display: flex; flex-wrap: wrap; align-items: center; gap: .5em 1.4em; font-size: .9em; color: var(--fg-2); }
 .szm-hear-opts > span { display: inline-flex; align-items: center; gap: .6em; }
 .szm-hear-list { min-height: 0; overflow: auto; overscroll-behavior: contain; padding-right: .3em; }
+.szm-hear-tools { display: flex; flex-wrap: wrap; align-items: center; gap: .5em .8em; }
+.szm-hear-find { flex: 1 1 10em; min-width: 8em; padding: .4em .7em; font-size: .9em; }
+.szm-hear-chips { display: flex; flex-wrap: wrap; gap: .35em; }
+.szm-hear-chips .szm-chip { cursor: pointer; border: 0; font: inherit; font-size: .8em; }
+.szm-hear-chips .szm-chip[aria-pressed="true"] { background: var(--accent, #3b82f6); color: #fff; box-shadow: none; }
+.szm-hear-grp > b { display: block; position: sticky; top: 0; z-index: 1; padding: .45em 0 .25em; background: rgb(14, 17, 26); font-size: .85em; font-weight: 800; letter-spacing: .02em; color: var(--fg-2); }
+.szm-hear-grp[hidden], .szm-hear-row[hidden] { display: none; }
 .szm-hear-row { display: flex; align-items: center; gap: .5em; padding: .3em 0; border-top: .5px solid var(--line); }
 .szm-hear-row > span { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; font-size: .92em; }
 .szm-hear-row small { margin-left: .6em; color: var(--fg-3); }
@@ -5554,13 +5695,32 @@ function createMenus(root, api) {
     const note = h('span', 'Knopf = Variante');
     const off = () => K.room(null);
     const close = () => { off(); dlg?.el.remove(); dlg = null; if (before?.isConnected) before.focus({ preventScroll: true }); };
-    const list = h('div.szm-hear-list', K.names().map((n) => {
+    // Gegliedert nach Gruppen (Waffen, Mechanik, Hülsen …), mit Suche und Gruppenwahl: so lässt sich alles in wenigen Minuten durchhören
+    const names = K.names(), groups = KLANG_GRUPPEN.filter((g) => names.some((n) => klangGruppe(n) === g));
+    let grp = 'alle', find = '';
+    const rowOf = (n) => {
       const m = K.meta(n);
-      return h('div.szm-hear-row', h('span', n, h('small', [m.bus, m.reach ? `${m.reach} m` : '', m.loop ? 'Schleife' : ''].filter(Boolean).join(' · '))),
+      return h('div.szm-hear-row', { dataset: { name: n, grp: klangGruppe(n) } }, h('span', n, h('small', [m.bus, m.reach ? `${m.reach} m` : '', m.loop ? 'Schleife' : ''].filter(Boolean).join(' · '))),
         Array.from({ length: m.n }, (_, v) => btn('.small', String(v + 1), () => {
           const ok = K.play(n, v, dist);
           note.textContent = !ok ? `${n}: nicht zu hören (außer Hörweite oder Ton aus)` : `${n} · Variante ${v + 1}${dist && !m.reach ? ' · nicht ortsgebunden, direkt' : dist ? ` · ${dist} m` : ''}`;
         })));
+    };
+    const list = h('div.szm-hear-list', groups.map((g) => h('div.szm-hear-grp', { dataset: { grp: g } }, h('b', g), ...names.filter((n) => klangGruppe(n) === g).map(rowOf))));
+    const filter = () => {
+      const q = find.trim().toLowerCase();
+      for (const sec of list.children) {
+        let any = false;
+        for (const r of sec.querySelectorAll('.szm-hear-row')) { const on = (grp === 'alle' || r.dataset.grp === grp) && (!q || r.dataset.name.includes(q)); r.hidden = !on; any ||= on; }
+        sec.hidden = !any;
+      }
+    };
+    const search = h('input.kit-field.szm-hear-find', { type: 'search', placeholder: 'Suchen …', 'aria-label': 'Rezepte suchen', spellcheck: false, autocomplete: 'off' });
+    search.addEventListener('input', () => { find = search.value; filter(); });
+    const chips = h('div.szm-hear-chips', { role: 'group', 'aria-label': 'Gruppe' }, ['alle', ...groups].map((g) => {
+      const b = h('button.szm-chip', { type: 'button', 'aria-pressed': String(g === grp) }, g === 'alle' ? 'Alle' : g);
+      b.addEventListener('click', () => { grp = g; for (const x of chips.children) x.setAttribute('aria-pressed', String(x === b)); filter(); });
+      return b;
     }));
     const el = h('div.szm-dim.szm-hear-dim', { role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Hörprobe' },
       h('div.szm-hear',
@@ -5568,6 +5728,7 @@ function createMenus(root, api) {
         h('div.szm-hear-opts',
           h('span', 'Raum', seg('Raum', [['aus', 'Aus'], ['hof', 'Hof'], ['halle', 'Halle'], ['gasse', 'Gasse'], ['raum', 'Raum']], 'aus', (v) => K.room(v))),
           h('span', 'Entfernung', seg('Entfernung', [[0, 'Direkt'], [5, '5 m'], [30, '30 m'], [80, '80 m']], 0, (v) => { dist = v; }))),
+        h('div.szm-hear-tools', search, chips),
         list,
         h('div.szm-hear-foot', note, btn('', 'Schließen', () => { snd('back'); close(); }))));
     dlg = { el, close, off };
@@ -6499,7 +6660,7 @@ function createApp(win) {
       for (const m of d.medals) { pop(m, 0, 'medal'); medalCount[m] = (medalCount[m] || 0) + 1; }
       if (d.medals.some((m) => m.startsWith('Serie'))) S.jingle('streak');
     } else if (type === 'points') pop(d.label, d.pts);
-    else if (type === 'pack') pop('Munition aufgenommen', 0);
+    else if (type === 'pack') { pop('Munition aufgenommen', 0); S.pickup(); }
     else if (type === 'died') {
       adsOn = false; crouchOn = false;
       const self = d.by === M.me;
