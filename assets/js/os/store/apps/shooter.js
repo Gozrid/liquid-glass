@@ -2661,10 +2661,11 @@ function blepSaw(a, sr, { f, at = 0, dur, gain = 1, ph0 = 0, vib = 0, vibF = 5 }
  * (von len nach außen): der Sprung vom letzten zum ersten Abtastwert ist klein (unter 1,2 % der Spitze), und die 100 ms vor und nach L sind
  * gleich laut (höchstens 0,8 dB). Die xf s nach L werden mit gleicher Leistung (Sinus/Kosinus) in den Anfang geblendet – das Ende läuft so
  * ohne Bruch in den Anfang weiter. Zuletzt wird der Gleichanteil abgezogen (eine Konstante: die Naht bleibt heil). Generator (gibt nach
- * jedem Kanal ab); liefert die Kanäle der Länge L.
+ * jedem Kanal ab); liefert die Kanäle der Länge L. period: die Naht liegt nur auf Vielfachen davon (Abtastwerte) – für tonale Schleifen, deren
+ * Grundton dort genau in Phase ist.
  */
-function* loopify(chs, sr, len, xf = 0.5) {
-  const n0 = Math.round(len * sr), X = Math.round(xf * sr), w = Math.round(0.2 * sr), W = Math.round(0.1 * sr), pre = [];
+function* loopify(chs, sr, len, xf = 0.5, period = 1) {
+  const n0 = Math.round(len * sr), X = Math.round(xf * sr), w = Math.floor(Math.round(0.2 * sr) / period), W = Math.round(0.1 * sr), pre = [];
   let peak = 0;
   for (const c of chs) {
     const p = new Float64Array(c.length + 1);
@@ -2675,7 +2676,7 @@ function* loopify(chs, sr, len, xf = 0.5) {
   const energy = (a, b) => pre.reduce((s, p) => s + p[b] - p[a], 0);
   let best = n0, bestS = Infinity;
   for (let k = 0; k <= 2 * w; k++) {
-    const L = n0 + (k & 1 ? (k + 1) / 2 : -k / 2);
+    const L = n0 + period * (k & 1 ? (k + 1) / 2 : -k / 2);            // tonale Schleifen: die Naht nur auf ganzen Perioden
     let step = 0;
     for (const c of chs) step = Math.max(step, Math.abs(c[L] - c[L - 1]) / (peak || 1));
     const rd = Math.abs(10 * Math.log10((energy(L - W, L) + 1e-12) / (energy(L, L + W) + 1e-12)));
@@ -2701,18 +2702,18 @@ const AMB_LEN = 12, AMB_XF = 0.5;
 /** Weicher Zufallsverlauf −1 … 1 (Summe aus drei Rauschwerten noise1), rate in Hz. */
 const drift = (rnd, rate) => { const s = (rnd() * 1e9) | 0; return (t) => (noise1(t * rate, s) * 0.6 + noise1(t * rate * 2.3, s + 1) * 0.3 + noise1(t * rate * 5.1, s + 2) * 0.1); };
 /**
- * Umgebungsschleife: je Kanal ein Feld von AMB_LEN + 0,7 s, layer(K, rnd, a, c) füllt und formt es (Generator, gibt zwischen Stücken ab),
- * danach nahtlos gemacht. Spitze 1.
+ * Schleife: je Kanal (nch) ein Feld von len + xf + 0,25 s, layer(K, rnd, a, c, sh) füllt und formt es (Generator, gibt zwischen Stücken ab;
+ * sh teilen sich die Kanäle), danach nahtlos gemacht (Naht auf Vielfachen von period). Spitze 1.
  */
-function* ambLoop(K, rnd, layer) {
+function* ambLoop(K, rnd, layer, { len = AMB_LEN, xf = AMB_XF, nch = 2, period = 1 } = {}) {
   const ch = [], sh = {};
-  for (let c = 0; c < 2; c++) { const a = K.buf(AMB_LEN + AMB_XF + 0.25); yield* layer(K, rnd, a, c, sh); ch.push(a); }
-  const out = yield* loopify(ch, K.SR, AMB_LEN, AMB_XF);
+  for (let c = 0; c < nch; c++) { const a = K.buf(len + xf + 0.25); yield* layer(K, rnd, a, c, sh); ch.push(a); }
+  const out = yield* loopify(ch, K.SR, len, xf, period);
   yield;
   let p = 0;
   for (const c of out) p = Math.max(p, K.peak(c));
   for (const c of out) for (let i = 0; i < c.length; i++) c[i] /= p || 1;
-  return { ch: out };
+  return nch === 1 ? out[0] : { ch: out };
 }
 /** Hüllkurven-Stück: multipliziert a[i0 … i1) mit fn(t); fn wird alle 16 Abtastwerte ausgewertet, dazwischen linear. */
 const shapeRun = (sr, fn) => (a, i0, i1) => {
@@ -2841,6 +2842,49 @@ rezept('amb.markise', {
     return K.norm(K.fade(a, { outT: 0.1 }), 1);
   },
 });
+
+// ---------- Ortsfeste Quellen (Schritt 7.2): Schleifen von 4 s, mono, mit dem Entfernungsmodell ----------
+const QUELLE = {
+  /** Flackernde Lampe: Sägezahn 100 Hz und Obertöne bei 200 und 300 Hz, leicht schwankend, dazu ein seltenes Knistern. */
+  lampe: function* (K, rnd, a) {
+    blepSaw(a, K.SR, { f: 100, dur: a.length / K.SR, gain: 0.5 });
+    yield;
+    K.sine(a, { f: 200, gain: 0.35 }); K.sine(a, { f: 300, gain: 0.12, phase: 1 });
+    K.hp(a, { f: 70 }); K.lp(a, { f: 2400 });
+    const fl = drift(rnd, 3), amp = shapeRun(K.SR, (t) => 0.8 + 0.2 * fl(t));
+    yield* stuecke(a.length, (i0, i1) => amp(a, i0, i1));
+    for (let i = 0; i < 9; i++) K.click(a, rnd, { at: rnd() * (a.length / K.SR - 0.01), dur: 0.002 + 0.002 * rnd(), gain: 0.25 + 0.3 * rnd() });
+  },
+  /** Fahne: rosa Rauschen, Bandpass 400 – 2000 Hz, in unregelmäßigen Schlägen von 5 – 9 je Sekunde, ab und zu ein Knall des Tuchs. */
+  fahne: function* (K, rnd, a) {
+    const nz = noiseRun(rnd, 'pink'), flaps = [];
+    for (let t = 0; t < a.length / K.SR; t += 1 / (5 + 4 * rnd())) flaps.push([t, 0.04 + 0.05 * rnd(), 0.35 + 0.65 * rnd()]);
+    const gust = drift(rnd, 0.4), env = (t) => { let v = 0.12; for (const [t0, d, g] of flaps) { const x = (t - t0) / d; if (x > -1 && x < 1) v += g * (0.5 + 0.5 * Math.cos(Math.PI * x)); } return v * (0.7 + 0.3 * gust(t)); };
+    const bp = biquadRun(K.SR, 'bandpass', (t) => 900 * 1.6 ** gust(t), 0.9), amp = shapeRun(K.SR, env);
+    yield* stuecke(a.length, (i0, i1) => { nz(a, i0, i1); bp(a, i0, i1); amp(a, i0, i1); });
+    for (let i = 0; i < 3; i++) K.mix(a, noiseHit(K, rnd, 0.05, { bp: 1500 + 800 * rnd(), q: 1.2, tau: 0.008 }), { at: rnd() * (a.length / K.SR - 0.1), gain: 0.5 });
+  },
+  /** Brunnen: viele kurze Sinustöne 1 – 4 kHz (Tropfen, Tonhöhe steigt), dazu leises Plätschern (Bandpass 700 Hz). */
+  brunnen: function* (K, rnd, a) {
+    const nz = noiseRun(rnd, 'white'), bp = biquadRun(K.SR, 'bandpass', () => 700, 0.7), lp = biquadRun(K.SR, 'lowpass', () => 3000), sw = drift(rnd, 1.5);
+    const amp = shapeRun(K.SR, (t) => 0.22 * (0.75 + 0.25 * sw(t)));
+    yield* stuecke(a.length, (i0, i1) => { nz(a, i0, i1); bp(a, i0, i1); lp(a, i0, i1); amp(a, i0, i1); });
+    const n = Math.round((a.length / K.SR) * 70), sr = K.SR;
+    for (let k = 0; k < n; k++) {
+      const f0 = 1000 * 4 ** rnd(), dur = 0.008 + 0.017 * rnd(), tau = 0.004 + 0.008 * rnd(), g = 0.15 + 0.5 * rnd() ** 2, i0 = Math.floor(rnd() * (a.length - dur * sr - 1));
+      let ph = 0;
+      for (let i = 0, m = Math.round(dur * sr); i < m; i++) { const t = i / sr; a[i0 + i] += g * Math.sin(ph) * Math.exp(-t / tau) * Math.min(1, t / 0.0008); ph += (2 * Math.PI * f0 * (1 + 0.4 * (t / dur))) / sr; }
+      if (k % 70 === 69) yield;
+    }
+  },
+};
+for (const [name, db, reach, period] of [['lampe', -28, 8, 480], ['fahne', -24, 10, 1], ['brunnen', -21, 14, 1]]) {
+  rezept(`quelle.${name}`, { n: 1, bus: 'amb', gain: spitze(db, 'amb'), prio: 9, cap: 3, reach, send: 0.2, loop: true, make: (K, rnd) => ambLoop(K, rnd, QUELLE[name], { len: 4, xf: 0.4, nch: 1, period }) });
+}
+/** Flackernde Lampe je Karte, solange der Lampen-Eintrag noch kein Kennzeichen „flackert“ (achter Wert, Phase 4) trägt: [x, z]. */
+const FLACKER = { Frachthof: [34, 0], Oase: [17, -22] };
+/** Brunnen der Oase (Markt): [x, y, z] */
+const BRUNNEN = { Oase: [-5.5, 0.9, 0] };
 
 /** Gruppen der Rezepte (Hörprobe): Name → Gruppe; KLANG_GRUPPEN in der Reihenfolge der Anzeige. */
 const KLANG_GRUPPEN = ['Waffen', 'Mechanik', 'Hülsen', 'Schritte', 'Einschläge', 'Treffer', 'Foley', 'Explosion', 'Oberfläche', 'Funk-Signale', 'Umgebung', 'Musik', 'Zustände', 'Spaß-Paket'];
@@ -3087,6 +3131,8 @@ function createSound(getPrefs) {
   /** Umgebung der Karte: want = AMB_KARTE-Eintrag, ready = Schleifen berechnet, on = laufende Schleifen, t = Zeit bis zum nächsten Einzelklang (s). */
   const amb = { want: null, ready: false, on: [], t: 8, inside: false };
   let ambIn = null, ambLp = null, lastListen = 0, tickId = 0;
+  /** Ortsfeste Quellen der Karte: { name, x, y, z, reach, v (laufende Stimme oder null) } – sie klingen nur in Reichweite (Schritt 7.2). */
+  const srcs = [];
   const hallIn = {}, lzone = {}, zcache = new Map();
   const burst = { kind: null, n: 0, t: 0, dt: 0 }, ladder = { n: 0, t: -9 };
   let sprintN = 0;         // eigener Feuerstoß: Art, Schüsse, letzter Schuss (s), Schussabstand (s)
@@ -3289,6 +3335,8 @@ function createSound(getPrefs) {
     if (pl || pan) { const p = ctx.createStereoPanner(); p.pan.value = clamp(pan, -1, 1); g.connect(p); p.connect(dest); nodes.push(p); }
     else g.connect(dest);
     const v = { name, prio, prot, vol, t0: now, len, until: now + ((o.when || 0) + (pl ? pl.delay : 0) + len + 1.5) * 1000, loop: R.loop, src, g, nodes, off: false, ending: false, bed: !!o.bed };
+    // ortsgebundener Dauerklang: listen führt Pegel, Tiefpass und Lage mit dem Hörer nach
+    if (o.bed && pl) Object.assign(v, { pos: [o.x, o.y ?? L.y, o.z ?? L.z], reach: R.reach, free: !!o.free, base: vol / pl.vol, lp: nodes[2], pan: nodes[nodes.length - 1], blocked: false });
     v.stop = (fade) => stop(v, fade);
     src.onended = () => release(v);
     // Hall: in die Zone der Quelle; liegt der Hörer woanders, die Hälfte zusätzlich in seine
@@ -3341,19 +3389,58 @@ function createSound(getPrefs) {
     ambLp.frequency.cancelScheduledValues(t); ambLp.frequency.setTargetAtTime(on ? 1200 : 20000, t, 0.4 / 3);
     ambIn.gain.cancelScheduledValues(t); ambIn.gain.setTargetAtTime(on ? 10 ** (-5 / 20) : 1, t, 0.4 / 3);
   }
+  // ---------- Ortsfeste Quellen (Schritt 7.2) ----------
+  /** Quellen der Karte festlegen: flackernde Lampe (Kennzeichen im Lampen-Eintrag, sonst FLACKER), Brunnen; Fahnen kommen mit S.flags. */
+  function srcWorld(w) {
+    srcStop();
+    srcs.length = 0;
+    if (!w) return;
+    const lamps = (w.lamps || []).filter((l) => l[7]), fb = FLACKER[w.name];
+    if (!lamps.length && fb) { const l = (w.lamps || []).find((q) => Math.abs(q[0] - fb[0]) < 0.6 && Math.abs(q[2] - fb[1]) < 0.6); if (l) lamps.push(l); }
+    for (const l of lamps) srcs.push({ name: 'quelle.lampe', x: l[0], y: l[1], z: l[2], v: null });
+    const bb = BRUNNEN[w.name];
+    if (bb) srcs.push({ name: 'quelle.brunnen', x: bb[0], y: bb[1], z: bb[2], v: null });
+    klangLater(srcs.map((q) => q.name));
+  }
+  function srcStop() { for (const q of srcs) if (q.v) { stop(q.v, 0.3); q.v = null; } }
+  /** Alle 0,25 s: Quellen in Reichweite starten (Schleife an zufälliger Stelle), außer Reichweite (mit 3 m Abstand) beenden. */
+  function srcCheck() {
+    for (const q of srcs) {
+      const R = KLANG[q.name], d = Math.hypot(q.x - LL.x, q.y - LL.y, q.z - LL.z);
+      if (q.v?.off) q.v = null;
+      if (!q.v && d < R.reach && klangHas(q.name, 0)) q.v = play(q.name, { bed: true, x: q.x, y: q.y, z: q.z, offset: Math.random() * 4 });
+      else if (q.v && d > R.reach + 3) { stop(q.v, 0.3); q.v = null; }
+    }
+  }
+  /** Lage, Pegel und Tiefpass eines ortsgebundenen Dauerklangs nachführen (je Bild); Verdeckung nur, wenn occ (alle 0,25 s). */
+  function follow(v, occ) {
+    const [x, y, z] = v.pos, pl = place(LL, x, y, z, v.reach, true), t = ctx.currentTime;
+    if (occ) v.blocked = !!phys && !v.free && !!pl && !sight(LL, x, y, z);
+    const vol = pl ? v.base * pl.vol * (v.blocked ? 0.5 : 1) : 0, fc = pl ? (v.blocked ? Math.max(500, pl.fc * 0.25) : pl.fc) : 700;
+    v.g.gain.setTargetAtTime(vol, t, 0.04);
+    if (v.lp?.frequency) v.lp.frequency.setTargetAtTime(fc, t, 0.04);
+    if (pl && v.pan?.pan) v.pan.pan.setTargetAtTime(clamp(pl.pan, -1, 1), t, 0.04);
+  }
   /**
-   * Alle 100 ms (ab dem ersten Klang): ruft listen nicht mehr (Partie verlassen, Fenster verdeckt), endet die Umgebung der Karte;
-   * ruft es wieder, beginnt sie neu.
+   * Alle 100 ms (ab dem ersten Klang): ruft listen nicht mehr (Partie verlassen, Fenster verdeckt), enden die Umgebung und die Quellen der Karte;
+   * ruft es wieder, beginnen sie neu.
    */
   function tick() {
     if (gone) return;
-    if (amb.on.length && performance.now() - lastListen > 600) ambStop(1);
+    if (performance.now() - lastListen > 600) { if (amb.on.length) ambStop(1); srcStop(); }
   }
 
   const S = {
     play,
     /** Welt der Partie (nach createPhysics): Verdeckung, Raumzonen, Umgebung der Karte. null: ohne Welt. */
-    setWorld(p, w) { phys = p || null; zcache.clear(); zoneT = 0; ambWorld(p ? w : null); },
+    setWorld(p, w) { phys = p || null; zcache.clear(); zoneT = 0; ambWorld(p ? w : null); srcWorld(p ? w : null); },
+    /** Fahnen der Stellungen („Herrschaft“) als ortsfeste Quellen: [{ x, y (Boden), z }]; leer: keine. */
+    flags(list = []) {
+      for (const q of srcs) if (q.name === 'quelle.fahne' && q.v) { stop(q.v, 0.3); q.v = null; }
+      for (let i = srcs.length - 1; i >= 0; i--) if (srcs[i].name === 'quelle.fahne') srcs.splice(i, 1);
+      for (const f of list) srcs.push({ name: 'quelle.fahne', x: f.x, y: (f.y || 0) + 3, z: f.z, v: null });
+      if (list.length) klangLater(['quelle.fahne']);
+    },
     /** Einmal je Bild (am Ende von M.aim): Hörer merken, Lautstärke nachführen, alle 0,25 s die Zone des Hörers bestimmen, Umgebung. */
     listen(L, dt = 0) {
       LL = L;
@@ -3363,7 +3450,9 @@ function createSound(getPrefs) {
       level(true);
       // Ausklang: ein Feuerstoß aus mindestens 3 Schüssen ist zu Ende, wenn für das 1,6-Fache des Schussabstands nichts mehr kam
       if (burst.n >= 3 && performance.now() / 1000 - burst.t > 1.6 * burst.dt) { play(`ausklang.${burst.kind}`, { own: true }); burst.n = 0; }
-      if ((zoneT -= dt) <= 0) { zoneT = 0.25; zoneL = zoneAt(L.x, Math.max(0, L.y - 1.6), L.z); fadeZone(); ambInside(zoneL === 'halle' || zoneL === 'raum'); }
+      const occ = (zoneT -= dt) <= 0;
+      if (occ) { zoneT = 0.25; zoneL = zoneAt(L.x, Math.max(0, L.y - 1.6), L.z); fadeZone(); ambInside(zoneL === 'halle' || zoneL === 'raum'); srcCheck(); }
+      for (const v of beds) if (v.pos && !v.ending) follow(v, occ);
       if (amb.want && amb.ready && !amb.on.length && ok()) ambStart();
       if (amb.on.length && (amb.t -= dt) <= 0) { amb.t = 6 + 14 * Math.random(); ambOne(); }
     },
@@ -3373,6 +3462,8 @@ function createSound(getPrefs) {
     voices() { purge(performance.now()); return pool.length; },
     state(o) { Object.assign(st, o); },
     stats: () => ({ ...stat, by: { ...stat.by }, voices: pool.length, beds: beds.length, bedNames: beds.map((v) => v.name) }),
+    /** Dauerklänge mit ihren aktuellen Werten (Prüfungen): Name, Pegel, Tiefpass, Stereo-Lage. */
+    beds: () => beds.map((v) => ({ name: v.name, gain: v.g.gain.value, fc: v.lp?.frequency?.value ?? null, pan: v.pan?.pan?.value ?? null, pos: v.pos || null })),
     /** Alle Rezepte in Scheiben berechnen (siehe klangBake); first: Namen, die nach der Oberfläche zuerst drankommen. */
     bake: (onProgress, first) => klangBake(first, onProgress),
     ready: () => KBAKE.done,
@@ -3885,6 +3976,7 @@ function createMatch(cfg, hooks) {
       else s.bot = newBot();
     }
     if (cfg.mode === 'dom') M.flags = world.flags.map((f) => ({ ...f, y: phys.floorBelow(f.x, 2, f.z, 0.3), owner: -1, prog: 0, capBy: -1, mine: false, contested: false }));
+    S.flags?.(M.flags);                            // Klang: die Fahnen der Stellungen flattern (ortsfeste Quellen)
   }
   const me = M.me;
   const friendly = (s) => (teams ? s.team === me.team : s === me);
@@ -7583,6 +7675,7 @@ function createApp(win) {
     ir: (zone, sr = KSR) => raumIR(sr)[zone],
     /** Schleifen im Hintergrund berechnen (Promise) und ihre Rechenzeit (KLOOP). */
     later: (names) => klangLater(names),
+    beds: () => S.beds(),
     loops: () => ({ ...KLOOP, by: { ...KLOOP.by } }),
   };
 
