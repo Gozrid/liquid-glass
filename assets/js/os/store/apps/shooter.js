@@ -7550,6 +7550,7 @@ function createApp(win) {
       clockL.textContent = `${MODES[M.mode].name.split('-')[0]} · ${M.cfg.limit}`;
       menus.show(null);
       hud.hidden = false;
+      S.music?.(null);                           // im Einsatz keine Dauermusik (auch wenn das Ladebild in keinem Bild zu sehen war)
       S.motif?.('start');
       keys.clear();
       simAt = performance.now();                 // die Ladezeit zählt nicht als Spielzeit
