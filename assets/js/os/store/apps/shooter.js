@@ -1805,6 +1805,8 @@ const WEAPONS = {
   },
 };
 const PRIMARIES = ['falke', 'wespe', 'rammbock', 'luchs', 'habicht', 'amboss'];
+/** Waffenmeister: die Leiter. Stufe = Index; wer mit der letzten Waffe einen Abschuss schafft (Stufe 7), gewinnt. */
+const GG = ['wespe', 'falke', 'amboss', 'rammbock', 'luchs', 'habicht', 'marder'];
 const KNIFE = [[0, 0.02, -0.16, 0.006, 0.034, 0.19, 's'], [0, 0.02, -0.05, 0.03, 0.012, 0.012, 'd'], [0, 0.02, 0.01, 0.024, 0.03, 0.11, 'd']];
 const NADE = { fuse: 2.7, radius: 6.8, dmg: 165, speed: 16.5, count: 2 };
 // Explosive Fässer: Lebenspunkte, Explosion (Radius, Schaden), Zischen von/bis (s), Wiederkehr (s), Rauch danach (s), Schaden durch eine Explosion daneben
@@ -1832,6 +1834,7 @@ const MODES = {
   tdm: { name: 'Team-Deathmatch', about: 'Zwei Teams. Jeder Abschuss zählt für dein Team.', limits: [50, 75, 100, 150], teams: true },
   ffa: { name: 'Frei für alle', about: 'Jeder gegen jeden. Wer zuerst die Abschüsse hat, gewinnt.', limits: [20, 30, 50], teams: false },
   dom: { name: 'Herrschaft', about: 'Erobert die Stellungen A, B und C und haltet sie.', limits: [100, 150, 200], teams: true },
+  gg: { name: 'Waffenmeister', about: 'Jeder Abschuss bringt die nächste Waffe. Wer mit der letzten trifft, gewinnt.', limits: [7], teams: false },
 };
 
 // ==========================================================================
@@ -2377,6 +2380,7 @@ function createMatch(cfg, hooks) {
       in: { mx: 0, mz: 0, jump: false, crouch: false, sprint: false, fire: false, ads: false, reload: false, swap: -1, nade: false, melee: false },
       mx: 0, my: 0, mzz: 0, vmx: 0, vmy: 0, vmz: 0, uavReady: false, uavT: 0, primary: 'falke', peer: null, ext: false, spawnAt: 0,
       sliding: false, slideT: 0, slideCd: 0, slideDx: 0, slideDz: 0, slideFx: 0, crouchWas: false,       // Rutschen
+      gg: 0,                                                                                             // Waffenmeister: Stufe
     };
     soldiers.push(s);
     return s;
@@ -2441,7 +2445,22 @@ function createMatch(cfg, hooks) {
     const p = pickSpawn(s);
     const prim = s.me ? cfg.loadout.primary : s.primary;
     place(s, p.x, phys.floorBelow(p.x, 2.5, p.z, BODY_R), p.z, teams ? p.yaw : Math.atan2(-p.x, p.z), [WEAPONS[prim] ? prim : 'falke', 'marder']);
+    if (gunGame) ggArm(s);                         // Waffenmeister: nur die Waffe der Stufe
     if (hosting) net.send({ t: 'spawn', id: s.id, x: s.x, y: s.y, z: s.z, yaw: s.yaw, g: s.guns.map((g) => g.id) }, null, true);
+  }
+
+  // ---------- Waffenmeister: Stufe und Waffe ----------
+  const gunGame = cfg.mode === 'gg';
+  /** Nur die Waffe der Stufe, keine Granaten */
+  function ggArm(s) {
+    const id = GG[Math.min(s.gg, GG.length - 1)], w = WEAPONS[id];
+    s.guns = [{ id, mag: w.mag, reserve: w.reserve }]; s.cur = 0; s.nades = 0;
+  }
+  /** Stufe setzen und gleich die neue Waffe in die Hand geben (der Gastgeber meldet es allen) */
+  function ggSet(s, l) {
+    s.gg = clamp(l, 0, GG.length);
+    if (s.gg < GG.length) { ggArm(s); s.reloadT = 0; s.ads = 0; s.bloomK = 0; s.switchT = 0.4; if (s.me) S.swap(); }
+    if (hosting) net.send({ t: 'gg', id: s.id, l: s.gg }, null, true);
   }
 
   // ---------- Treffer ----------
@@ -2510,6 +2529,8 @@ function createMatch(cfg, hooks) {
     if (!self) {
       a.kills++; a.streak++; a.best = Math.max(a.best, a.streak);
       a.byWeapon[info.weapon] = (a.byWeapon[info.weapon] || 0) + 1;
+      // Waffenmeister: ein Abschuss mit der Waffe (oder dem Messer) hebt die Stufe; das Messer wirft das Opfer eine zurück
+      if (gunGame && (Object.hasOwn(WEAPONS, info.weapon) || info.weapon === 'knife')) { ggSet(a, a.gg + 1); if (info.weapon === 'knife') ggSet(v, v.gg - 1); }
       if (cfg.mode === 'tdm') M.scores[a.team]++;
       let pts = 100;
       const medals = [];
@@ -2543,6 +2564,11 @@ function createMatch(cfg, hooks) {
     emit('end');
   }
   function leader() {
+    if (gunGame) {                                 // Waffenmeister: höchste Stufe, dann die meisten Abschüsse
+      let g = null, gt = false;
+      for (const s of soldiers) { if (!g || s.gg > g.gg || (s.gg === g.gg && s.kills > g.kills)) { g = s; gt = false; } else if (s.gg === g.gg && s.kills === g.kills) gt = true; }
+      return gt ? null : g;
+    }
     let top = null, tie = false;
     if (teams) { if (M.scores[0] === M.scores[1]) return null; return M.scores[0] > M.scores[1] ? 0 : 1; }
     for (const s of soldiers) { if (!top || s.kills > top.kills) { top = s; tie = false; } else if (s.kills === top.kills) tie = true; }
@@ -2550,6 +2576,7 @@ function createMatch(cfg, hooks) {
   }
   function checkEnd() {
     if (M.state !== 'live') return;
+    if (gunGame) { for (const s of soldiers) if (s.gg >= GG.length) { finish(s); break; } return; }      // Waffenmeister: Abschuss auf der letzten Stufe
     // Erreichen beide Teams das Ziel im selben Takt (Herrschaft), gewinnt das mit mehr Punkten – bei Gleichstand keines
     if (teams) { if (M.scores[0] >= cfg.limit || M.scores[1] >= cfg.limit) finish(leader()); }
     else { for (const s of soldiers) if (s.kills >= cfg.limit) { finish(s); break; } }
@@ -2787,6 +2814,7 @@ function createMatch(cfg, hooks) {
     s.bloomK = damp(s.bloomK, 0, 7, dt);
     s.kickP = damp(s.kickP, 0, 8, dt); s.kickY = damp(s.kickY, 0, 8, dt); s.kickAnim = damp(s.kickAnim, 0, 13, dt);
     s.stepOff = damp(s.stepOff, 0, 13, dt);
+    if (gunGame) { s.nades = 0; if (gun.reserve <= 0) gun.reserve = w.mag * 2; }      // Waffenmeister: keine Granaten, leere Reserve auf zwei Magazine
     if (!client && s.hp < 100 && M.time - s.hurtAt > 4.5) s.hp = Math.min(100, s.hp + 38 * dt);
 
     // Klettern über eine Kante
@@ -3219,6 +3247,7 @@ function createMatch(cfg, hooks) {
           nades.push({ x: p[0], y: p[1], z: p[2], vx: v[0], vy: v[1], vz: v[2], fuse: NADE.fuse, owner: s, rot: 0, rest: false });
         }
       } else if (m.t === 'lo') {
+        if (gunGame) return;                       // Waffenmeister: die Stufe bestimmt die Waffe
         if (!PRIMARIES.includes(m.p)) return;
         s.primary = m.p;
         if (M.state === 'warmup' && s.guns[0]?.id !== m.p) spawn(s);          // vor dem Start gleich mit der gewählten Waffe
@@ -3285,6 +3314,7 @@ function createMatch(cfg, hooks) {
     }
     else if (m.t === 'pts') { const pts = fin(m.p, 0); me.score += pts; emit('points', { label: String(m.l), pts }); }
     else if (m.t === 'boom') { const p = vec3(m.p, 600); if (p) boom(p[0], p[1], p[2]); }
+    else if (m.t === 'gg') { const s = Number.isInteger(m.id) ? soldiers[m.id] : null; if (gunGame && s && Number.isInteger(m.l) && m.l >= 0 && m.l <= GG.length) ggSet(s, m.l); }
     else if (m.t === 'fass') { const i = Number.isInteger(m.i) ? m.i : -1; if (barrels[i] && (m.s === 0 || m.s === 1 || m.s === 2) && barrels[i].st !== m.s) fassState(i, m.s); }
     else if (m.t === 'flag') { const f = Number.isInteger(m.i) ? M.flags[m.i] : null; if (f && (m.o === 0 || m.o === 1)) { f.owner = m.o; emit('flag', { f, was: m.was }); } }
     else if (m.t === 'tbl') {
@@ -3463,6 +3493,7 @@ function createMatch(cfg, hooks) {
   /** Rangliste für Punktetafel und Abschluss */
   // „Frei für alle“ wird über Abschüsse entschieden – also ordnet die Tafel dort zuerst nach Abschüssen, sonst nach Punkten
   M.table = () => [...soldiers].sort((a, b) => (teams ? 0 : b.kills - a.kills) || b.score - a.score || b.kills - a.kills);
+  if (gunGame) M.table = () => [...soldiers].sort((a, b) => b.gg - a.gg || b.kills - a.kills || b.score - a.score);      // Waffenmeister: nach Stufe
   M.place = () => M.table().indexOf(me) + 1;
 
   for (const s of soldiers) spawn(s);
@@ -4554,6 +4585,7 @@ function createMenus(root, api) {
     'Das Messer (V) erledigt Gegner in Reichweite mit einem einzigen Hieb.',
     'Duck dich aus dem Sprint heraus (C), dann rutschst du ein Stück – schießen kannst du dabei.',
     'Rote Fässer explodieren nach ein paar Treffern – und reißen Fässer daneben mit.',
+    'Waffenmeister: Jeder Abschuss bringt die nächste Waffe. Ein Messerangriff wirft den Gegner eine Stufe zurück.',
   ];
   const KEYS = [
     [['W', 'A', 'S', 'D'], 'Bewegen'], [['Maus'], 'Zielen'], [['Linksklick'], 'Feuern'], [['Rechtsklick'], 'Anlegen'], [['R'], 'Nachladen'],
@@ -4774,7 +4806,7 @@ function createMenus(root, api) {
     };
     function paintOpts() {
       const m = MODES[s.mode], hint = h('small', SKILLS[s.skill].about);
-      const unit = s.mode === 'ffa' ? 'Abschüsse' : 'Punkte';
+      const unit = { ffa: 'Abschüsse', gg: 'Stufen' }[s.mode] || 'Punkte';
       opts.replaceChildren(lab('Regeln'),
         h('div.szm-row', h('div.szm-row-t', h('b', 'Schwierigkeit'), hint),
           h('div.szm-ctl', seg('Schwierigkeit', SKILLS.map((k, i) => [i, k.name]), s.skill, (v) => { s.skill = v; hint.textContent = SKILLS[v].about; changed(); }))),
@@ -5021,13 +5053,14 @@ function createMenus(root, api) {
   function buildEnd(d = {}) {
     const mode = MODES[d.mode] || MODES.tdm, map = MAPS.find((m) => m.id === d.map);
     const kind = d.win ? 'win' : /unentschieden/i.test(d.title || '') ? 'draw' : 'loss';
-    const rows = [...(d.rows || [])].sort((a, b) => (mode.teams ? 0 : b.kills - a.kills) || b.score - a.score || b.kills - a.kills);
+    const gg = d.mode === 'gg';                    // Waffenmeister: nach Stufe, eigene Spalte
+    const rows = [...(d.rows || [])].sort((a, b) => (gg ? (b.gg || 0) - (a.gg || 0) : 0) || (mode.teams ? 0 : b.kills - a.kills) || b.score - a.score || b.kills - a.kills);
     const secs = Math.max(0, Math.round(d.time || 0));
     const table = (list, cls, name) => h(`table.szm-tab${cls}`,
-      h('thead', h('tr', h('th'), h('th.szm-team', name), h('th', 'Punkte'), h('th', { title: 'Abschüsse' }, 'Absch.'), h('th', 'Tode'), h('th', { title: 'Vorlagen' }, 'Vorl.'))),
+      h('thead', h('tr', h('th'), h('th.szm-team', name), gg ? h('th', 'Stufe') : null, h('th', 'Punkte'), h('th', { title: 'Abschüsse' }, 'Absch.'), h('th', 'Tode'), h('th', { title: 'Vorlagen' }, 'Vorl.'))),
       h('tbody', list.map((r, i) => h(`tr${r.me ? '.is-me' : ''}`,
         h('td', String(i + 1)), h(`td${!r.bot && !r.me ? '.is-human' : ''}`, String(r.name), r.me ? h('em', 'Du') : null),
-        h('td', nf(r.score)), h('td', nf(r.kills)), h('td', nf(r.deaths)), h('td', nf(r.assists))))));
+        gg ? h('td', nf(r.gg)) : null, h('td', nf(r.score)), h('td', nf(r.kills)), h('td', nf(r.deaths)), h('td', nf(r.assists))))));
     const board = mode.teams
       ? [table(rows.filter((r) => r.team === 0), '.own', 'Dein Team'), table(rows.filter((r) => r.team !== 0), '.foe', 'Gegner')]
       : [table(rows, '', 'Alle gegen alle')];
@@ -5526,6 +5559,7 @@ function createApp(win) {
       flagsEl.replaceChildren(...M.flags.map((f) => { f.el = el('szh-flag', h('i'), h('b', f.name)); return f.el; }));
       labOwn.textContent = M.teams ? 'Dein Team' : 'Du';
       labFoe.textContent = M.teams ? 'Gegner' : 'Führender';
+      if (M.mode === 'gg') labOwn.textContent = 'Deine Stufe';      // Waffenmeister
       clockL.textContent = `${MODES[M.mode].name.split('-')[0]} · ${M.cfg.limit}`;
       menus.show(null);
       hud.hidden = false;
@@ -5599,7 +5633,7 @@ function createApp(win) {
     match.result = {
       title, win: good, won, place, levelUp: l1 > l0, mode: match.mode, map: match.cfg.map, time: match.time,
       scores: match.teams ? [match.scores[me.team], match.scores[1 - me.team]] : null,
-      rows: match.table().map((s) => ({ name: s.name, team: match.friendly(s) ? 0 : 1, kills: s.kills, deaths: s.deaths, assists: s.assists, score: s.score, me: s.me, bot: !!s.bot })),
+      rows: match.table().map((s) => ({ name: s.name, team: match.friendly(s) ? 0 : 1, gg: s.gg, kills: s.kills, deaths: s.deaths, assists: s.assists, score: s.score, me: s.me, bot: !!s.bot })),
       xp, xpBefore: before, xpAfter: profile.xp, unlocks: PRIMARIES.filter((id) => WEAPONS[id].level > l0 && WEAPONS[id].level <= l1),
       medals: Object.entries(medalCount).sort((a, b) => b[1] - a[1]),
     };
@@ -5608,7 +5642,7 @@ function createApp(win) {
   /** Partie vorbei: kurz ausklingen lassen, dann Abrechnung und Abschlussbild. */
   function onEnd() {
     const match = M, me = match.me, { draw, good, title } = verdict(match);
-    big(title.toUpperCase(), 0, good ? 'win' : draw ? '' : 'lose', match.teams ? `${match.scores[me.team]} : ${match.scores[1 - me.team]}` : `${me.kills} Abschüsse`);
+    big(title.toUpperCase(), 0, good ? 'win' : draw ? '' : 'lose', match.teams ? `${match.scores[me.team]} : ${match.scores[1 - me.team]}` : match.mode === 'gg' ? `Stufe ${me.gg} von ${GG.length}` : `${me.kills} Abschüsse`);
     S.jingle(good ? 'win' : 'lose');
     clearTimeout(endTimer);
     endTimer = setTimeout(() => {
@@ -5846,6 +5880,7 @@ function createApp(win) {
     let own, foe, lim = M.cfg.limit;
     if (M.teams) { own = M.scores[me.team]; foe = M.scores[1 - me.team]; }
     else { own = me.kills; foe = 0; for (const s of M.soldiers) if (s !== me && s.kills > foe) foe = s.kills; }
+    if (M.mode === 'gg') { own = me.gg; foe = 0; for (const s of M.soldiers) if (s !== me && s.gg > foe) foe = s.gg; }      // Waffenmeister: Stufen
     scoreOwn.textContent = own; scoreFoe.textContent = foe;
     teamOwn.style.setProperty('--p', clamp(own / lim, 0, 1));
     teamFoe.style.setProperty('--p', clamp(foe / lim, 0, 1));
@@ -5893,14 +5928,14 @@ function createApp(win) {
     if (!boardEl.hidden && (boardT -= 0.1) <= 0) { boardT = 0.5; paintBoard(); }
   }
   function paintBoard() {
-    const rows = M.table();
+    const rows = M.table(), gg = M.mode === 'gg';      // Waffenmeister: eigene Spalte für die Stufe
     const table = (list, cls, title) => h(`table.${cls}`, h('caption', title),
-      h('tr', h('th', 'Name'), h('th', 'Punkte'), h('th', 'A'), h('th', 'T'), h('th', 'V')),
-      list.map((s) => h(`tr${s.me ? '.me' : ''}${s.alive ? '' : '.dead'}`, h('td', s.name), h('td', String(s.score)), h('td', String(s.kills)), h('td', String(s.deaths)), h('td', String(s.assists)))));
+      h('tr', h('th', 'Name'), gg ? h('th', 'St') : null, h('th', 'Punkte'), h('th', 'A'), h('th', 'T'), h('th', 'V')),
+      list.map((s) => h(`tr${s.me ? '.me' : ''}${s.alive ? '' : '.dead'}`, h('td', s.name), gg ? h('td', String(s.gg)) : null, h('td', String(s.score)), h('td', String(s.kills)), h('td', String(s.deaths)), h('td', String(s.assists)))));
     if (M.teams) {
       const t = M.me.team;
       boardEl.replaceChildren(table(rows.filter((s) => s.team === t), 'own', `Dein Team · ${M.scores[t]}`), table(rows.filter((s) => s.team !== t), 'foe', `Gegner · ${M.scores[1 - t]}`));
-    } else boardEl.replaceChildren(table(rows, 'own', `Frei für alle · bis ${M.cfg.limit}`));
+    } else boardEl.replaceChildren(table(rows, 'own', `${MODES[M.mode].name} · bis ${M.cfg.limit}`));
   }
 
   // ---------- Eingabe ----------
