@@ -2602,11 +2602,252 @@ for (const [name, seq] of Object.entries(SIGNALE)) {
   });
 }
 
+// ---------- Umgebung je Karte (Schritt 7.1) ----------
+/** Abtastwerte je Rechenstück langer Schleifen: ein Stück dauert wenige Millisekunden, dazwischen gibt der Generator ab. */
+const STUECK = 48000;
+/** Stückweise rechnen: fn(i0, i1) für alle Stücke von höchstens STUECK Abtastwerten, mit yield dazwischen. */
+function* stuecke(n, fn) { for (let i = 0; i < n; i += STUECK) { fn(i, Math.min(n, i + STUECK)); yield; } }
+/**
+ * Biquad nach RBJ mit beliebigem Verlauf der Eckfrequenz fOf(t) (s → Hz) als Zustand: liefert run(a, i0, i1), so lässt sich ein langes Feld
+ * stückweise filtern. Beiwerte alle 16 Abtastwerte neu; qlin linear.
+ */
+function biquadRun(sr, type, fOf, qlin = Math.SQRT1_2) {
+  let x1 = 0, x2 = 0, y1 = 0, y2 = 0, b0 = 0, b1 = 0, b2 = 0, a1 = 0, a2 = 0;
+  return (a, i0, i1) => {
+    for (let i = i0; i < i1; i++) {
+      if ((i & 15) === 0 || i === i0) {
+        const w0 = (2 * Math.PI * Math.min(fOf(i / sr), sr * 0.49)) / sr, cw = Math.cos(w0), al = Math.sin(w0) / (2 * qlin), a0 = 1 + al;
+        if (type === 'lowpass') { b0 = (1 - cw) / 2 / a0; b1 = (1 - cw) / a0; b2 = b0; }
+        else if (type === 'highpass') { b0 = (1 + cw) / 2 / a0; b1 = -(1 + cw) / a0; b2 = b0; }
+        else { b0 = al / a0; b1 = 0; b2 = -al / a0; }
+        a1 = (-2 * cw) / a0; a2 = (1 - al) / a0;
+      }
+      const x = a[i], y = b0 * x + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2;
+      x2 = x1; x1 = x; y2 = y1; y1 = y;
+      a[i] = y;
+    }
+  };
+}
+/** Rauschen als Zustand (dieselben Formeln wie K.noise): liefert run(a, i0, i1), das a[i0 … i1) füllt – für lange Felder in Stücken. */
+function noiseRun(rnd, color = 'white') {
+  let b0 = 0, b1 = 0, b2 = 0, b3 = 0, b4 = 0, b5 = 0, b6 = 0, l = 0;
+  return (a, i0, i1) => {
+    for (let i = i0; i < i1; i++) {
+      const w = rnd() * 2 - 1;
+      if (color === 'pink') {
+        b0 = 0.99886 * b0 + w * 0.0555179; b1 = 0.99332 * b1 + w * 0.0750759; b2 = 0.969 * b2 + w * 0.153852;
+        b3 = 0.8665 * b3 + w * 0.3104856; b4 = 0.55 * b4 + w * 0.5329522; b5 = -0.7616 * b5 - w * 0.016898;
+        a[i] = (b0 + b1 + b2 + b3 + b4 + b5 + b6 + w * 0.5362) * 0.11; b6 = w * 0.115926;
+      } else if (color === 'brown') { l = (l + 0.02 * w) / 1.02; a[i] = l * 3.5; } else a[i] = w;
+    }
+  };
+}
+/** Sägezahn mit PolyBLEP (kaum Faltung, viel billiger als die Fourier-Reihe von K.tone), addiert: f Hz, ab at für dur s, Pegel gain, Phase ph0 (0 … 1). */
+function blepSaw(a, sr, { f, at = 0, dur, gain = 1, ph0 = 0, vib = 0, vibF = 5 }) {
+  const i0 = Math.max(0, Math.round(at * sr)), n = Math.min(a.length - i0, Math.round(dur * sr));
+  let ph = ph0;
+  for (let i = 0; i < n; i++) {
+    const dt = (f * (1 + (vib ? vib * Math.sin((2 * Math.PI * vibF * i) / sr) : 0))) / sr;
+    let v = 2 * ph - 1;
+    if (ph < dt) { const t = ph / dt; v -= t + t - t * t - 1; } else if (ph > 1 - dt) { const t = (ph - 1) / dt; v -= t * t + t + t + 1; }
+    a[i0 + i] += gain * v;
+    ph += dt;
+    if (ph >= 1) ph -= 1;
+  }
+  return a;
+}
+/**
+ * Lange Schleife nahtlos machen: chs (Kanäle) sind mindestens len + xf + 0,2 s lang. Die Naht liegt bei L, gesucht im Fenster ±0,2 s um len
+ * (von len nach außen): der Sprung vom letzten zum ersten Abtastwert ist klein (unter 1,2 % der Spitze), und die 100 ms vor und nach L sind
+ * gleich laut (höchstens 0,8 dB). Die xf s nach L werden mit gleicher Leistung (Sinus/Kosinus) in den Anfang geblendet – das Ende läuft so
+ * ohne Bruch in den Anfang weiter. Zuletzt wird der Gleichanteil abgezogen (eine Konstante: die Naht bleibt heil). Generator (gibt nach
+ * jedem Kanal ab); liefert die Kanäle der Länge L.
+ */
+function* loopify(chs, sr, len, xf = 0.5) {
+  const n0 = Math.round(len * sr), X = Math.round(xf * sr), w = Math.round(0.2 * sr), W = Math.round(0.1 * sr), pre = [];
+  let peak = 0;
+  for (const c of chs) {
+    const p = new Float64Array(c.length + 1);
+    for (let i = 0; i < c.length; i++) { const v = c[i]; p[i + 1] = p[i] + v * v; if (v > peak) peak = v; else if (-v > peak) peak = -v; }
+    pre.push(p);
+    yield;
+  }
+  const energy = (a, b) => pre.reduce((s, p) => s + p[b] - p[a], 0);
+  let best = n0, bestS = Infinity;
+  for (let k = 0; k <= 2 * w; k++) {
+    const L = n0 + (k & 1 ? (k + 1) / 2 : -k / 2);
+    let step = 0;
+    for (const c of chs) step = Math.max(step, Math.abs(c[L] - c[L - 1]) / (peak || 1));
+    const rd = Math.abs(10 * Math.log10((energy(L - W, L) + 1e-12) / (energy(L, L + W) + 1e-12)));
+    const s = step / 0.012 + rd / 0.8;
+    if (s < bestS) { bestS = s; best = L; }
+    if (step < 0.012 && rd < 0.8) break;
+  }
+  const out = [];
+  for (const c of chs) {
+    yield;
+    const o = c.slice(0, best);
+    for (let i = 0; i < X; i++) { const k = (Math.PI / 2) * (i / X); o[i] = c[i] * Math.sin(k) + c[best + i] * Math.cos(k); }
+    let s = 0;
+    for (let i = 0; i < o.length; i++) s += o[i];
+    s /= o.length;
+    for (let i = 0; i < o.length; i++) o[i] -= s;
+    out.push(o);
+  }
+  return out;
+}
+/** Länge der Umgebungsschleifen (s) und Überblendung an der Naht (s). */
+const AMB_LEN = 12, AMB_XF = 0.5;
+/** Weicher Zufallsverlauf −1 … 1 (Summe aus drei Rauschwerten noise1), rate in Hz. */
+const drift = (rnd, rate) => { const s = (rnd() * 1e9) | 0; return (t) => (noise1(t * rate, s) * 0.6 + noise1(t * rate * 2.3, s + 1) * 0.3 + noise1(t * rate * 5.1, s + 2) * 0.1); };
+/**
+ * Umgebungsschleife: je Kanal ein Feld von AMB_LEN + 0,7 s, layer(K, rnd, a, c) füllt und formt es (Generator, gibt zwischen Stücken ab),
+ * danach nahtlos gemacht. Spitze 1.
+ */
+function* ambLoop(K, rnd, layer) {
+  const ch = [], sh = {};
+  for (let c = 0; c < 2; c++) { const a = K.buf(AMB_LEN + AMB_XF + 0.25); yield* layer(K, rnd, a, c, sh); ch.push(a); }
+  const out = yield* loopify(ch, K.SR, AMB_LEN, AMB_XF);
+  yield;
+  let p = 0;
+  for (const c of out) p = Math.max(p, K.peak(c));
+  for (const c of out) for (let i = 0; i < c.length; i++) c[i] /= p || 1;
+  return { ch: out };
+}
+/** Hüllkurven-Stück: multipliziert a[i0 … i1) mit fn(t); fn wird alle 16 Abtastwerte ausgewertet, dazwischen linear. */
+const shapeRun = (sr, fn) => (a, i0, i1) => {
+  for (let i = i0; i < i1; i += 16) {
+    const v0 = fn(i / sr), v1 = fn((i + 16) / sr), m = Math.min(16, i1 - i);
+    for (let j = 0; j < m; j++) a[i + j] *= v0 + ((v1 - v0) * j) / 16;
+  }
+};
+const AMB = {
+  /** Hafenbrummen: braunes Rauschen, Tiefpass 140 Hz (zweimal, steiler), beide Seiten zu 60 % gemeinsam. */
+  'frachthof.brummen': function* (K, rnd, a, c, sh) {
+    if (c === 0) { const nc = noiseRun(rnd, 'brown'); sh.common = new Float32Array(a.length); yield* stuecke(a.length, (i0, i1) => nc(sh.common, i0, i1)); }
+    const nz = noiseRun(rnd, 'brown');
+    yield* stuecke(a.length, (i0, i1) => nz(a, i0, i1));
+    const com = sh.common, lp1 = biquadRun(K.SR, 'lowpass', () => 140), lp2 = biquadRun(K.SR, 'lowpass', () => 140), hp = biquadRun(K.SR, 'highpass', () => 28);
+    const sw = drift(rnd, 0.09), amp = shapeRun(K.SR, (t) => 0.85 + 0.15 * sw(t));
+    yield* stuecke(a.length, (i0, i1) => {
+      for (let i = i0; i < i1; i++) a[i] = 0.6 * com[i] + 0.4 * a[i];
+      lp1(a, i0, i1); lp2(a, i0, i1); hp(a, i0, i1); amp(a, i0, i1);
+    });
+  },
+  /** Wind: rosa Rauschen, Bandpass 300 – 900 Hz; Stärke schwankt mit 0,07 Hz, Tonhöhe mit 0,11 Hz (links und rechts versetzt). */
+  'frachthof.wind': function* (K, rnd, a, c) {
+    const nz = noiseRun(rnd, 'pink');
+    yield* stuecke(a.length, (i0, i1) => nz(a, i0, i1));
+    const p1 = rnd() * 2 * Math.PI + c * 0.9, p2 = rnd() * 2 * Math.PI + c * 1.3, fl = drift(rnd, 0.6);
+    const fOf = (t) => 520 * 1.732 ** Math.sin(2 * Math.PI * 0.11 * t + p2);
+    const bp = biquadRun(K.SR, 'bandpass', fOf, 1.1), bp2 = biquadRun(K.SR, 'bandpass', fOf, 0.8);
+    const amp = shapeRun(K.SR, (t) => (0.55 + 0.45 * Math.sin(2 * Math.PI * 0.07 * t + p1)) * (0.85 + 0.15 * fl(t)));
+    yield* stuecke(a.length, (i0, i1) => { bp(a, i0, i1); bp2(a, i0, i1); amp(a, i0, i1); });
+  },
+  /** Wüstenwind: rosa Rauschen, Bandpass 400 – 1500 Hz, böig (Böen heben Stärke und Tonhöhe). */
+  'oase.wind': function* (K, rnd, a, c) {
+    const nz = noiseRun(rnd, 'pink');
+    yield* stuecke(a.length, (i0, i1) => nz(a, i0, i1));
+    const gust = drift(rnd, 0.18), g = (t) => Math.max(0, Math.min(1, 0.45 + 0.75 * gust(t)));
+    const fOf = (t) => 400 * (1500 / 400) ** (0.15 + 0.7 * g(t));
+    const bp = biquadRun(K.SR, 'bandpass', fOf, 1), bp2 = biquadRun(K.SR, 'bandpass', fOf, 0.7);
+    const amp = shapeRun(K.SR, (t) => 0.2 + 0.8 * g(t) ** 1.6);
+    yield* stuecke(a.length, (i0, i1) => { bp(a, i0, i1); bp2(a, i0, i1); amp(a, i0, i1); });
+  },
+  /** Zikaden: Rauschen, Bandpass 5,5 kHz (q 6), mit 38 Hz in der Lautstärke gepulst, in Wellen von 3 – 6 s (je Seite eigene Wellen). */
+  'oase.zikaden': function* (K, rnd, a, c) {
+    const nz = noiseRun(rnd, 'white');
+    yield* stuecke(a.length, (i0, i1) => nz(a, i0, i1));
+    const waves = [];
+    for (let t = rnd() * 1.5; t < a.length / K.SR; ) { const d = 3 + 3 * rnd(); waves.push([t, d, 0.5 + 0.5 * rnd()]); t += d + 0.6 + 2.4 * rnd(); }
+    const fk = 1 + (c ? 0.035 : -0.02), bp = biquadRun(K.SR, 'bandpass', () => 5500 * fk, 6), bp2 = biquadRun(K.SR, 'bandpass', () => 5500 * fk, 6);
+    const pr = 38 * (1 + (c ? 0.04 : 0)), ph = rnd() * 2 * Math.PI;
+    const wave = (t) => { let v = 0.04; for (const [t0, d, g] of waves) if (t > t0 && t < t0 + d) { const x = (t - t0) / d; v = Math.max(v, g * Math.min(1, x / 0.25, (1 - x) / 0.3)); } return v; };
+    const amp = shapeRun(K.SR, (t) => wave(t) * (0.5 + 0.5 * Math.cos(2 * Math.PI * pr * t + ph)) ** 3);
+    yield* stuecke(a.length, (i0, i1) => { bp(a, i0, i1); bp2(a, i0, i1); amp(a, i0, i1); });
+  },
+};
+/** Umgebung je Karte (Name der Welt → Schleifen; die zweite startet um 5 s versetzt) und ihre Einzelklänge (alle 6 – 20 s, mit eigenem Ort). */
+const AMB_KARTE = {
+  Frachthof: { loops: ['amb.frachthof.brummen', 'amb.frachthof.wind'], einzel: ['amb.kran', 'amb.moewe', 'amb.horn'] },
+  Oase: { loops: ['amb.oase.wind', 'amb.oase.zikaden'], einzel: ['amb.palme', 'amb.markise'] },
+};
+for (const [name, db] of [['frachthof.brummen', -27], ['frachthof.wind', -25], ['oase.wind', -24], ['oase.zikaden', -31]]) {
+  rezept(`amb.${name}`, { n: 1, bus: 'amb', gain: spitze(db, 'amb'), prio: 9, cap: 1, loop: true, make: (K, rnd) => ambLoop(K, rnd, AMB[name]) });
+}
+/** Einzelklänge der Umgebung: Kranschlag, Möwe, Schiffshorn (Frachthof); Palmenrascheln, Markise (Oase). */
+rezept('amb.kran', {
+  bus: 'amb', gain: spitze(-22, 'amb'), prio: 1, cap: 1, reach: 90, send: 0.6,
+  make(K, rnd, v) {
+    const fk = vary(v, 3, rnd, 0.06), a = K.buf(2.6);
+    K.click(a, rnd, { dur: 0.003, gain: 0.5 });
+    K.modal(a, { at: 0.001, modes: modesOf([[180, 400, 1], [410, 320, 0.7], [960, 220, 0.45], [1630, 120, 0.2]], 1, fk) });
+    K.mix(a, noiseHit(K, rnd, 0.2, { bp: 900 * fk, q: 1, tau: 0.03 }), { gain: 0.3 });
+    return K.norm(K.fade(a, { outT: 0.5 }), 1);
+  },
+});
+rezept('amb.moewe', {
+  bus: 'amb', gain: spitze(-25, 'amb'), prio: 1, cap: 1, reach: 90, send: 0.3,
+  make(K, rnd, v) {
+    const fk = vary(v, 3, rnd, 0.08), a = K.buf(0.62);
+    for (const [at, g] of [[0.02, 1], [0.26 + 0.04 * rnd(), 0.8]]) {
+      const x = K.buf(0.2), n = x.length;
+      let ph = 0;
+      for (let i = 0; i < n; i++) {
+        const t = i / K.SR, f = 1800 * fk * (1200 / 1800) ** (t / 0.18) * (1 + 0.012 * Math.sin(2 * Math.PI * 24 * t));
+        x[i] = Math.sin(ph) + 0.45 * Math.sin(2 * ph) + 0.2 * Math.sin(3 * ph + 0.4);
+        ph += (2 * Math.PI * f) / K.SR;
+      }
+      K.env(x, [[0, 0.02], [0.025, 1], [0.12, 0.7], [0.18, 0.01], [0.2, 0.001]]);
+      K.mix(a, x, { at, gain: g });
+    }
+    K.mix(a, K.bp(K.env(K.noise(K.buf(0.62), rnd, 'white'), [[0, 0.001], [0.03, 0.06], [0.5, 0.001]]), { f: 2400, q: 0.8 }), { gain: 1 });
+    return K.norm(K.fade(a, { outT: 0.05 }), 1);
+  },
+});
+rezept('amb.horn', {
+  n: 2, bus: 'amb', gain: spitze(-20, 'amb'), prio: 1, cap: 1, reach: 400, send: 0.8,
+  make(K, rnd, v) {
+    const fk = v ? 1.04 : 0.97, a = K.buf(2.6);
+    blepSaw(a, K.SR, { f: 110 * fk, dur: 2.2, gain: 0.5, ph0: rnd() });
+    blepSaw(a, K.SR, { f: 165 * fk, dur: 2.2, gain: 0.4, ph0: rnd() });
+    K.lp(a, { f: 500 }); K.lp(a, { f: 500 });
+    K.env(a, [[0, 0.001], [0.18, 1], [1.8, 0.85], [2.3, 0.001]]);
+    return K.norm(K.fade(a, { outT: 0.3 }), 1);
+  },
+});
+rezept('amb.palme', {
+  bus: 'amb', gain: spitze(-27, 'amb'), prio: 1, cap: 1, reach: 60, send: 0.2,
+  make(K, rnd, v) {
+    const a = K.buf(1.5), n = 4 + v + ((rnd() * 3) | 0);
+    for (let i = 0; i < n; i++) {
+      const d = 0.04 + 0.08 * rnd(), x = K.noise(K.buf(d), rnd, 'white');
+      K.hp(x, { f: 3000 + 2500 * rnd() }); K.fade(x, { inT: d * 0.3, outT: d * 0.6 });
+      K.mix(a, x, { at: 0.02 + 1.2 * (i / n) + 0.1 * rnd(), gain: 0.4 + 0.6 * rnd() });
+    }
+    return K.norm(K.fade(a, { outT: 0.1 }), 1);
+  },
+});
+rezept('amb.markise', {
+  bus: 'amb', gain: spitze(-24, 'amb'), prio: 1, cap: 1, reach: 60, send: 0.3,
+  make(K, rnd, v) {
+    const fk = vary(v, 3, rnd, 0.1), a = K.buf(1);
+    for (let i = 0, t = 0.01; i < 2 + (v % 2); i++, t += 0.18 + 0.15 * rnd()) {
+      K.mix(a, noiseHit(K, rnd, 0.25, { lp: 300 * fk, attack: 0.004, tau: 0.045 }), { at: t, gain: 1 - 0.3 * i });
+      const b = K.sine(K.buf(0.12), { f: 75 * fk, f2: 55 * fk, dur: 0.12, gain: 1 });
+      K.decay(b, { attack: 0.003, tau: 0.035 }); K.fade(b, { outT: 0.02 }); K.dc(b);
+      K.mix(a, b, { at: t, gain: 0.5 - 0.15 * i });
+    }
+    return K.norm(K.fade(a, { outT: 0.1 }), 1);
+  },
+});
+
 /** Gruppen der Rezepte (Hörprobe): Name → Gruppe; KLANG_GRUPPEN in der Reihenfolge der Anzeige. */
-const KLANG_GRUPPEN = ['Waffen', 'Mechanik', 'Hülsen', 'Schritte', 'Einschläge', 'Treffer', 'Foley', 'Explosion', 'Oberfläche'];
+const KLANG_GRUPPEN = ['Waffen', 'Mechanik', 'Hülsen', 'Schritte', 'Einschläge', 'Treffer', 'Foley', 'Explosion', 'Oberfläche', 'Funk-Signale', 'Umgebung', 'Musik', 'Zustände', 'Spaß-Paket'];
 const klangGruppe = (n) => (/^schuss\./.test(n) ? 'Waffen' : /^(mech|ausklang)\.|^leer$/.test(n) ? 'Mechanik' : /^huelse\./.test(n) ? 'Hülsen'
   : /^(schritt|landung)\./.test(n) ? 'Schritte' : /^(einschlag\.|querschlaeger$|knall$|pfeifen$)/.test(n) ? 'Einschläge'
-    : /^(treffer|kopfschuss|abschuss|schaden)$/.test(n) ? 'Treffer' : /^(explosion|granate)\./.test(n) ? 'Explosion' : /^(ui|signal)\./.test(n) ? 'Oberfläche' : 'Foley');
+    : /^(treffer|kopfschuss|abschuss|schaden)$/.test(n) ? 'Treffer' : /^(explosion|granate)\./.test(n) ? 'Explosion' : /^(ui|signal)\./.test(n) ? 'Oberfläche'
+      : /^(amb|quelle)\./.test(n) ? 'Umgebung' : /^musik\./.test(n) ? 'Musik' : /^zustand\./.test(n) ? 'Zustände' : /^(rutschen\.|zischen$|jet$)/.test(n) ? 'Spaß-Paket' : 'Foley');
 
 /** Berechnete Varianten: Name → [{ data: [Kanäle …] mit Spitze 0,9, lvl: Spitze aus make() / 0,9, ab: AudioBuffer }] */
 const BANK = new Map();
@@ -2710,6 +2951,50 @@ function klangGet(name, v) {
   if (!klangHas(name, v)) { const t0 = performance.now(); klangPut(name, v, klangMake(name, v)); KBAKE.ms += performance.now() - t0; }
   return BANK.get(name)[v];
 }
+/**
+ * Rechenzeit der Schleifen (Umgebung, Musik), die nicht zum Backen gehören und erst bei Bedarf berechnet werden: Summe (ms), längste
+ * sichtbare Scheibe, längster Rechenschritt, Scheiben, je Rezept (ms).
+ */
+const KLOOP = { ms: 0, maxSlice: 0, maxStep: 0, slices: 0, by: {} };
+/** Name → Promise, das erfüllt ist, sobald alle Varianten des Rezepts berechnet sind; dazu die Warteschlange [Name, erfüllen]. */
+const loopWait = new Map(), loopQ = [];
+let loopRun = false;
+/**
+ * Schleifen (oder andere Rezepte) im Hintergrund berechnen, in Scheiben wie beim Backen (höchstens 8 ms, verdeckt am Stück), eines nach dem
+ * anderen. Liefert ein Promise, das erfüllt ist, wenn alle genannten Rezepte fertig sind.
+ */
+function klangLater(names) {
+  const ps = [];
+  for (const n of names) {
+    if (!KLANG[n]) continue;
+    if (!loopWait.has(n)) loopWait.set(n, new Promise((res) => loopQ.push([n, res])));
+    ps.push(loopWait.get(n));
+  }
+  if (!loopRun && loopQ.length) {
+    loopRun = true;
+    let v = 0, gen = null, est = 0;
+    const step = () => {
+      const a = performance.now(), [n, res] = loopQ[0];
+      if (v >= KLANG[n].n) { loopQ.shift(); v = 0; gen = null; res(); return 0; }
+      if (klangHas(n, v)) { gen = null; v++; }
+      else if (!gen) { const out = klangStart(n, v); if (isGen(out)) gen = out; else { klangPut(n, v, klangFinish(n, out)); v++; } }
+      else { const r = gen.next(); if (r.done) { klangPut(n, v, klangFinish(n, r.value)); gen = null; v++; } }
+      const dt = performance.now() - a;
+      KLOOP.ms += dt; KLOOP.by[n] = (KLOOP.by[n] || 0) + dt;
+      if (dt > KLOOP.maxStep) { KLOOP.maxStep = dt; KLOOP.maxStepOf = n; }
+      return dt;
+    };
+    const slice = () => {
+      const t0 = performance.now(), hidden = document.hidden;
+      for (let first = true; loopQ.length && (hidden || first || performance.now() - t0 + est < 8); first = false) est = Math.max(est, Math.min(6, step()));
+      KLOOP.slices++;
+      if (!hidden) KLOOP.maxSlice = Math.max(KLOOP.maxSlice, performance.now() - t0);
+      if (loopQ.length) setTimeout(slice, 0); else loopRun = false;
+    };
+    setTimeout(slice, 0);
+  }
+  return Promise.all(ps);
+}
 
 // --------------------------------------------------------------------------
 // 8c · Mischpult: Stimmen-Pool, Busse, Begrenzer, Entfernung, Verdeckung, Raumzonen und Hall.
@@ -2797,6 +3082,11 @@ function createSound(getPrefs) {
   let ctx = null, sum = null, gone = false, phys = null, LL = { x: 0, y: 1.6, z: 0, yaw: 0 };
   let lsend = null, zoneL = 'hof', shown = 'hof', zoneT = 0, forced = null, shownVol = -1;
   const bus = {}, pool = [], last = {}, stat = { plays: 0, steals: 0, drops: 0, max: 0, by: {} }, st = { hp: 100, boom: 0 };
+  // Dauerklänge (Umgebung, ortsfeste Quellen, Musik) laufen außerhalb des Stimmen-Pools: ihre Zahl ist begrenzt, und sie werden nie verdrängt.
+  const beds = [];
+  /** Umgebung der Karte: want = AMB_KARTE-Eintrag, ready = Schleifen berechnet, on = laufende Schleifen, t = Zeit bis zum nächsten Einzelklang (s). */
+  const amb = { want: null, ready: false, on: [], t: 8, inside: false };
+  let ambIn = null, ambLp = null, lastListen = 0, tickId = 0;
   const hallIn = {}, lzone = {}, zcache = new Map();
   const burst = { kind: null, n: 0, t: 0, dt: 0 }, ladder = { n: 0, t: -9 };
   let sprintN = 0;         // eigener Feuerstoß: Art, Schüsse, letzter Schuss (s), Schussabstand (s)
@@ -2828,6 +3118,11 @@ function createSound(getPrefs) {
     dry.connect(outN);
     setTimeout(() => { try { sum.disconnect(pre); pre.disconnect(); dry.disconnect(); } catch { /* schon ab */ } }, 1000);
     for (const [b, db] of Object.entries(BUSSE)) { bus[b] = ctx.createGain(); bus[b].gain.value = 10 ** (db / 20); bus[b].connect(sum); }
+    // Umgebung der Karte (Schleifen und Einzelklänge): innen (Zone halle oder raum) Tiefpass 1,2 kHz und −5 dB, überblendet in 0,4 s
+    ambIn = ctx.createGain(); ambLp = ctx.createBiquadFilter();
+    ambLp.type = 'lowpass'; ambLp.frequency.value = 20000; ambLp.Q.value = 0;
+    ambIn.connect(ambLp); ambLp.connect(bus.amb);
+    tickId = setInterval(tick, 100);
     // Hall: je Zone ein ConvolverNode. Ortsgebundene Stimmen senden in die Zone der Quelle, alles andere über lsend in die Zone des Hörers
     // (lzone blendet beim Zonenwechsel über).
     const ir = raumIR(ctx.sampleRate), hallOut = ctx.createGain();
@@ -2858,19 +3153,19 @@ function createSound(getPrefs) {
   }
 
   // ---------- Stimmen ----------
+  /** Stimme aus Pool oder Dauerklängen nehmen. */
+  function drop(v) { for (const list of [pool, beds]) { const i = list.indexOf(v); if (i >= 0) list.splice(i, 1); } }
   function release(v) {
     if (v.off) return;
     v.off = true;
-    const i = pool.indexOf(v);
-    if (i >= 0) pool.splice(i, 1);
+    drop(v);
     for (const n of v.nodes) try { n.disconnect(); } catch { /* schon ab */ }
   }
   /** Stimme beenden: kurz ausblenden, dann anhalten; sie zählt sofort nicht mehr. */
   function stop(v, fade = 0.012) {
     if (v.off || v.ending) return;
     v.ending = true;
-    const i = pool.indexOf(v);
-    if (i >= 0) pool.splice(i, 1);
+    drop(v);
     const t = ctx.currentTime;
     try { v.g.gain.cancelScheduledValues(t); v.g.gain.setTargetAtTime(0, t, fade / 3); v.src.stop(t + fade + 0.02); } catch { /* schon gestoppt */ }
     setTimeout(() => release(v), (fade + 0.25) * 1000);
@@ -2954,7 +3249,8 @@ function createSound(getPrefs) {
 
   /**
    * Spielt ein Rezept. o: { x, y, z (ohne: nicht ortsgebunden), gain (Faktor), rate, when (s), own,
-   *   L (Hörer, sonst der letzte aus listen), v (Variante), pan, bus, send (Hall-Anteil), zone (der Quelle), free (ohne Verdeckung) }.
+   *   L (Hörer, sonst der letzte aus listen), v (Variante), pan, bus, send (Hall-Anteil), zone (der Quelle), free (ohne Verdeckung),
+   *   bed (Dauerklang außerhalb des Pools), dest (Knoten statt Bus), offset (Beginn im Puffer, s), fadeIn (s), dur (nach dur s ausblenden und enden) }.
    * Liefert die Stimme ({ stop(fade) }) oder null.
    */
   function play(name, o = {}) {
@@ -2967,8 +3263,8 @@ function createSound(getPrefs) {
     const pl = o.x !== undefined && R.reach > 0 ? place(L, o.x, o.y ?? L.y, o.z ?? L.z, R.reach, o.free) : null;
     if (o.x !== undefined && R.reach > 0 && !pl) return null;
     const prio = R.prio, prot = !!o.own && R.bus === 'waffe';
-    const mine = pool.filter((v) => v.name === name);
-    if ((mine.length >= R.cap && !vacate(mine, prio, prot, now)) || (pool.length >= VOICES_MAX && !vacate(pool, prio, prot, now))) { stat.drops++; return null; }
+    const mine = o.bed ? [] : pool.filter((v) => v.name === name);
+    if (!o.bed && ((mine.length >= R.cap && !vacate(mine, prio, prot, now)) || (pool.length >= VOICES_MAX && !vacate(pool, prio, prot, now)))) { stat.drops++; return null; }
     let vi = o.v ?? (Math.random() * R.n) | 0;
     if (o.v === undefined && R.n > 1 && vi === last[name]) vi = (vi + 1 + ((Math.random() * (R.n - 1)) | 0)) % R.n;
     last[name] = vi;
@@ -2986,12 +3282,13 @@ function createSound(getPrefs) {
     if (pl) { const lp = ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = pl.fc; lp.Q.value = -3; src.connect(lp); head = lp; nodes.push(lp); }
     head.connect(g);
     const vol = 10 ** (R.gain / 20) * B.lvl * (o.gain ?? 1) * (pl ? pl.vol : 1);
-    g.gain.value = vol;
+    const t = ctx.currentTime + (o.when || 0) + (pl ? pl.delay : 0), len = B.ab.duration / rate, dest = o.dest || bus[o.bus || R.bus];
+    if (o.fadeIn) { g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(vol, t + o.fadeIn); } else g.gain.value = vol;
+    if (o.dur) { g.gain.setValueAtTime(vol, t + Math.max(0, o.dur - 0.012)); g.gain.linearRampToValueAtTime(0, t + o.dur); }
     const pan = pl ? pl.pan : o.pan || 0;
-    if (pl || pan) { const p = ctx.createStereoPanner(); p.pan.value = clamp(pan, -1, 1); g.connect(p); p.connect(bus[o.bus || R.bus]); nodes.push(p); }
-    else g.connect(bus[o.bus || R.bus]);
-    const t = ctx.currentTime + (o.when || 0) + (pl ? pl.delay : 0), len = B.ab.duration / rate;
-    const v = { name, prio, prot, vol, t0: now, len, until: now + ((o.when || 0) + (pl ? pl.delay : 0) + len + 1.5) * 1000, loop: R.loop, src, g, nodes, off: false, ending: false };
+    if (pl || pan) { const p = ctx.createStereoPanner(); p.pan.value = clamp(pan, -1, 1); g.connect(p); p.connect(dest); nodes.push(p); }
+    else g.connect(dest);
+    const v = { name, prio, prot, vol, t0: now, len, until: now + ((o.when || 0) + (pl ? pl.delay : 0) + len + 1.5) * 1000, loop: R.loop, src, g, nodes, off: false, ending: false, bed: !!o.bed };
     v.stop = (fade) => stop(v, fade);
     src.onended = () => release(v);
     // Hall: in die Zone der Quelle; liegt der Hörer woanders, die Hälfte zusätzlich in seine
@@ -3007,33 +3304,75 @@ function createSound(getPrefs) {
         if (zs !== zl) { const s2 = ctx.createGain(); s2.gain.value = 0.5; sg.connect(s2); s2.connect(lsend); nodes.push(s2); }
       } else sg.connect(lsend);
     }
-    src.start(t);
-    pool.push(v);
+    src.start(t, R.loop ? (o.offset || 0) % B.ab.duration : 0);
+    if (o.dur) src.stop(t + o.dur + 0.01);
+    (o.bed ? beds : pool).push(v);
     stat.plays++;
     stat.by[name] = (stat.by[name] || 0) + 1;
     stat.max = Math.max(stat.max, pool.length);
     return v;
   }
 
+  // ---------- Umgebung der Karte (Schritt 7.1) ----------
+  /** Neue Karte: laufende Umgebung ausblenden, die Schleifen der Karte im Hintergrund berechnen (sie starten im ersten listen danach). */
+  function ambWorld(w) {
+    ambStop(1.2);
+    const want = (amb.want = (w && AMB_KARTE[w.name]) || null);
+    amb.ready = false;
+    amb.t = 5 + 8 * Math.random();
+    if (want) klangLater(want.loops).then(() => { if (amb.want === want) amb.ready = true; });
+  }
+  /** Beide Schleifen starten, die zweite um 5 s versetzt; sanft eingeblendet. */
+  function ambStart() {
+    amb.want.loops.forEach((n, i) => { const v = play(n, { bed: true, dest: ambIn, offset: i ? 5 : 0, fadeIn: 2.5 }); if (v) amb.on.push(v); });
+  }
+  function ambStop(fade) { for (const v of amb.on) stop(v, fade); amb.on.length = 0; }
+  /** Ein Einzelklang der Karte an einem Ort um den Hörer: Möwe hoch oben, Schiffshorn weit weg, Kran auf Höhe des Portalkrans. */
+  function ambOne() {
+    const list = amb.want.einzel, name = list[(Math.random() * list.length) | 0], a = Math.random() * 2 * Math.PI;
+    const [d, y, free] = { 'amb.horn': [150 + 60 * Math.random(), 6, true], 'amb.moewe': [15 + 25 * Math.random(), LL.y + 14 + 10 * Math.random(), true], 'amb.kran': [14 + 20 * Math.random(), 9.5, false], 'amb.palme': [6 + 16 * Math.random(), 6, false] }[name] || [6 + 16 * Math.random(), 2.6, false];
+    play(name, { x: LL.x + Math.sin(a) * d, y, z: LL.z + Math.cos(a) * d, free, dest: ambIn });
+  }
+  /** Innen (halle, raum) dämpfen: Tiefpass 1,2 kHz und −5 dB, in 0,4 s. */
+  function ambInside(on) {
+    if (on === amb.inside || !ambIn) return;
+    amb.inside = on;
+    const t = ctx.currentTime;
+    ambLp.frequency.cancelScheduledValues(t); ambLp.frequency.setTargetAtTime(on ? 1200 : 20000, t, 0.4 / 3);
+    ambIn.gain.cancelScheduledValues(t); ambIn.gain.setTargetAtTime(on ? 10 ** (-5 / 20) : 1, t, 0.4 / 3);
+  }
+  /**
+   * Alle 100 ms (ab dem ersten Klang): ruft listen nicht mehr (Partie verlassen, Fenster verdeckt), endet die Umgebung der Karte;
+   * ruft es wieder, beginnt sie neu.
+   */
+  function tick() {
+    if (gone) return;
+    if (amb.on.length && performance.now() - lastListen > 600) ambStop(1);
+  }
+
   const S = {
     play,
-    /** Welt der Partie (nach createPhysics): Verdeckung und Raumzonen. null: ohne Welt. */
-    setWorld(p) { phys = p || null; zcache.clear(); zoneT = 0; },
-    /** Einmal je Bild (am Ende von M.aim): Hörer merken, Lautstärke nachführen, alle 0,25 s die Zone des Hörers bestimmen. */
+    /** Welt der Partie (nach createPhysics): Verdeckung, Raumzonen, Umgebung der Karte. null: ohne Welt. */
+    setWorld(p, w) { phys = p || null; zcache.clear(); zoneT = 0; ambWorld(p ? w : null); },
+    /** Einmal je Bild (am Ende von M.aim): Hörer merken, Lautstärke nachführen, alle 0,25 s die Zone des Hörers bestimmen, Umgebung. */
     listen(L, dt = 0) {
       LL = L;
+      if (!ctx && ok() && amb.ready) graph();
       if (!ctx) return;
+      lastListen = performance.now();
       level(true);
       // Ausklang: ein Feuerstoß aus mindestens 3 Schüssen ist zu Ende, wenn für das 1,6-Fache des Schussabstands nichts mehr kam
       if (burst.n >= 3 && performance.now() / 1000 - burst.t > 1.6 * burst.dt) { play(`ausklang.${burst.kind}`, { own: true }); burst.n = 0; }
-      if ((zoneT -= dt) <= 0) { zoneT = 0.25; zoneL = zoneAt(L.x, Math.max(0, L.y - 1.6), L.z); fadeZone(); }
+      if ((zoneT -= dt) <= 0) { zoneT = 0.25; zoneL = zoneAt(L.x, Math.max(0, L.y - 1.6), L.z); fadeZone(); ambInside(zoneL === 'halle' || zoneL === 'raum'); }
+      if (amb.want && amb.ready && !amb.on.length && ok()) ambStart();
+      if (amb.on.length && (amb.t -= dt) <= 0) { amb.t = 6 + 14 * Math.random(); ambOne(); }
     },
     /** Raum vorgeben (Hörprobe): 'hof' | 'halle' | 'gasse' | 'raum' | 'aus' (ohne Hall) – null: wieder selbst bestimmen. */
     room(z) { forced = z && (z === 'aus' || RAUM[z]) ? z : null; fadeZone(); },
     zone: () => forced || zoneL,
     voices() { purge(performance.now()); return pool.length; },
     state(o) { Object.assign(st, o); },
-    stats: () => ({ ...stat, by: { ...stat.by }, voices: pool.length }),
+    stats: () => ({ ...stat, by: { ...stat.by }, voices: pool.length, beds: beds.length, bedNames: beds.map((v) => v.name) }),
     /** Alle Rezepte in Scheiben berechnen (siehe klangBake); first: Namen, die nach der Oberfläche zuerst drankommen. */
     bake: (onProgress, first) => klangBake(first, onProgress),
     ready: () => KBAKE.done,
@@ -3130,7 +3469,8 @@ function createSound(getPrefs) {
     /** App geschlossen: nichts mehr spielen, den eigenen Ausgang abhängen (was schon klingt, klingt kurz aus). */
     dispose() {
       gone = true;
-      for (const v of [...pool]) if (v.loop) stop(v, 0.3);
+      clearInterval(tickId);
+      for (const v of [...pool, ...beds]) if (v.loop) stop(v, 0.3);
       const s = sum;
       if (s) setTimeout(() => { try { s.disconnect(); } catch { /* schon ab */ } }, 2500);
     },
@@ -5770,7 +6110,8 @@ function createMenus(root, api) {
     const before = document.activeElement;
     let dist = 0;
     const note = h('span', 'Knopf = Variante');
-    const off = () => K.room(null);
+    const loops = new Map();                       // laufende Schleifen: Knopf → Stimme (Start und Stopp mit demselben Knopf)
+    const off = () => { K.room(null); for (const v of loops.values()) v?.stop?.(0.3); loops.clear(); };
     const close = () => { off(); dlg?.el.remove(); dlg = null; if (before?.isConnected) before.focus({ preventScroll: true }); };
     // Gegliedert nach Gruppen (Waffen, Mechanik, Hülsen …), mit Suche und Gruppenwahl: so lässt sich alles in wenigen Minuten durchhören
     const names = K.names(), groups = KLANG_GRUPPEN.filter((g) => names.some((n) => klangGruppe(n) === g));
@@ -5778,10 +6119,25 @@ function createMenus(root, api) {
     const rowOf = (n) => {
       const m = K.meta(n);
       return h('div.szm-hear-row', { dataset: { name: n, grp: klangGruppe(n) } }, h('span', n, h('small', [m.bus, m.reach ? `${m.reach} m` : '', m.loop ? 'Schleife' : ''].filter(Boolean).join(' · '))),
-        Array.from({ length: m.n }, (_, v) => btn('.small', String(v + 1), () => {
-          const ok = K.play(n, v, dist);
-          note.textContent = !ok ? `${n}: nicht zu hören (außer Hörweite oder Ton aus)` : `${n} · Variante ${v + 1}${dist && !m.reach ? ' · nicht ortsgebunden, direkt' : dist ? ` · ${dist} m` : ''}`;
-        })));
+        Array.from({ length: m.n }, (_, v) => {
+          const b = btn('.small', m.loop ? `${v + 1} ▶` : String(v + 1), () => {
+            if (m.loop) {                          // Schleife: Start und Stopp
+              if (loops.has(b)) { loops.get(b)?.stop?.(0.3); loops.delete(b); b.textContent = `${v + 1} ▶`; note.textContent = `${n} · gestoppt`; return; }
+              loops.set(b, null);
+              b.textContent = `${v + 1} ■`;
+              note.textContent = `${n} · wird berechnet …`;
+              K.loop(n, v, dist).then((voice) => {
+                if (!loops.has(b) || !dlg) { voice?.stop?.(0.3); return; }
+                loops.set(b, voice);
+                note.textContent = !voice ? `${n}: nicht zu hören (außer Hörweite oder Ton aus)` : `${n} · Schleife läuft – derselbe Knopf hält sie an`;
+              });
+              return;
+            }
+            const ok = K.play(n, v, dist);
+            note.textContent = !ok ? `${n}: nicht zu hören (außer Hörweite oder Ton aus)` : `${n} · Variante ${v + 1}${dist && !m.reach ? ' · nicht ortsgebunden, direkt' : dist ? ` · ${dist} m` : ''}`;
+          });
+          return b;
+        }));
     };
     const list = h('div.szm-hear-list', groups.map((g) => h('div.szm-hear-grp', { dataset: { grp: g } }, h('b', g), ...names.filter((n) => klangGruppe(n) === g).map(rowOf))));
     const filter = () => {
@@ -6496,6 +6852,8 @@ function createApp(win) {
       meta: (n) => KLANG[n],
       room: (z) => S.room(z),
       play: (n, v, dist = 0) => !!S.play(n, dist ? { v, L: { x: 0, y: 1.6, z: 0, yaw: 0 }, x: 0, y: 1.6, z: -dist, free: true } : { v }),
+      /** Schleife starten (erst berechnen, falls nötig): liefert ein Promise mit der Stimme ({ stop(fade) }) oder null. */
+      loop: (n, v, dist = 0) => klangLater([n]).then(() => S.play(n, dist ? { v, bed: true, L: { x: 0, y: 1.6, z: 0, yaw: 0 }, x: 0, y: 1.6, z: -dist, free: true } : { v, bed: true })),
     },
     inMatch: () => !!M && M.state !== 'over',
     /** Liegt dieses Fenster vorn? (Nur dann dürfen Menüs den Tastaturfokus an sich ziehen.) */
@@ -7215,7 +7573,7 @@ function createApp(win) {
     get bakeMs() { return KBAKE.ms; },
     bake: () => ({ ...KBAKE }),
     /** Alles vergessen und neu berechnen (prüft das Ladebild): löscht die berechneten Varianten, die Raumantworten bleiben. */
-    reset() { BANK.clear(); bakeJob = null; Object.assign(KBAKE, { ms: 0, maxSlice: 0, maxStep: 0, slices: 0, done: false, wall: 0 }); S.bake(); },
+    reset() { BANK.clear(); loopWait.clear(); bakeJob = null; Object.assign(KBAKE, { ms: 0, maxSlice: 0, maxStep: 0, slices: 0, done: false, wall: 0 }); Object.assign(KLOOP, { ms: 0, maxSlice: 0, maxStep: 0, slices: 0, by: {} }); S.bake(); },
     voices: () => S.voices(),
     play: (name, o) => !!S.play(name, o),
     stats: () => S.stats(),
@@ -7223,6 +7581,9 @@ function createApp(win) {
     zone: () => S.zone(),
     room: (z) => S.room(z),
     ir: (zone, sr = KSR) => raumIR(sr)[zone],
+    /** Schleifen im Hintergrund berechnen (Promise) und ihre Rechenzeit (KLOOP). */
+    later: (names) => klangLater(names),
+    loops: () => ({ ...KLOOP, by: { ...KLOOP.by } }),
   };
 
   return {
