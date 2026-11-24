@@ -3140,6 +3140,58 @@ rezept('zustand.atem', {
   },
 });
 
+// ---------- Spaß-Paket (Schritt 7.7): Rutschen, Zischen eines Fasses, Überflug beim Luftschlag ----------
+/** Rutschen je Untergrund: Bandpass (Hz, Güte), dazu tiefes Rumpeln (Tiefpass) und Körnigkeit 0 … 1. */
+const RUTSCH = { stein: [1800, 0.9, 260, 0.6], metall: [2600, 1.4, 320, 0.35], holz: [950, 1, 220, 0.5], sand: [1300, 0.7, 180, 0.9] };
+for (const [grund, [bf, bq, lf, grit]] of Object.entries(RUTSCH)) {
+  rezept(`rutschen.${grund}`, {
+    bus: 'welt', gain: spitze(-18, 'welt'), prio: 4, cap: 3, reach: 22, send: 0.15,
+    make(K, rnd, v) {
+      const fk = vary(v, 3, rnd, 0.08), len = 0.75, a = K.noise(K.buf(len), rnd, grund === 'sand' ? 'pink' : 'white');
+      K.bp(a, { f: bf * fk * 1.15, f2: bf * fk * 0.85, q: bq });                     // das Tempo fällt von 8 auf 4 m/s: der Klang wird dunkler
+      const lo = K.noise(K.buf(len), rnd, 'white');
+      K.lp(lo, { f: lf * fk }); K.lp(lo, { f: lf * fk });
+      K.mix(a, K.norm(lo, K.peak(a) * 0.9));
+      // Körnigkeit: kurze Einbrüche und Spitzen in der Lautstärke
+      const sd = (rnd() * 1e9) | 0;
+      for (let i = 0; i < a.length; i++) a[i] *= 1 - grit * 0.5 + grit * 0.5 * Math.abs(noise1((i / K.SR) * 90, sd));
+      if (grund === 'metall') K.modal(a, { at: 0.01, modes: modesOf([[1250, 120, 0.15], [2730, 80, 0.1]], K.peak(a), fk) });
+      K.env(a, [[0, 0.02], [0.03, 1], [0.5, 0.6], [0.68, 0.4], [0.75, 0.002]]);
+      return K.norm(K.fade(a, { outT: 0.03 }), 1);
+    },
+  });
+}
+/** Zischen eines Fasses kurz vor der Explosion: Rauschen, Bandpass steigend 2,5 → 6 kHz, Lautstärke steigend, leises Knistern; 0,25 s (gespielt 0,12 – 0,22 s). */
+rezept('zischen', {
+  bus: 'welt', gain: spitze(-16, 'welt'), prio: 6, cap: 3, reach: 30, send: 0.2,
+  make(K, rnd, v) {
+    const fk = vary(v, 3, rnd, 0.08), a = K.noise(K.buf(0.25), rnd, 'white');
+    K.hp(a, { f: 1800 }); K.bp(a, { f: 2500 * fk, f2: 6000 * fk, q: 1.1 });
+    K.env(a, [[0, 0.15], [0.2, 1], [0.24, 0.6], [0.25, 0.001]]);
+    for (let i = 0; i < 6; i++) K.click(a, rnd, { at: 0.01 + rnd() * 0.2, dur: 0.001, gain: K.peak(a) * 0.3 });
+    return K.norm(K.fade(a, { outT: 0.012 }), 1);
+  },
+});
+/**
+ * Überflug: 2,6 s Rauschen mit Bandpass 600 → 2400 → 300 Hz (am höchsten, wenn die Maschine über dem Ziel ist), dazu tiefes Dröhnen;
+ * Lautstärke als Glocke um 1,3 s. Die Stereo-Lage setzt S.jet je nach Flugweg.
+ */
+rezept('jet', {
+  n: 2, bus: 'welt', gain: spitze(-8, 'welt'), prio: 7, cap: 2, send: 0.5,
+  *make(K, rnd, v) {
+    const len = 2.6, mid = 1.3, a = K.buf(len), sr = K.SR, fk = v ? 1.04 : 0.97;
+    const nz = noiseRun(rnd, 'pink'), nw = noiseRun(rnd, 'white'), w = new Float32Array(a.length);
+    const fOf = (t) => fk * (t < mid ? 600 * 4 ** (t / mid) : 2400 * (300 / 2400) ** ((t - mid) / (len - mid)));
+    const bp = biquadRun(sr, 'bandpass', fOf, 1.2), bpw = biquadRun(sr, 'bandpass', (t) => fOf(t) * 1.8, 2);
+    yield* stuecke(a.length, (i0, i1) => { nz(a, i0, i1); nw(w, i0, i1); bp(a, i0, i1); bpw(w, i0, i1); for (let i = i0; i < i1; i++) a[i] += 0.35 * w[i]; });
+    const lo = K.noise(K.buf(len), rnd, 'brown');
+    K.lp(lo, { f: 140 }); K.lp(lo, { f: 140 }); K.hp(lo, { f: 30 });
+    K.mix(a, K.norm(lo, K.peak(a) * 0.8));
+    K.env(a, [[0, 0.01], [0.6, 0.12], [mid, 1], [mid + 0.25, 0.75], [2.1, 0.12], [len, 0.002]]);
+    return K.norm(K.fade(a, { inT: 0.05, outT: 0.08 }), 1);
+  },
+});
+
 /** Gruppen der Rezepte (Hörprobe): Name → Gruppe; KLANG_GRUPPEN in der Reihenfolge der Anzeige. */
 const KLANG_GRUPPEN = ['Waffen', 'Mechanik', 'Hülsen', 'Schritte', 'Einschläge', 'Treffer', 'Foley', 'Explosion', 'Funk-Signale', 'Umgebung', 'Musik', 'Zustände', 'Spaß-Paket'];
 const klangGruppe = (n) => (/^schuss\./.test(n) ? 'Waffen' : /^(mech|ausklang)\.|^leer$/.test(n) ? 'Mechanik' : /^huelse\./.test(n) ? 'Hülsen'
@@ -3937,6 +3989,29 @@ function createSound(getPrefs) {
       play('pfeifen', { pan, when: sup ? 0.02 : 0 });
     },
     bounce(L, x, y, z, surf) { play(`granate.aufprall.${GRUND[surf] || 'stein'}`, { L, x, y, z }); },
+    /** Rutschen (0,75 s); kind = Trefferart des Bodens. Die eigene Figur lauter und nicht ortsgebunden (Bus foley). */
+    slide(L, x, y, z, own, kind) {
+      const name = `rutschen.${GRUND[kind] || 'stein'}`;
+      if (own) play(name, { own: true, bus: 'foley', gain: 10 ** ((BUSSE.welt - BUSSE.foley + 3) / 20) });
+      else play(name, { L, x, y, z });
+    },
+    /** Zischen eines Fasses kurz vor der Explosion: dur 0,12 – 0,22 s, ansteigend; endet mit dur (dann kommt die Explosion). */
+    fuse(L, x, y, z, dur = 0.18) { play('zischen', { L, x, y, z, dur: clamp(dur, 0.05, 0.25) }); },
+    /**
+     * Überflug beim Luftschlag (2,6 s): die Maschine fliegt in Blickrichtung yaw des Rufers über den Zielpunkt (x, y, z), 45 m hoch, mit 70 m/s;
+     * über ihr ist sie nach 1,3 s. Die Stereo-Lage wandert mit dem Flugweg (vom Hörer aus gesehen), der Pegel sinkt mild mit dem Abstand zum Ziel.
+     */
+    jet(L, x, y, z, yaw = 0) {
+      if (!ok()) return;
+      const fx = Math.sin(yaw), fz = -Math.cos(yaw), curve = new Float32Array(27);
+      for (let i = 0; i < curve.length; i++) {
+        const t = i * 0.1 - 1.3, px = x + fx * 70 * t - L.x, py = y + 45 - L.y, pz = z + fz * 70 * t - L.z, d = Math.hypot(px, py, pz) || 1;
+        curve[i] = clamp(((px * Math.cos(L.yaw) + pz * Math.sin(L.yaw)) / d) * 0.9, -1, 1);
+      }
+      const v = play('jet', { pan: curve[0] || 0.001, gain: clamp(1 - Math.hypot(x - L.x, z - L.z) / 300, 0.3, 1) });
+      const p = v?.nodes.find((n) => n.pan);
+      if (p) try { p.pan.setValueCurveAtTime(curve, ctx.currentTime + 0.01, 2.6); } catch { /* ohne Wandern */ }
+    },
     pin() { play('granate.splint', { own: true }); },
     ui(kind = 'tick') { play(`ui.${kind}`); },
     /** Kurze Tonfolgen für Ereignisse (Funk-Signale) */
