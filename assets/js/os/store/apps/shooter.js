@@ -359,6 +359,7 @@ const QSTRIDE = 10;      // je Effekt-Ecke: Position 3 · UV 2 · Farbe 4 · Art
 const MAX_INST = 1400, MAX_QUADS = 1600;
 const K_MATTE = 0, K_CAMO = 1, K_METAL = 2, K_GLOW = 3;
 const Q_GLOW = 0, Q_SMOKE = 1, Q_BEAM = 2, Q_DECAL = 3, Q_FLASH = 4, Q_DUST = 5;
+const Q_FLAT = 0.25;     // zur Art addiert: flach auf einer Fläche (Zeichen am Boden) – harter Tiefentest wie Einschusslöcher statt weicher Kante
 
 // Bildkette: die Szene entsteht als linearer HDR-Wert in einem Zwischenbild; Belichtung, Tonwertkurve (ACES) und Gamma
 // kommen erst im Schlussschritt. Nur im Rückfall ohne Float-Ziele (uLdr = 1) wenden shade() und der Himmel die Kurve selbst an.
@@ -493,9 +494,15 @@ layout(location=0) in vec3 aPos; layout(location=1) in vec2 aUV; layout(location
 uniform mat4 uVP;
 out vec2 vUV; out vec4 vCol; out float vKind;
 void main() { vUV = aUV; vCol = aCol; vKind = aKind; gl_Position = uVP * vec4(aPos, 1.); }`;
+// Tiefe aus der Tiefentextur linear machen (nah 0,07, fern 500). Die Welt liegt im Tiefenbereich 0,1…1, die Waffe in der Hand in 0…0,1
+// (liefert Werte unter 0,07, liegt also vor allem); Himmel = 1,0 → 500.
+const GLSL_LINZ = `
+float linZ(float d) { float z = (d - .1) / .9 * 2. - 1.; return 2. * .07 * 500. / (500.07 - z * 499.93); }`;
+// Durchsichtiges zeichnet in fboFx (nur Farbe, keine Tiefe) und prüft die Tiefe selbst gegen uTiefe.
 const FS_QUAD = `#version 300 es
 precision highp float;
-uniform float uExposure, uLdr;
+uniform highp sampler2D uTiefe;
+uniform float uExposure, uLdr, uTest;
 in vec2 vUV; in vec4 vCol; in float vKind;
 out vec4 o;
 float h2(vec2 p) { vec3 q = fract(vec3(p.xyx) * .1031); q += dot(q, q.yzx + 33.33); return fract((q.x + q.y) * q.z); }
@@ -507,16 +514,25 @@ vec3 lin(vec3 c) {
   vec3 y = pow(min(c, vec3(.97)), vec3(2.2)), a = 2.51 - 2.43 * y, b = .03 - .59 * y;
   return (sqrt(b * b + .56 * a * y) - b) / (2. * a) / uExposure;
 }
+${GLSL_LINZ}
 void main() {
+  float k = floor(vKind + .01), szene = 1e9, ich = 0.;
+  bool flach = vKind - k > .1;
+  if (uTest > .5) {                                                                        // Tiefentest gegen die Szene
+    szene = linZ(texelFetch(uTiefe, ivec2(gl_FragCoord.xy), 0).r); ich = linZ(gl_FragCoord.z);
+    if (flach || k == 3.) { if (ich >= szene + .02 + .0005 * ich) discard; }               // Einschusslöcher, Zeichen am Boden
+    else if (k == 2. || k == 4.) { if (ich > szene) discard; }                             // Leuchtspur, fremdes Mündungsfeuer
+  }
   vec2 p = vUV * 2. - 1.;
   float d = length(p), a = 0., add = 1.;
-  if (vKind < .5) a = pow(max(0., 1. - d), 2.);                                           // Glühen
-  else if (vKind < 1.5) { a = smoothstep(1., .25, d) * (.55 + .45 * vn(vUV * 5. + vCol.a * 7.)); add = 0.; }   // Rauch
-  else if (vKind < 2.5) a = (1. - abs(p.y)) * smoothstep(0., .15, vUV.x) * smoothstep(1., .6, vUV.x);      // Leuchtspur
-  else if (vKind < 3.5) { a = smoothstep(1., .35, d + .25 * vn(vUV * 9.)); add = 0.; }      // Einschussloch
-  else if (vKind < 4.5) { float ang = atan(p.y, p.x); a = pow(max(0., 1. - d * (1.25 - .45 * cos(ang * 4.))), 1.6); }   // Mündungsfeuer
+  if (k < .5) a = pow(max(0., 1. - d), 2.);                                                // Glühen
+  else if (k < 1.5) { a = smoothstep(1., .25, d) * (.55 + .45 * vn(vUV * 5. + vCol.a * 7.)); add = 0.; }   // Rauch
+  else if (k < 2.5) a = (1. - abs(p.y)) * smoothstep(0., .15, vUV.x) * smoothstep(1., .6, vUV.x);         // Leuchtspur
+  else if (k < 3.5) { a = smoothstep(1., .35, d + .25 * vn(vUV * 9.)); add = 0.; }         // Einschussloch
+  else if (k < 4.5) { float ang = atan(p.y, p.x); a = pow(max(0., 1. - d * (1.25 - .45 * cos(ang * 4.))), 1.6); }   // Mündungsfeuer
   else { a = smoothstep(1., .1, d) * .8; add = 0.; }                                       // Staub
   a *= vCol.a;
+  if (uTest > .5 && !flach && (k == 0. || k == 1. || k == 5.)) a *= clamp((szene - ich) / .4, 0., 1.);   // Rauch, Staub, Glühen: weiche Kante an Flächen
   if (uLdr > .5) o = vec4(vCol.rgb * a, add > .5 ? 0. : a);
   else o = add > .5 ? vec4(lin(vCol.rgb * a), 0.) : vec4(lin(vCol.rgb) * a, a);
 }`;
@@ -667,7 +683,7 @@ function createRenderer(canvas, { shadowSize = 2048 } = {}) {
   // Einheiten 0 und 1 gehören der Szene (Textur-Array, Schattenkarte); die Schritte danach lesen nur aus Einheit 2 und höher.
   // So hängt nie eine Textur, die gerade gelesen wird, zugleich am gezeichneten Framebuffer.
   let ldr = !floatOk, tW = 0, tH = 0;
-  const T = { farbe: null, tiefe: null, szene: null };
+  const T = { farbe: null, tiefe: null, szene: null, fx: null };
   function texTarget(w, h, fmt, filter = gl.LINEAR) {
     const t = gl.createTexture();
     gl.bindTexture(gl.TEXTURE_2D, t);
@@ -702,6 +718,7 @@ function createRenderer(canvas, { shadowSize = 2048 } = {}) {
     T.farbe = texTarget(w, h, fmt);
     T.tiefe = texTarget(w, h, gl.DEPTH_COMPONENT24, gl.NEAREST);
     T.szene = fboOf(T.farbe, T.tiefe);
+    T.fx = fboOf(T.farbe, null);
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     if (!T.szene.ok && !ldr) { ldr = true; allocTargets(w, h); }      // Float-Ziel abgelehnt: Rückfall auf RGBA8
   }
@@ -796,8 +813,9 @@ function createRenderer(canvas, { shadowSize = 2048 } = {}) {
     const L = f.lights || [];
     for (let i = 0; i < Math.min(MAX_LIGHTS, L.length); i++) { lightPos.set(L[i].slice(0, 4), i * 4); lightCol.set(L[i].slice(4, 7), i * 3); }
 
+    const nShadow = Math.max(f.instCount || 0, f.instShadowCount || 0);     // dahinter: Quader nur für die Schattenkarte
     gl.bindBuffer(gl.ARRAY_BUFFER, instWorld.buf);
-    if (f.instCount) gl.bufferSubData(gl.ARRAY_BUFFER, 0, f.inst, 0, f.instCount * ISTRIDE);
+    if (nShadow) gl.bufferSubData(gl.ARRAY_BUFFER, 0, f.inst, 0, nShadow * ISTRIDE);
     gl.bindBuffer(gl.ARRAY_BUFFER, instView.buf);
     if (f.vmCount) gl.bufferSubData(gl.ARRAY_BUFFER, 0, f.vm, 0, f.vmCount * ISTRIDE);
     const nQuads = (f.quadCount || 0) + (f.vmQuadCount || 0);
@@ -814,6 +832,7 @@ function createRenderer(canvas, { shadowSize = 2048 } = {}) {
     if (shadowsOn) {
       gl.bindFramebuffer(gl.FRAMEBUFFER, shadowFbo);
       gl.viewport(0, 0, shadowRes, shadowRes);
+      gl.depthRange(0, 1);
       gl.clear(gl.DEPTH_BUFFER_BIT);
       gl.enable(gl.POLYGON_OFFSET_FILL);
       gl.polygonOffset(1.5, 3);
@@ -821,20 +840,21 @@ function createRenderer(canvas, { shadowSize = 2048 } = {}) {
       gl.uniformMatrix4fv(P.shadow.u.uVP, false, lightVP);
       gl.bindVertexArray(worldVao);
       gl.drawElements(gl.TRIANGLES, worldCount, gl.UNSIGNED_INT, 0);
-      if (f.instCount) {
+      if (nShadow) {
         gl.useProgram(P.shadowInst.p);
         gl.uniformMatrix4fv(P.shadowInst.u.uVP, false, lightVP);
         gl.bindVertexArray(instWorld.vao);
-        gl.drawElementsInstanced(gl.TRIANGLES, 36, gl.UNSIGNED_SHORT, 0, f.instCount);
+        gl.drawElementsInstanced(gl.TRIANGLES, 36, gl.UNSIGNED_SHORT, 0, nShadow);
       }
       gl.disable(gl.POLYGON_OFFSET_FILL);
       gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     }
 
-    // --- Welt (ins HDR-Zwischenbild) ---
+    // --- Welt (ins HDR-Zwischenbild): Welt, Figuren und Himmel im Tiefenbereich 0,1…1 ---
     gl.bindFramebuffer(gl.FRAMEBUFFER, T.szene);
     gl.viewport(0, 0, W, H);
     gl.clear(gl.DEPTH_BUFFER_BIT | gl.COLOR_BUFFER_BIT);
+    gl.depthRange(0.1, 1);
     gl.activeTexture(gl.TEXTURE1);
     gl.bindTexture(gl.TEXTURE_2D, shadowTex);
     gl.activeTexture(gl.TEXTURE0);
@@ -870,41 +890,43 @@ function createRenderer(canvas, { shadowSize = 2048 } = {}) {
     gl.bindVertexArray(skyVao);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
 
-    // --- Effekte ---
-    gl.enable(gl.BLEND);
-    gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
-    gl.disable(gl.CULL_FACE);
-    gl.useProgram(P.quad.p);
-    gl.uniform1f(P.quad.u.uExposure, env.exposure);
-    gl.uniform1f(P.quad.u.uLdr, ldr ? 1 : 0);
-    gl.bindVertexArray(quadVao);
-    if (f.quadCount) {
-      gl.uniformMatrix4fv(P.quad.u.uVP, false, vp);
-      gl.drawElements(gl.TRIANGLES, f.quadCount * 6, gl.UNSIGNED_SHORT, 0);
-    }
-
-    // --- Waffe in der Hand: eigene Brennweite, eigene Tiefe ---
+    // --- Waffe in der Hand: eigene Brennweite, vorderster Tiefenbereich, im selben Durchgang ---
+    mPerspective(vmProj, (f.vmFov || 55) * DEG, aspect, 0.02, 20);
+    mMul(vmVP, vmProj, view);
     if (f.vmCount) {
-      gl.disable(gl.BLEND);
-      gl.enable(gl.CULL_FACE);
+      gl.depthRange(0, 0.1);
       gl.depthMask(true);
-      gl.clear(gl.DEPTH_BUFFER_BIT);
-      mPerspective(vmProj, (f.vmFov || 55) * DEG, aspect, 0.02, 20);
-      mMul(vmVP, vmProj, view);
       gl.useProgram(P.inst.p);
       gl.uniformMatrix4fv(P.inst.u.uVP, false, vmVP);
       gl.bindVertexArray(instView.vao);
       gl.drawElementsInstanced(gl.TRIANGLES, 36, gl.UNSIGNED_SHORT, 0, f.vmCount);
-      if (f.vmQuadCount) {
-        gl.enable(gl.BLEND);
-        gl.disable(gl.CULL_FACE);
-        gl.depthMask(false);
-        gl.useProgram(P.quad.p);
-        gl.uniformMatrix4fv(P.quad.u.uVP, false, vmVP);
-        gl.bindVertexArray(quadVao);
-        gl.drawElements(gl.TRIANGLES, f.vmQuadCount * 6, gl.UNSIGNED_SHORT, (f.quadCount || 0) * 12);
-      }
+      gl.depthRange(0.1, 1);
     }
+
+    // --- Durchsichtiges: fboFx (nur Farbe), Tiefentest und weiche Kanten im Shader gegen texTiefe ---
+    gl.bindFramebuffer(gl.FRAMEBUFFER, T.fx);
+    gl.disable(gl.DEPTH_TEST);
+    gl.depthMask(false);
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+    gl.disable(gl.CULL_FACE);
+    bindTex(2, T.tiefe);
+    gl.useProgram(P.quad.p);
+    gl.uniform1i(P.quad.u.uTiefe, 2);
+    gl.uniform1f(P.quad.u.uExposure, env.exposure);
+    gl.uniform1f(P.quad.u.uLdr, ldr ? 1 : 0);
+    gl.bindVertexArray(quadVao);
+    if (f.quadCount) {
+      gl.uniform1f(P.quad.u.uTest, 1);
+      gl.uniformMatrix4fv(P.quad.u.uVP, false, vp);
+      gl.drawElements(gl.TRIANGLES, f.quadCount * 6, gl.UNSIGNED_SHORT, 0);
+    }
+    if (f.vmQuadCount) {                       // Mündungsfeuer der eigenen Waffe: ohne Tiefentest
+      gl.uniform1f(P.quad.u.uTest, 0);
+      gl.uniformMatrix4fv(P.quad.u.uVP, false, vmVP);
+      gl.drawElements(gl.TRIANGLES, f.vmQuadCount * 6, gl.UNSIGNED_SHORT, (f.quadCount || 0) * 12);
+    }
+    gl.depthRange(0, 1);
     gl.depthMask(true);
 
     // --- Schluss: Belichtung, Tonwertkurve, Gamma → Bildfläche ---
@@ -2162,7 +2184,7 @@ function createFx() {
     /** Mündungsfeuer einer fremden Waffe */
     muzzle(x, y, z) { puff(x, y, z, 0, 0, 0, { life: 0.05, s: rnd(0.2, 0.3), c: [1, 0.8, 0.45], k: Q_FLASH }); },
     /** Leuchtende Scheibe am Boden (nur während build(): markiert Stellungen) */
-    disc(x, y, z, r, c, a) { quad(x, y, z, r, 0, 0, 0, 0, r, c[0], c[1], c[2], a, Q_GLOW); },
+    disc(x, y, z, r, c, a) { quad(x, y, z, r, 0, 0, 0, 0, r, c[0], c[1], c[2], a, Q_GLOW + Q_FLAT); },
     /** Rauchfaden an der Mündung nach langem Feuer */
     wisp(x, y, z) { puff(x, y, z, rnd(-0.2, 0.2), rnd(0.3, 0.7), rnd(-0.2, 0.2), { life: rnd(0.5, 0.9), s: 0.05, grow: 0.3, c: [0.7, 0.7, 0.7], a: 0.22, k: Q_SMOKE, drag: 1 }); },
 
