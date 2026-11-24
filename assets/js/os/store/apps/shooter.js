@@ -3,7 +3,7 @@
 //
 // Aufbau der Datei:
 //   1 Mathematik · 2 Texturen · 3 Geometrie · 4 Renderer · 5 Welt und Karten · 6 Kollision und Wege
-//   7 Waffen und Daten · 8 Klang (8a Klangschmiede: Rechenkern) · 9 Spiel (Effekte, Figuren, Partie mit Bots und Abgleich im Netz)
+//   7 Waffen und Daten · 8 Klang (8a Klangschmiede: Rechenkern · 8b Rezepte) · 9 Spiel (Effekte, Figuren, Partie mit Bots und Abgleich im Netz)
 //   10 Netz (Verbindung, Lobby) · 11 Menüs · 12 Oberfläche im Einsatz · 13 App
 
 import { h, clamp, lerp, TAU, ticker } from '../../../core/util.js';
@@ -2056,6 +2056,191 @@ const SHOT_SND = {
   lmg: { cut: 4200, dur: 0.24, noise: 0.95, f: 135, body: 0.8, rate: 0.9 },
   pistol: { cut: 5600, dur: 0.15, noise: 0.7, f: 250, body: 0.45, rate: 1.2 },
 };
+
+// --------------------------------------------------------------------------
+// 8b · Klangschmiede: Rezepte. Jedes Rezept beschreibt einen Klang mit Varianten; make(K, rnd, v) berechnet Variante v
+// mit der Saat hash(name) + v (gleiche Saat ergibt gleiche Samples) und liefert ein Float32Array oder { ch: [links, rechts] }.
+// Die Klänge aus Phase 1 sind die alten, live gebauten Klänge mit denselben Zahlen (K.burst und K.tone statt Knoten).
+// --------------------------------------------------------------------------
+/** Busse des Mischpults und ihre Startpegel in dB. */
+const BUSSE = { waffe: 0, welt: -3, foley: -8, ui: -10, amb: -18, musik: -14 };
+/** Name → Rezept { n, bus, gain (dB vor dem Bus), prio 0…9, cap, reach (m, 0 = nicht ortsgebunden), send, sendD, loop, make } */
+const KLANG = {};
+/** Rezept eintragen. sendD: zusätzlicher Hall-Anteil mal d/reach (ferne Schüsse hallen mehr). */
+const rezept = (name, r) => { KLANG[name] = { n: 3, bus: 'ui', gain: 0, prio: 5, cap: 4, reach: 0, send: 0, sendD: 0, loop: false, ...r }; };
+const klangHash = (s) => { let x = 2166136261; for (let i = 0; i < s.length; i++) x = Math.imul(x ^ s.charCodeAt(i), 16777619); return x >>> 0; };
+/** Pegel eines alten Klangs: Lautstärke der alten Kette abzüglich des Bus-Pegels – an der Summe bleibt alles so laut wie vorher. */
+const altDb = (v, bus) => 20 * Math.log10(v) - BUSSE[bus];
+/** Streuung der Tonhöhe je Variante: Variante 0 bleibt bei den alten Zahlen, 1 und 2 liegen um ±amt daneben. */
+const spread = (v, rnd, amt = 0.035) => 1 + amt * ([0, 1, -1][v % 3] + (rnd() - 0.5) * 0.4);
+/** Zufallswert aus lo … hi, je Variante aus einem eigenen Drittel (Varianten liegen nie zufällig aufeinander). */
+const pick = (v, rnd, lo, hi) => lo + ((hi - lo) * ((v % 3) + rnd())) / 3;
+
+for (const [kind, p] of Object.entries(SHOT_SND)) {
+  // Der alte Schuss aus nächster Nähe: Rauschen, Körper (Dreieck), Knall (Hochpass) und Nachhall-Rauschen
+  const make = (K, rnd, v) => {
+    const s = spread(v, rnd), a = K.buf(0.52 + p.dur);
+    K.burst(a, rnd, { f: p.cut * s, f2: Math.max(200, p.cut * 0.14), dur: p.dur, gain: p.noise, rate: p.rate });
+    K.tone(a, { type: 'triangle', f: p.f * s, f2: p.f * 0.32 * s, dur: p.dur * 0.7, gain: p.body });
+    K.burst(a, rnd, { type: 'highpass', f: 3500, dur: 0.035, gain: 0.4 });
+    K.burst(a, rnd, { f: 900, f2: 240, dur: 0.5 + p.dur, gain: p.noise * 0.14, attack: 0.03, rate: 0.6 });
+    return a;
+  };
+  rezept(`schuss.${kind}.ich`, { bus: 'waffe', gain: altDb(0.5, 'waffe'), prio: 9, cap: 10, send: 0.5, make });
+  rezept(`schuss.${kind}.nah`, { bus: 'welt', gain: altDb(0.42, 'welt'), prio: 7, cap: 6, reach: 110, send: 0.4, sendD: 0.5, make });
+}
+rezept('explosion.nah', {
+  bus: 'welt', gain: altDb(0.9, 'welt'), prio: 8, cap: 4, reach: 140, send: 0.9,
+  make(K, rnd, v) {
+    const s = spread(v, rnd), a = K.buf(2.03);
+    K.burst(a, rnd, { f: 1800 * s, f2: 90, dur: 1.1, gain: 1.3, rate: 0.5 });
+    K.tone(a, { f: 82 * s, f2: 30 * s, dur: 0.75, gain: 1.3 });
+    K.burst(a, rnd, { type: 'highpass', f: 2200, dur: 0.07, gain: 0.5 });
+    K.burst(a, rnd, { f: 500, f2: 120, dur: 2, gain: 0.22, attack: 0.1, rate: 0.4 });
+    return a;
+  },
+});
+for (const [name, fn] of Object.entries({
+  beton: (K, rnd, a, v) => K.burst(a, rnd, { type: 'bandpass', f: pick(v, rnd, 1400, 2200), q: 1.2, dur: 0.06, gain: 0.8 }),
+  metall: (K, rnd, a, v) => { K.tone(a, { type: 'square', f: pick(v, rnd, 1500, 2600), f2: 900, dur: 0.07, gain: 0.2 }); K.burst(a, rnd, { type: 'bandpass', f: 4200, q: 4, dur: 0.05, gain: 0.5 }); },
+  holz: (K, rnd, a, v) => K.burst(a, rnd, { type: 'bandpass', f: 700 * spread(v, rnd), q: 2, dur: 0.07, gain: 0.9 }),
+  koerper: (K, rnd, a, v) => K.burst(a, rnd, { f: 500 * spread(v, rnd), dur: 0.08, gain: 0.9 }),
+})) rezept(`einschlag.${name}`, { bus: 'welt', gain: altDb(0.28, 'welt'), prio: 3, cap: 6, reach: 26, send: 0.3, make(K, rnd, v) { const a = K.buf(0.09); fn(K, rnd, a, v); return a; } });
+rezept('schritt.stein', {
+  bus: 'welt', gain: altDb(0.16, 'welt'), prio: 2, cap: 6, reach: 18, send: 0.15,
+  make(K, rnd, v) {
+    const a = K.buf(0.1);
+    K.burst(a, rnd, { f: pick(v, rnd, 260, 420), f2: 110, dur: 0.09, gain: 1, rate: 0.7 });
+    K.burst(a, rnd, { type: 'bandpass', f: pick(v, rnd, 1800, 2600), q: 1.5, dur: 0.03, gain: 0.2 });
+    return a;
+  },
+});
+rezept('landung.stein', {
+  bus: 'foley', gain: altDb(0.3, 'foley'), prio: 5, cap: 2, send: 0.1,
+  make(K, rnd, v) {
+    const s = spread(v, rnd, 0.07), a = K.buf(0.18);           // dumpfer Schlag ohne Tonhöhe: weiter streuen, sonst gleichen sich die Varianten
+    K.burst(a, rnd, { f: 300 * s, f2: 80, dur: 0.16, gain: 1, rate: 0.6 });
+    K.tone(a, { f: 90 * s, f2: 45 * s, dur: 0.14, gain: 0.5 });
+    return a;
+  },
+});
+for (const [name, len, fn] of [
+  ['raus', 0.07, (K, rnd, a, s) => { K.burst(a, rnd, { type: 'bandpass', f: 1900 * s, q: 3, dur: 0.05, gain: 0.9 }); K.tone(a, { type: 'square', f: 420 * s, f2: 210 * s, dur: 0.05, gain: 0.12 }); }],
+  ['rein', 0.09, (K, rnd, a, s) => { K.burst(a, rnd, { type: 'bandpass', f: 1300 * s, q: 2.5, dur: 0.07, gain: 1 }); K.tone(a, { type: 'square', f: 260 * s, f2: 150 * s, dur: 0.07, gain: 0.2 }); }],
+  ['patrone', 0.07, (K, rnd, a, s) => { K.burst(a, rnd, { type: 'bandpass', f: 1500 * s, q: 3, dur: 0.05, gain: 0.8 }); K.tone(a, { type: 'triangle', f: 520 * s, f2: 300 * s, dur: 0.05, gain: 0.2 }); }],
+  ['verschluss', 0.16, (K, rnd, a, s) => { K.burst(a, rnd, { type: 'bandpass', f: 2600 * s, q: 4, dur: 0.04, gain: 0.9 }); K.burst(a, rnd, { type: 'bandpass', f: 1700 * s, q: 4, dur: 0.05, gain: 0.9, at: 0.09 }); }],
+]) rezept(`nachladen.${name}`, { bus: 'foley', gain: altDb(0.3, 'foley'), prio: 6, cap: 2, send: 0.1, make(K, rnd, v) { const a = K.buf(len); fn(K, rnd, a, spread(v, rnd)); return a; } });
+rezept('leer', { bus: 'foley', gain: altDb(0.2, 'foley'), prio: 6, cap: 2, send: 0.1, make: (K, rnd, v) => K.burst(K.buf(0.05), rnd, { type: 'bandpass', f: 3200 * spread(v, rnd), q: 5, dur: 0.03, gain: 0.9 }) });
+rezept('wechsel', { bus: 'foley', gain: altDb(0.14, 'foley'), prio: 5, cap: 2, send: 0.1, make: (K, rnd, v) => K.burst(K.buf(0.18), rnd, { type: 'bandpass', f: 900 * spread(v, rnd), q: 0.8, dur: 0.16, gain: 0.9, attack: 0.05 }) });
+rezept('messer.schwung', {
+  bus: 'foley', gain: altDb(0.25, 'foley'), prio: 6, cap: 2, send: 0.1,
+  make(K, rnd, v) { const s = spread(v, rnd); return K.burst(K.buf(0.18), rnd, { type: 'bandpass', f: 1200 * s, f2: 3200 * s, q: 1.2, dur: 0.16, gain: 0.9, attack: 0.04 }); },
+});
+for (const [name, f, ft] of [['treffer', 2500, 1300], ['kopfschuss', 3600, 1900]]) {
+  rezept(name, {
+    bus: 'ui', gain: altDb(0.34, 'ui'), prio: 6, cap: 4,
+    make(K, rnd, v) {
+      const s = spread(v, rnd), a = K.buf(0.07);
+      K.burst(a, rnd, { type: 'bandpass', f: f * s, q: 6, dur: 0.045, gain: 1 });
+      K.tone(a, { type: 'triangle', f: ft * s, dur: 0.05, gain: 0.3 });
+      return a;
+    },
+  });
+}
+rezept('abschuss', {
+  bus: 'ui', gain: altDb(0.34, 'ui'), prio: 6, cap: 2,
+  make(K, rnd, v) {
+    const s = spread(v, rnd), a = K.buf(0.34);
+    K.tone(a, { f: 880 * s, dur: 0.12, gain: 0.28, at: 0.05 });
+    K.tone(a, { f: 1318 * s, dur: 0.2, gain: 0.26, at: 0.12 });
+    return a;
+  },
+});
+rezept('schaden', {
+  bus: 'foley', gain: altDb(0.4, 'foley'), prio: 7, cap: 2,
+  make(K, rnd, v) {
+    const s = spread(v, rnd, 0.07), a = K.buf(0.16);
+    K.burst(a, rnd, { f: 420 * s, f2: 120, dur: 0.14, gain: 1 });
+    K.tone(a, { f: 120 * s, f2: 60 * s, dur: 0.13, gain: 0.6 });
+    return a;
+  },
+});
+rezept('pfeifen', { bus: 'welt', gain: altDb(0.2, 'welt'), prio: 4, cap: 3, send: 0.2, make: (K, rnd, v) => K.burst(K.buf(0.13), rnd, { type: 'bandpass', f: 2800 * spread(v, rnd), f2: 900, q: 3, dur: 0.11, gain: 0.9, attack: 0.02 }) });
+rezept('granate.aufprall.stein', {
+  bus: 'welt', gain: altDb(0.2, 'welt'), prio: 4, cap: 3, reach: 30, send: 0.3,
+  make: (K, rnd, v) => K.tone(K.buf(0.08), { type: 'triangle', f: pick(v, rnd, 900, 1300), f2: 500, dur: 0.06, gain: 0.6 }),
+});
+rezept('granate.splint', {
+  bus: 'foley', gain: altDb(0.25, 'foley'), prio: 6, cap: 2, send: 0.1,
+  make(K, rnd, v) {
+    const s = spread(v, rnd), a = K.buf(0.28);
+    K.tone(a, { type: 'square', f: 2400 * s, f2: 1600 * s, dur: 0.03, gain: 0.3 });
+    K.burst(a, rnd, { type: 'bandpass', f: 800 * s, q: 1, dur: 0.2, gain: 0.5, at: 0.06, attack: 0.06 });
+    return a;
+  },
+});
+for (const [name, o] of Object.entries({
+  tick: { type: 'triangle', f: 1500, f2: 1100, dur: 0.03, gain: 0.25 },
+  ok: { f: 620, f2: 930, dur: 0.09, gain: 0.4 },
+  back: { f: 700, f2: 420, dur: 0.09, gain: 0.35 },
+  beep: { type: 'square', f: 880, dur: 0.09, gain: 0.14 },
+  go: { type: 'square', f: 1320, dur: 0.3, gain: 0.14 },
+})) {
+  rezept(`ui.${name}`, {
+    bus: 'ui', gain: altDb(0.22, 'ui'), prio: 5, cap: 3,
+    make(K, rnd, v) { const s = spread(v, rnd); return K.tone(K.buf(o.dur + 0.01), { ...o, f: o.f * s, f2: o.f2 ? o.f2 * s : 0 }); },
+  });
+}
+/** Kurze Tonfolgen für Ereignisse: [Frequenz, Einsatz in s] */
+const SIGNALE = {
+  win: [[392, 0], [523, 0.14], [659, 0.28], [784, 0.42], [1046, 0.62]],
+  lose: [[392, 0], [349, 0.2], [311, 0.4], [261, 0.62]],
+  level: [[523, 0], [659, 0.1], [784, 0.2], [1046, 0.32], [1318, 0.46]],
+  streak: [[659, 0], [988, 0.1]],
+  uav: [[1175, 0], [1175, 0.16], [1568, 0.32]],
+  capture: [[523, 0], [784, 0.12]],
+  lost: [[523, 0], [370, 0.14]],
+  medal: [[880, 0], [1175, 0.08]],
+};
+for (const [name, seq] of Object.entries(SIGNALE)) {
+  rezept(`signal.${name}`, {
+    bus: 'ui', gain: altDb(0.3, 'ui'), prio: 6, cap: 2,
+    make(K, rnd, v) {
+      const s = spread(v, rnd, 0.015), a = K.buf(seq[seq.length - 1][1] + 0.62);
+      seq.forEach(([f, at], i) => {
+        K.tone(a, { type: 'triangle', f: f * s, dur: i === seq.length - 1 ? 0.6 : 0.24, gain: 0.4, at, attack: 0.01 });
+        K.tone(a, { f: f * 2 * s, dur: 0.2, gain: 0.08, at, attack: 0.01 });
+      });
+      return a;
+    },
+  });
+}
+
+/** Berechnete Varianten: Name → [{ data: [Kanäle …] mit Spitze 0,9, lvl: Spitze aus make() / 0,9, ab: AudioBuffer }] */
+const BANK = new Map();
+const KF = forge();
+const KNORM = 0.9;
+/** Rechenzeit der Klangschmiede: Summe (ms), längste Scheibe (ms), Zahl der Scheiben */
+const KBAKE = { ms: 0, maxSlice: 0, slices: 0 };
+/**
+ * Eine Variante berechnen. Gleichanteil weg (nicht bei Schleifen), Spitze auf 0,9 – der Faktor lvl stellt beim Abspielen
+ * den Pegel wieder her, den make() geliefert hat. Laut wird ein Rezept also nur über gain.
+ */
+function klangMake(name, v) {
+  const R = KLANG[name], out = R.make(KF, KF.rng(klangHash(name) + v), v), ch = out instanceof Float32Array ? [out] : out.ch;
+  if (!R.loop) for (const c of ch) KF.dc(c);
+  let p = 0;
+  for (const c of ch) p = Math.max(p, KF.peak(c));
+  if (p > 0) for (const c of ch) for (let i = 0; i < c.length; i++) c[i] *= KNORM / p;
+  return { data: ch, lvl: p / KNORM, ab: null };
+}
+/** Variante holen, fehlt sie, sofort berechnen. */
+function klangGet(name, v) {
+  let list = BANK.get(name);
+  if (!list) BANK.set(name, (list = []));
+  if (!list[v]) { const t0 = performance.now(); list[v] = klangMake(name, v); KBAKE.ms += performance.now() - t0; }
+  return list[v];
+}
 
 function createSound(getVolume) {
   let out = null, noiseBuf = null, ctx = null, shots = 0, shotsAt = 0, gone = false;
@@ -6151,8 +6336,16 @@ function createApp(win) {
     cam(pose) { if (M) M.fixedCam = pose ? [...pose] : null; },
     freeze(on) { if (M) M.warm = on ? 999 : 0; },
   };
-  // Prüfhaken Klang (klang.mjs): Rechenkern der Klangschmiede
-  stage._sz.klang = { forge: (sr) => forge(sr) };
+  // Prüfhaken Klang (klang.mjs): Rechenkern, Rezepte (data: berechnete Variante, fresh: neu berechnet, meta: Rezept ohne make)
+  const klangOut = (d) => (d.data.length === 1 ? d.data[0] : { ch: d.data });
+  stage._sz.klang = {
+    forge: (sr) => forge(sr),
+    names: () => Object.keys(KLANG),
+    data: (name, v = 0) => klangOut(klangGet(name, v)),
+    fresh: (name, v = 0) => klangOut(klangMake(name, v)),
+    meta: (name) => { const { make, ...m } = KLANG[name]; return { ...m, lvl: BANK.get(name)?.map((d) => d?.lvl) || [] }; },
+    get bakeMs() { return KBAKE.ms; },
+  };
 
   return {
     onFocus: () => { if (menus.screen) menus.focus(); else if (!stage.contains(document.activeElement)) stage.focus({ preventScroll: true }); },
