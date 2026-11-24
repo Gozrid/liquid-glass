@@ -1494,6 +1494,17 @@ function createPhysics(world) {
     }
     return f;
   }
+  /** Trefferart (MAT_DEF[…].hit) der höchsten Standfläche unter dem Fußabdruck – auf dem Boden world.groundHit (für Schritte, Hülsen, Landung). */
+  function surface(x, y, z, r) {
+    let f = 0, m = -1;
+    for (let o = 0, i = 0; o < END; o += 6, i++) {
+      if (x + r > C[o] + E && x - r < C[o + 3] - E && z + r > C[o + 2] + E && z - r < C[o + 5] - E) {
+        const top = C[o + 4];
+        if (top <= y + E && top > f) { f = top; m = M[i]; }
+      }
+    }
+    return m >= 0 && MAT_DEF[m] ? MAT_DEF[m].hit : world.groundHit;
+  }
 
   function slide(e, axis, d) {
     if (!d) return;
@@ -1546,7 +1557,7 @@ function createPhysics(world) {
     e.y = ny;
   }
 
-  return { raycast, los, blocked, bodyBlocked, floorBelow, moveBody };
+  return { raycast, los, blocked, bodyBlocked, floorBelow, surface, moveBody };
 }
 
 /** Wegenetz für die Bots: ein Raster im Meterabstand, je Zelle alle Ebenen, auf denen man stehen kann. */
@@ -2197,6 +2208,90 @@ for (const [kind, fk] of [['rifle', 1], ['smg', 1.12], ['lmg', 0.85]]) {
     },
   });
 }
+// ---------- Untergrund: Schritte, Landung, Granaten-Aufprall, Hülsen (Schritt 2.3) ----------
+/** Trefferart → Untergrund der Klänge */
+const GRUND = { concrete: 'stein', metal: 'metall', wood: 'holz', sand: 'sand', cloth: 'sand' };
+const GRUENDE = ['stein', 'metall', 'holz', 'sand'];
+const STEP_LEN = { stein: 0.12, metall: 0.3, holz: 0.18, sand: 0.2 };
+/**
+ * Ein Schritt auf dem Untergrund, Spitze 1. Stein: dumpfer Tritt (Rauschen, Tiefpass 320 → 110 Hz, tau 28 ms) und nach 8 ms ein Schleifen
+ * (Bandpass 2200 Hz, tau 12 ms, −14 dB). Metall und Holz: dazu Resonanzen (Pegel 0,5 gegen den Tritt) bzw. Klopfen. Sand: sechs Körner.
+ */
+function stepLayer(K, rnd, v, grund, len = STEP_LEN[grund]) {
+  const fk = vary(v, 5, rnd, 0.08), a = K.buf(len);
+  if (grund === 'sand') {
+    const n = K.noise(K.buf(len), rnd, 'white');
+    K.bp(n, { f: 900 * fk, f2: 400 * fk, q: 0.9 });
+    const g = new Float32Array(n.length);
+    for (let i = 0; i < 6; i++) {                                    // sechs Körner von 4–9 ms über die ersten 120 ms
+      const at = 0.004 + i * 0.019 + rnd() * 0.01, d = 0.004 + rnd() * 0.005, i0 = Math.round(at * K.SR), m = Math.round(d * K.SR);
+      for (let j = 0; j < m && i0 + j < g.length; j++) g[i0 + j] += Math.sin((Math.PI * j) / m) * (0.6 + 0.4 * rnd());
+    }
+    for (let i = 0; i < n.length; i++) n[i] *= g[i] + 0.12;
+    K.decay(n, { attack: 0.012, tau: 0.06 });
+    K.mix(a, K.norm(n, 1));
+    return K.norm(K.fade(a, { outT: 0.01 }), 1);
+  }
+  const t = K.noise(K.buf(Math.min(len, 0.14)), rnd, 'white');
+  K.lp(t, { f: 320 * fk, f2: 110 * fk, q: 1 });
+  K.lp(t, { f: 600 * fk });
+  K.decay(t, { attack: 0.002, tau: 0.028 });
+  K.mix(a, K.norm(t, 1));
+  const sc = K.noise(K.buf(0.06), rnd, 'white');
+  K.bp(sc, { f: 2200 * fk, q: 1.2 });
+  K.decay(sc, { attack: 0.002, tau: 0.012 });
+  K.mix(a, K.norm(sc, 10 ** (-14 / 20)), { at: 0.008 });
+  if (grund === 'metall') K.modal(a, { at: 0.002, modes: modesOf([[210, 90, 1], [480, 60, 0.6], [1130, 40, 0.35], [2650, 20, 0.2]], 0.5, fk) });
+  if (grund === 'holz') {
+    K.modal(a, { at: 0.002, modes: modesOf([[160, 45, 1], [390, 30, 0.5]], 0.5, fk) });
+    const kn = K.noise(K.buf(0.05), rnd, 'white');
+    K.bp(kn, { f: 800 * fk, q: 2 });
+    K.decay(kn, { tau: 0.01 });
+    K.mix(a, K.norm(kn, 0.5), { at: 0.003 });
+  }
+  return K.norm(K.fade(a, { outT: len * 0.3 }), 1);
+}
+for (const grund of GRUENDE) {
+  rezept(`schritt.${grund}`, { n: 5, bus: 'welt', gain: spitze(-22, 'welt'), prio: 2, cap: 6, reach: 18, send: 0.15, make: (K, rnd, v) => stepLayer(K, rnd, v, grund) });
+  rezept(`landung.${grund}`, {
+    bus: 'foley', gain: spitze(-15, 'foley'), prio: 5, cap: 2, send: 0.1,
+    make(K, rnd, v) {
+      const len = STEP_LEN[grund] * 2, a = K.mix(K.buf(len), stepLayer(K, rnd, v, grund, len)), fk = vary(v, 3, rnd, 0.07);
+      const b = K.sine(K.buf(0.14), { f: 90 * fk, f2: 45 * fk, dur: 0.14, gain: 1 });
+      K.decay(b, { attack: 0.004, tau: 0.05 }); K.fade(b, { outT: 0.02 }); K.dc(b);
+      K.mix(a, b, { gain: 0.9 });
+      return K.norm(K.fade(a, { outT: 0.02 }), 1);
+    },
+  });
+  rezept(`granate.aufprall.${grund}`, {
+    bus: 'welt', gain: spitze(-14, 'welt'), prio: 4, cap: 3, reach: 30, send: 0.3,
+    make(K, rnd, v) {
+      const fk = vary(v, 3, rnd, 0.06), a = K.buf(0.12);
+      K.tone(a, { f: 220 * fk, f2: 140 * fk, dur: 0.03, gain: 0.8, attack: 0.001 });
+      clank(K, rnd, a, 0, [[1100, 14, 0.6], [1900, 9, 0.3]], 1, fk);
+      K.mix(a, stepLayer(K, rnd, v, grund, 0.12), { gain: 0.5 });
+      return K.norm(K.fade(a, { outT: 0.04 }), 1);
+    },
+  });
+}
+/** Hülse: drei Aufpraller bei 0, 90, 150 ms (Pegel 1, 0,5, 0,25) mit Resonanzen und Klick; Metall klingt nach, Holz ist dumpf, Sand nur ein Rauschen. */
+for (const [grund, n, len] of [['stein', 4, 0.3], ['metall', 4, 0.35], ['holz', 4, 0.25], ['sand', 3, 0.08]]) {
+  rezept(`huelse.${grund}`, {
+    n, bus: 'foley', gain: spitze(-24, 'foley'), prio: 1, cap: 4, send: 0.1,
+    make(K, rnd, v) {
+      const fk = vary(v, n, rnd, 0.07), tk = vary((v + 1) % n, n, rnd, 0.12), a = K.buf(len);
+      if (grund === 'sand') {
+        const x = K.noise(K.buf(len), rnd, 'white');
+        K.lp(x, { f: 2000 * fk }); K.decay(x, { attack: 0.002, tau: 0.02 });
+        return K.norm(K.fade(K.mix(a, x), { outT: 0.03 }), 1);
+      }
+      const g0 = grund === 'holz' ? 0.5 : 1, modes = [[4200, 30, 1], [6100, 22, 0.7], [8700, 14, 0.4], ...(grund === 'metall' ? [[1900, 60, 0.5]] : [])];
+      [[0, 1], [0.09, 0.5], [0.15, 0.25]].forEach(([at, g], i) => clank(K, rnd, a, at * tk, modes, g * g0, fk * (1 + 0.03 * i * (rnd() - 0.5))));
+      if (grund === 'holz') { const d = K.noise(K.buf(0.06), rnd, 'white'); K.bp(d, { f: 500 * fk, q: 1.5 }); K.decay(d, { tau: 0.015 }); K.mix(a, K.norm(d, 0.6)); }
+      return K.norm(K.fade(a, { outT: 0.02 }), 1);
+    },
+  });
+}
 rezept('explosion.nah', {
   bus: 'welt', gain: altDb(0.9, 'welt'), prio: 8, cap: 4, reach: 140, send: 0.9,
   make(K, rnd, v) {
@@ -2214,24 +2309,6 @@ for (const [name, fn] of Object.entries({
   holz: (K, rnd, a, v) => K.burst(a, rnd, { type: 'bandpass', f: 700 * spread(v, rnd), q: 2, dur: 0.07, gain: 0.9 }),
   koerper: (K, rnd, a, v) => K.burst(a, rnd, { f: 500 * spread(v, rnd), dur: 0.08, gain: 0.9 }),
 })) rezept(`einschlag.${name}`, { bus: 'welt', gain: altDb(0.28, 'welt'), prio: 3, cap: 6, reach: 26, send: 0.3, make(K, rnd, v) { const a = K.buf(0.09); fn(K, rnd, a, v); return a; } });
-rezept('schritt.stein', {
-  bus: 'welt', gain: altDb(0.16, 'welt'), prio: 2, cap: 6, reach: 18, send: 0.15,
-  make(K, rnd, v) {
-    const a = K.buf(0.1);
-    K.burst(a, rnd, { f: pick(v, rnd, 260, 420), f2: 110, dur: 0.09, gain: 1, rate: 0.7 });
-    K.burst(a, rnd, { type: 'bandpass', f: pick(v, rnd, 1800, 2600), q: 1.5, dur: 0.03, gain: 0.2 });
-    return a;
-  },
-});
-rezept('landung.stein', {
-  bus: 'foley', gain: altDb(0.3, 'foley'), prio: 5, cap: 2, send: 0.1,
-  make(K, rnd, v) {
-    const s = spread(v, rnd, 0.07), a = K.buf(0.18);           // dumpfer Schlag ohne Tonhöhe: weiter streuen, sonst gleichen sich die Varianten
-    K.burst(a, rnd, { f: 300 * s, f2: 80, dur: 0.16, gain: 1, rate: 0.6 });
-    K.tone(a, { f: 90 * s, f2: 45 * s, dur: 0.14, gain: 0.5 });
-    return a;
-  },
-});
 for (const [name, len, fn] of [
   ['raus', 0.07, (K, rnd, a, s) => { K.burst(a, rnd, { type: 'bandpass', f: 1900 * s, q: 3, dur: 0.05, gain: 0.9 }); K.tone(a, { type: 'square', f: 420 * s, f2: 210 * s, dur: 0.05, gain: 0.12 }); }],
   ['rein', 0.09, (K, rnd, a, s) => { K.burst(a, rnd, { type: 'bandpass', f: 1300 * s, q: 2.5, dur: 0.07, gain: 1 }); K.tone(a, { type: 'square', f: 260 * s, f2: 150 * s, dur: 0.07, gain: 0.2 }); }],
@@ -2277,10 +2354,6 @@ rezept('schaden', {
   },
 });
 rezept('pfeifen', { bus: 'welt', gain: altDb(0.2, 'welt'), prio: 4, cap: 3, send: 0.2, make: (K, rnd, v) => K.burst(K.buf(0.13), rnd, { type: 'bandpass', f: 2800 * spread(v, rnd), f2: 900, q: 3, dur: 0.11, gain: 0.9, attack: 0.02 }) });
-rezept('granate.aufprall.stein', {
-  bus: 'welt', gain: altDb(0.2, 'welt'), prio: 4, cap: 3, reach: 30, send: 0.3,
-  make: (K, rnd, v) => K.tone(K.buf(0.08), { type: 'triangle', f: pick(v, rnd, 900, 1300), f2: 500, dur: 0.06, gain: 0.6 }),
-});
 rezept('granate.splint', {
   bus: 'foley', gain: altDb(0.25, 'foley'), prio: 6, cap: 2, send: 0.1,
   make(K, rnd, v) {
@@ -2441,6 +2514,8 @@ const LIMIT = { threshold: -4, knee: 2, ratio: 20, attack: 0.002, release: 0.09 
 const LIMIT_TRIM = 10 ** (-1.94 / 20);
 const IMPACT_SND = { concrete: 'beton', metal: 'metall', wood: 'holz', body: 'koerper' };
 const RELOAD_SND = { out: 'raus', in: 'rein', shell: 'patrone', bolt: 'verschluss' };
+/** Hülsen: Zeit bis zum Aufprall (s) und Abspielrate je Waffenart */
+const HUELSE_T = { shotgun: 0.75, sniper: 0.95 }, HUELSE_RATE = { pistol: 1.15, smg: 1.08, shotgun: 0.8, sniper: 0.9, lmg: 0.92 };
 /** Automatische Waffen mit Ausklang nach einem Feuerstoß */
 const AUSKLANG = { rifle: true, smg: true, lmg: true };
 /**
@@ -2765,11 +2840,19 @@ function createSound(getPrefs) {
     },
     explosion(L, x, y, z) { play('explosion.nah', { L, x, y, z }); },
     impact(L, x, y, z, kind) { play(`einschlag.${IMPACT_SND[kind] || 'beton'}`, { L, x, y, z }); },
-    step(L, x, y, z, own, loud = 1) {
-      if (own) play('schritt.stein', { own: true, bus: 'foley', gain: loud * (0.1 / 0.16) * 10 ** ((BUSSE.welt - BUSSE.foley) / 20) });
-      else play('schritt.stein', { L, x, y, z, gain: loud });
+    /** Schritt; surf = Trefferart des Untergrunds (phys.surface). Eigene Schritte auf dem Bus foley, 4 dB leiser als fremde aus nächster Nähe. */
+    step(L, x, y, z, own, loud = 1, surf) {
+      const name = `schritt.${GRUND[surf] || 'stein'}`;
+      if (own) play(name, { own: true, bus: 'foley', gain: loud * 10 ** ((BUSSE.welt - BUSSE.foley - 4) / 20) });
+      else play(name, { L, x, y, z, gain: loud });
     },
-    land() { play('landung.stein', { own: true }); },
+    /** Landung der eigenen Figur; k = Stärke 0 … 1. */
+    land(surf, k = 1) { play(`landung.${GRUND[surf] || 'stein'}`, { own: true, gain: 0.35 + 0.65 * clamp(k, 0, 1) }); },
+    /**
+     * Hülse der eigenen Waffe fällt auf den Untergrund. when: Verzögerung (s) – ohne Angabe die Fallzeit nach Waffenart (Schrotflinte und
+     * Scharfschützengewehr werfen erst beim Repetieren aus). Phase 6 ruft es beim Aufprall der sichtbaren Hülse mit when = 0.
+     */
+    shell(surf, kind, when) { play(`huelse.${GRUND[surf] || 'stein'}`, { own: true, when: when ?? HUELSE_T[kind] ?? 0.5, rate: HUELSE_RATE[kind] || 1 }); },
     reload(part) { play(`nachladen.${RELOAD_SND[part] || 'verschluss'}`, { own: true, pan: 0.1 }); },
     dry() { play('leer', { own: true }); },
     swap() { play('wechsel', { own: true }); },
@@ -2777,7 +2860,7 @@ function createSound(getPrefs) {
     hit(head, kill) { play(head ? 'kopfschuss' : 'treffer'); if (kill) play('abschuss'); },
     hurt() { play('schaden', { own: true }); },
     whiz(pan) { play('pfeifen', { pan }); },
-    bounce(L, x, y, z) { play('granate.aufprall.stein', { L, x, y, z }); },
+    bounce(L, x, y, z, surf) { play(`granate.aufprall.${GRUND[surf] || 'stein'}`, { L, x, y, z }); },
     pin() { play('granate.splint', { own: true }); },
     ui(kind = 'tick') { play(`ui.${kind}`); },
     /** Kurze Tonfolgen für Ereignisse */
@@ -3388,6 +3471,7 @@ function createMatch(cfg, hooks) {
     fx.light(s.mx, s.my, s.mzz, 7, [2.6, 1.8, 0.8], 0.05);
     if (s.me) M.flashT = 0.04; else fx.muzzle(s.mx, s.my, s.mzz);
     S.shot(w.snd, L, s.x, s.y + 1.4, s.z, s.me, gun.mag / w.mag);
+    if (s.me) S.shell(phys.surface(s.x, s.y + 0.05, s.z, 0.4), w.snd);
     if (net) {
       const e = end.map((v) => Math.round(v * 100) / 100);
       if (client) net.send({ t: 'fire', w: gun.id, h: claims.slice(0, 8), e, k: endK }, null, true);
@@ -3465,7 +3549,7 @@ function createMatch(cfg, hooks) {
         g.x += dx * adv; g.y += dy * adv; g.z += dz * adv;
         rem -= adv / sp;
         g.vx *= ax === 0 ? -0.4 : 0.72; g.vy *= ax === 1 ? -0.36 : 0.72; g.vz *= ax === 2 ? -0.4 : 0.72;
-        if (sp > 2.5) S.bounce(L, g.x, g.y, g.z);
+        if (sp > 2.5) S.bounce(L, g.x, g.y, g.z, RAY.i === -2 ? world.groundHit : MAT_DEF[world.colMat[RAY.i]]?.hit);
         if (ax === 1 && Math.abs(g.vy) < 1.2 && Math.hypot(g.vx, g.vz) < 0.7) { g.rest = true; break; }
       }
     }
@@ -3525,12 +3609,12 @@ function createMatch(cfg, hooks) {
     }
     s.landed = 0;
     phys.moveBody(s, s.vx * dt, s.vy * dt, s.vz * dt);
-    if (s.landed > 6 && s.me) { S.land(); view.jumpY = -0.03; }
+    if (s.landed > 6 && s.me) { S.land(phys.surface(s.x, s.y + 0.05, s.z, s.r), (s.landed - 6) / 8); view.jumpY = -0.03; }
     if (s.landed > 14) damage(s, s, (s.landed - 14) * 7, { weapon: 'fall', dist: 0 });
     if (!s.alive) return;
     s.speed = Math.hypot(s.vx, s.vz);
     s.phase += s.speed * dt * 2.4;
-    if (s.ground && (s.stepAcc += s.speed * dt) > (s.sprinting ? 2.3 : 1.75)) { s.stepAcc = 0; S.step(L, s.x, s.y, s.z, s.me, s.sprinting ? 1.3 : s.crouching ? 0.35 : 1); }
+    if (s.ground && (s.stepAcc += s.speed * dt) > (s.sprinting ? 2.3 : 1.75)) { s.stepAcc = 0; S.step(L, s.x, s.y, s.z, s.me, s.sprinting ? 1.3 : s.crouching ? 0.35 : 1, phys.surface(s.x, s.y + 0.05, s.z, s.r)); }
     // Kante vor der Brust: hochziehen
     if (inp.jump && s.bump && !frozen) {
       const fx2 = s.x + sy * 0.55, fz2 = s.z - cy * 0.55, topY = phys.floorBelow(fx2, s.y + 1.75, fz2, 0.2), hh = topY - s.y;
@@ -3792,7 +3876,7 @@ function createMatch(cfg, hooks) {
     s.ground = Math.abs(s.ty - s.y) < 0.25;
     s.crouchK = approach(s.crouchK, s.crouching ? 1 : 0, dt * 7);
     s.kickAnim = damp(s.kickAnim, 0, 13, dt);
-    if (s.ground && (s.stepAcc += s.speed * dt) > (s.sprinting ? 2.3 : 1.75)) { s.stepAcc = 0; S.step(L, s.x, s.y, s.z, false, s.sprinting ? 1.3 : s.crouching ? 0.35 : 1); }
+    if (s.ground && (s.stepAcc += s.speed * dt) > (s.sprinting ? 2.3 : 1.75)) { s.stepAcc = 0; S.step(L, s.x, s.y, s.z, false, s.sprinting ? 1.3 : s.crouching ? 0.35 : 1, phys.surface(s.x, s.y + 0.05, s.z, s.r)); }
     if (!client) { s.protect -= dt; if (s.hp < 100 && M.time - s.hurtAt > 4.5) s.hp = Math.min(100, s.hp + 38 * dt); }
   }
   const r2 = (v) => Math.round(v * 100) / 100, r3 = (v) => Math.round(v * 1000) / 1000;
