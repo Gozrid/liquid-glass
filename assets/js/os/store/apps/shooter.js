@@ -2564,19 +2564,44 @@ rezept('granate.splint', {
     return K.norm(K.fade(a, { outT: 0.08 }), 1);
   },
 });
-for (const [name, o] of Object.entries({
-  tick: { type: 'triangle', f: 1500, f2: 1100, dur: 0.03, gain: 0.25 },
-  ok: { f: 620, f2: 930, dur: 0.09, gain: 0.4 },
-  back: { f: 700, f2: 420, dur: 0.09, gain: 0.35 },
-  beep: { type: 'square', f: 880, dur: 0.09, gain: 0.14 },
-  go: { type: 'square', f: 1320, dur: 0.3, gain: 0.14 },
-})) {
+// ---------- Funk-Signale (Schritt 7.3): alle Ereignistöne im selben Charakter ----------
+/**
+ * Funk: Bandpass 500 – 3000 Hz (Hoch- und Tiefpass, je 4. Ordnung), Drive 1,5, nach dem Signal (ab end s) 40 ms Rauschschwanz im selben Band.
+ * Das Feld muss mindestens end + 0,05 s lang sein. Spitze 1.
+ */
+function funk(K, rnd, a, end) {
+  K.hp(a, { f: 500 }); K.hp(a, { f: 500 }); K.lp(a, { f: 3000 }); K.lp(a, { f: 3000 });          // je zweimal: steile Flanken wie ein Funkgerät
+  K.norm(a, 1);
+  K.drive(a, 1.5);
+  const n = K.noise(K.buf(0.045), rnd, 'white');
+  K.hp(n, { f: 500 }); K.lp(n, { f: 3000 });
+  K.env(n, [[0, 0.02], [0.004, 1], [0.04, 0.05], [0.045, 0.001]]);
+  K.mix(a, K.norm(n, 0.35), { at: end });
+  return K.norm(K.fade(a, { outT: 0.004 }), 1);
+}
+/** Gleitender, abklingender Sinus (Resonanz, deren Tonhöhe von f nach f2 gleitet): ab at, Länge dur, Abklingzeit tau (s). */
+function chirp(K, a, { at = 0, f, f2 = f, dur, tau, gain = 1 }) {
+  const i0 = Math.round(at * K.SR), n = Math.min(a.length - i0, Math.round(dur * K.SR));
+  let ph = 0;
+  for (let i = 0; i < n; i++) { const t = i / K.SR; a[i0 + i] += gain * Math.sin(ph) * Math.exp(-t / tau); ph += (2 * Math.PI * f * (f2 / f) ** (t / dur)) / K.SR; }
+  return a;
+}
+/** Oberfläche: tick, ok, back als kurze Klicks mit Resonanz; beep und go als Funkton; fortschritt (Eroberung, je 10 % ein Klick). Spitze an der Summe in dBFS. */
+const FUNK_UI = {
+  tick: [-26, 0.03, (K, rnd, a, s) => { K.click(a, rnd, { dur: 0.0015, gain: 0.6 }); K.modal(a, { modes: [[1500 * s, 6, 1]] }); }],
+  ok: [-24, 0.06, (K, rnd, a, s) => { K.click(a, rnd, { dur: 0.0015, gain: 0.5 }); chirp(K, a, { f: 900 * s, f2: 1400 * s, dur: 0.05, tau: 0.018 }); }],
+  back: [-25, 0.06, (K, rnd, a, s) => { K.click(a, rnd, { dur: 0.0015, gain: 0.5 }); chirp(K, a, { f: 1400 * s, f2: 900 * s, dur: 0.05, tau: 0.018 }); }],
+  beep: [-22, 0.09, (K, rnd, a, s) => K.tone(a, { type: 'square', f: 880 * s, dur: 0.09, gain: 1, attack: 0.002 })],
+  go: [-21, 0.3, (K, rnd, a, s) => K.tone(a, { type: 'square', f: 1320 * s, dur: 0.3, gain: 1, attack: 0.002 })],
+  fortschritt: [-27, 0.03, (K, rnd, a, s) => { K.click(a, rnd, { dur: 0.001, gain: 0.3 }); K.modal(a, { modes: [[1900 * s, 5, 1], [2600 * s, 3, 0.3]] }); }],
+};
+for (const [name, [db, len, fn]] of Object.entries(FUNK_UI)) {
   rezept(`ui.${name}`, {
-    bus: 'ui', gain: altDb(0.22, 'ui'), prio: 5, cap: 3,
-    make(K, rnd, v) { const s = spread(v, rnd); return K.tone(K.buf(o.dur + 0.01), { ...o, f: o.f * s, f2: o.f2 ? o.f2 * s : 0 }); },
+    n: name === 'fortschritt' ? 2 : 3, bus: 'ui', gain: spitze(db, 'ui'), prio: 5, cap: 3,
+    make(K, rnd, v) { const a = K.buf(len + 0.05); fn(K, rnd, a, spread(v, rnd)); return funk(K, rnd, a, len); },
   });
 }
-/** Kurze Tonfolgen für Ereignisse: [Frequenz, Einsatz in s] */
+/** Kurze Tonfolgen für Ereignisse: [Frequenz, Einsatz in s] – dieselben Folgen wie bisher, im Funk-Charakter. */
 const SIGNALE = {
   win: [[392, 0], [523, 0.14], [659, 0.28], [784, 0.42], [1046, 0.62]],
   lose: [[392, 0], [349, 0.2], [311, 0.4], [261, 0.62]],
@@ -2589,15 +2614,16 @@ const SIGNALE = {
 };
 for (const [name, seq] of Object.entries(SIGNALE)) {
   rezept(`signal.${name}`, {
-    bus: 'ui', gain: altDb(0.3, 'ui'), prio: 6, cap: 2,
+    bus: 'ui', gain: spitze(-18, 'ui'), prio: 6, cap: 2,
     *make(K, rnd, v) {                                // Generator: je Ton ein Rechenschritt (die Dreiecke sind teuer)
-      const s = spread(v, rnd, 0.015), a = K.buf(seq[seq.length - 1][1] + 0.62);
+      const s = spread(v, rnd, 0.015), end = seq[seq.length - 1][1] + 0.6, a = K.buf(end + 0.05);
       for (const [i, [f, at]] of seq.entries()) {
         K.tone(a, { type: 'triangle', f: f * s, dur: i === seq.length - 1 ? 0.6 : 0.24, gain: 0.4, at, attack: 0.01 });
-        K.tone(a, { f: f * 2 * s, dur: 0.2, gain: 0.08, at, attack: 0.01 });
+        K.tone(a, { f: f * 2 * s, dur: 0.2, gain: 0.2, at, attack: 0.01 });           // die Oktave trägt den Ton durch den Funk (der Grundton liegt teils unter 500 Hz)
+        K.tone(a, { f: f * 3 * s, dur: 0.12, gain: 0.06, at, attack: 0.005 });
         yield;
       }
-      return a;
+      return funk(K, rnd, a, end);
     },
   });
 }
@@ -2887,10 +2913,10 @@ const FLACKER = { Frachthof: [34, 0], Oase: [17, -22] };
 const BRUNNEN = { Oase: [-5.5, 0.9, 0] };
 
 /** Gruppen der Rezepte (Hörprobe): Name → Gruppe; KLANG_GRUPPEN in der Reihenfolge der Anzeige. */
-const KLANG_GRUPPEN = ['Waffen', 'Mechanik', 'Hülsen', 'Schritte', 'Einschläge', 'Treffer', 'Foley', 'Explosion', 'Oberfläche', 'Funk-Signale', 'Umgebung', 'Musik', 'Zustände', 'Spaß-Paket'];
+const KLANG_GRUPPEN = ['Waffen', 'Mechanik', 'Hülsen', 'Schritte', 'Einschläge', 'Treffer', 'Foley', 'Explosion', 'Funk-Signale', 'Umgebung', 'Musik', 'Zustände', 'Spaß-Paket'];
 const klangGruppe = (n) => (/^schuss\./.test(n) ? 'Waffen' : /^(mech|ausklang)\.|^leer$/.test(n) ? 'Mechanik' : /^huelse\./.test(n) ? 'Hülsen'
   : /^(schritt|landung)\./.test(n) ? 'Schritte' : /^(einschlag\.|querschlaeger$|knall$|pfeifen$)/.test(n) ? 'Einschläge'
-    : /^(treffer|kopfschuss|abschuss|schaden)$/.test(n) ? 'Treffer' : /^(explosion|granate)\./.test(n) ? 'Explosion' : /^(ui|signal)\./.test(n) ? 'Oberfläche'
+    : /^(treffer|kopfschuss|abschuss|schaden)$/.test(n) ? 'Treffer' : /^(explosion|granate)\./.test(n) ? 'Explosion' : /^(ui|signal)\./.test(n) ? 'Funk-Signale'
       : /^(amb|quelle)\./.test(n) ? 'Umgebung' : /^musik\./.test(n) ? 'Musik' : /^zustand\./.test(n) ? 'Zustände' : /^(rutschen\.|zischen$|jet$)/.test(n) ? 'Spaß-Paket' : 'Foley');
 
 /** Berechnete Varianten: Name → [{ data: [Kanäle …] mit Spitze 0,9, lvl: Spitze aus make() / 0,9, ab: AudioBuffer }] */
@@ -3134,7 +3160,7 @@ function createSound(getPrefs) {
   /** Ortsfeste Quellen der Karte: { name, x, y, z, reach, v (laufende Stimme oder null) } – sie klingen nur in Reichweite (Schritt 7.2). */
   const srcs = [];
   const hallIn = {}, lzone = {}, zcache = new Map();
-  const burst = { kind: null, n: 0, t: 0, dt: 0 }, ladder = { n: 0, t: -9 };
+  const burst = { kind: null, n: 0, t: 0, dt: 0 }, ladder = { n: 0, t: -9 }, progStep = new WeakMap();
   let sprintN = 0;         // eigener Feuerstoß: Art, Schüsse, letzter Schuss (s), Schussabstand (s)
   const vol = () => getPrefs().volume;
   const ok = () => !gone && sfx.enabled && audioReady() && vol() > 0;
@@ -3555,8 +3581,17 @@ function createSound(getPrefs) {
     bounce(L, x, y, z, surf) { play(`granate.aufprall.${GRUND[surf] || 'stein'}`, { L, x, y, z }); },
     pin() { play('granate.splint', { own: true }); },
     ui(kind = 'tick') { play(`ui.${kind}`); },
-    /** Kurze Tonfolgen für Ereignisse */
+    /** Kurze Tonfolgen für Ereignisse (Funk-Signale) */
     jingle(kind) { play(`signal.${kind}`); },
+    /**
+     * Eroberungs-Fortschritt einer Stellung key (je Bild): p = 0 … 1, solange die eigene Seite erobert und man selbst darin steht, sonst −1.
+     * Je volle 10 % ein Funk-Klick, dessen Tonhöhe mit dem Fortschritt steigt.
+     */
+    progress(key, p) {
+      const k = p >= 0 ? Math.floor(p * 10) : -1, was = progStep.get(key) ?? -1;
+      if (k > was && k > 0) play('ui.fortschritt', { rate: 1 + 0.06 * k });
+      progStep.set(key, k);
+    },
     /** App geschlossen: nichts mehr spielen, den eigenen Ausgang abhängen (was schon klingt, klingt kurz aus). */
     dispose() {
       gone = true;
@@ -7391,6 +7426,7 @@ function createApp(win) {
       f.el.className = `szh-flag${f.owner < 0 ? '' : f.owner === me.team ? ' own' : ' foe'}${f.mine && f.owner !== me.team ? ' on' : ''}`;
       f.el.style.setProperty('--p', f.prog.toFixed(2));
       f.el.style.setProperty('--k', f.capBy === me.team ? '#4d9bff' : '#ff5a48');
+      S.progress?.(f, f.mine && f.capBy === me.team && f.owner !== me.team ? f.prog : -1);      // Funk-Klick je 10 % Eroberung
     }
     // Gesundheit, Munition
     const hp = Math.max(0, Math.ceil(me.hp));
