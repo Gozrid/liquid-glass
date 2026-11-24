@@ -3,7 +3,7 @@
 //
 // Aufbau der Datei:
 //   1 Mathematik · 2 Texturen · 3 Geometrie · 4 Renderer · 5 Welt und Karten · 6 Kollision und Wege
-//   7 Waffen und Daten · 8 Klang · 9 Spiel (Effekte, Figuren, Partie mit Bots und Abgleich im Netz)
+//   7 Waffen und Daten · 8 Klang (8a Klangschmiede: Rechenkern) · 9 Spiel (Effekte, Figuren, Partie mit Bots und Abgleich im Netz)
 //   10 Netz (Verbindung, Lobby) · 11 Menüs · 12 Oberfläche im Einsatz · 13 App
 
 import { h, clamp, lerp, TAU, ticker } from '../../../core/util.js';
@@ -1822,6 +1822,231 @@ const MODES = {
 // ==========================================================================
 // 8 · Klang: alles wird im Augenblick erzeugt (Rauschen, Filter, ein paar Schwinger)
 // ==========================================================================
+
+// --------------------------------------------------------------------------
+// 8a · Klangschmiede: Rechenkern. Reines JS auf Float32Array, mono, 48 kHz (der Browser rechnet beim Abspielen um).
+// Braucht keinen AudioContext – das Berechnen läuft also schon vor der ersten Nutzergeste.
+// Alle Funktionen arbeiten an Ort und Stelle und geben das Feld zurück. Zeiten in Sekunden; nur die Abklingzeit
+// der Resonanzen in K.modal steht in Millisekunden, so wie sie in den Tabellen des Plans geschrieben ist.
+// --------------------------------------------------------------------------
+const KSR = 48000;
+/** Grundwellen wie im OscillatorNode: Fourier-Reihe bis unter Nyquist, Spitze auf 1 normiert (Gibbs-Überschwinger eingerechnet). */
+const WAVE_K = { square: 4 / Math.PI / 1.1789, sawtooth: 2 / Math.PI / 1.1789, triangle: 8 / (Math.PI * Math.PI) };
+
+function forge(sr = KSR) {
+  const K = { SR: sr };
+  const at0 = (a, t) => Math.max(0, Math.min(a.length, Math.round((t || 0) * sr)));
+  /** Zufallszahlen 0 … 1 – dieselbe Formel wie noiseSet. */
+  K.rng = (seed) => { let s = seed >>> 0; return () => ((s = (Math.imul(s, 1664525) + 1013904223) >>> 0) / 4294967296); };
+  K.buf = (sec) => new Float32Array(Math.max(1, Math.round(sec * sr)));
+
+  /** Füllt mit Rauschen: 'white' | 'pink' (Kellet) | 'brown' (geführte Summe). */
+  K.noise = (a, rnd, color = 'white') => {
+    if (color === 'pink') {
+      let b0 = 0, b1 = 0, b2 = 0, b3 = 0, b4 = 0, b5 = 0, b6 = 0;
+      for (let i = 0; i < a.length; i++) {
+        const w = rnd() * 2 - 1;
+        b0 = 0.99886 * b0 + w * 0.0555179; b1 = 0.99332 * b1 + w * 0.0750759; b2 = 0.969 * b2 + w * 0.153852;
+        b3 = 0.8665 * b3 + w * 0.3104856; b4 = 0.55 * b4 + w * 0.5329522; b5 = -0.7616 * b5 - w * 0.016898;
+        a[i] = (b0 + b1 + b2 + b3 + b4 + b5 + b6 + w * 0.5362) * 0.11; b6 = w * 0.115926;
+      }
+    } else if (color === 'brown') {
+      let l = 0;
+      for (let i = 0; i < a.length; i++) { l = (l + 0.02 * (rnd() * 2 - 1)) / 1.02; a[i] = l * 3.5; }
+    } else for (let i = 0; i < a.length; i++) a[i] = rnd() * 2 - 1;
+    return a;
+  };
+
+  /** Frequenz zur Zeit t (ab Beginn) bei exponentiellem Gleiten von f nach f2 über dur. */
+  const glide = (f, f2, dur) => (f2 && f2 !== f && dur > 0 ? (t) => f * (f2 / f) ** Math.min(1, t / dur) : () => f);
+  /** Hüllkurve wie die alten Klänge: 0,0001 → gain in attack, dann exponentiell auf 0,0001 bei dur, danach still. */
+  function envOld(t, attack, dur, gain) {
+    if (t >= dur) return 0;
+    if (t < attack) return 0.0001 * (gain / 0.0001) ** (t / attack);
+    return gain * (0.0001 / gain) ** ((t - attack) / Math.max(1e-6, dur - attack));
+  }
+  /** Eine Periode der Grundwelle bei Phase ph (Bogenmaß), bandbegrenzt bis kmax. */
+  function wave(type, ph, kmax) {
+    if (type === 'sine' || kmax < 2) return Math.sin(ph);
+    const c2 = 2 * Math.cos(ph);
+    let s0 = 0, s1 = Math.sin(ph), sum = 0;
+    for (let k = 1; k <= kmax; k++) {
+      if (type === 'square') { if (k & 1) sum += s1 / k; }
+      else if (type === 'sawtooth') sum += (k & 1 ? s1 : -s1) / k;
+      else if (k & 1) sum += ((k & 2) ? -s1 : s1) / (k * k);         // Dreieck: (−1)^((k−1)/2) / k²
+      const s2 = c2 * s1 - s0; s0 = s1; s1 = s2;
+    }
+    return sum * WAVE_K[type];
+  }
+
+  /** Addiert einen Sinus; Frequenz gleitet exponentiell von f nach f2 (über dur). */
+  K.sine = (a, { f = 440, f2 = 0, at = 0, dur = 0, gain = 1, phase = 0 } = {}) => {
+    const i0 = at0(a, at), n = dur ? Math.min(a.length - i0, Math.round(dur * sr)) : a.length - i0, fr = glide(f, f2, dur || n / sr);
+    let ph = phase;
+    for (let i = 0; i < n; i++) { a[i0 + i] += gain * Math.sin(ph); ph += (2 * Math.PI * fr(i / sr)) / sr; }
+    return a;
+  };
+  /** Addiert Sinus/Dreieck/Rechteck/Sägezahn mit Hüllkurve wie das alte osc(). */
+  K.tone = (a, { type = 'sine', f = 440, f2 = 0, at = 0, dur = 0.1, gain = 0.3, attack = 0.003 } = {}) => {
+    const i0 = at0(a, at), n = Math.min(a.length - i0, Math.round(dur * sr)), fr = glide(f, f2, dur);
+    let ph = 0;
+    for (let i = 0; i < n; i++) {
+      const t = i / sr, fq = fr(t), e = envOld(t, attack, dur, gain);
+      a[i0 + i] += e * wave(type, ph, type === 'triangle' ? Math.min(31, Math.floor(sr * 0.45 / fq)) : Math.min(63, Math.floor(sr * 0.45 / fq)));
+      ph += (2 * Math.PI * fq) / sr;
+      if (ph > 2 * Math.PI) ph -= 2 * Math.PI;
+    }
+    return a;
+  };
+
+  /**
+   * Biquad nach RBJ (Formeln wie BiquadFilterNode) über a[i0 … i0+n), Eckfrequenz gleitet exponentiell f → f2.
+   * qlin ist die lineare Güte. Die Beiwerte werden alle 16 Abtastwerte neu berechnet.
+   */
+  function biquad(a, type, i0, n, f, f2, qlin) {
+    const fr = glide(f, f2, n / sr);
+    let x1 = 0, x2 = 0, y1 = 0, y2 = 0, b0 = 0, b1 = 0, b2 = 0, a1 = 0, a2 = 0;
+    for (let i = 0; i < n; i++) {
+      if ((i & 15) === 0) {
+        const w0 = (2 * Math.PI * Math.min(fr(i / sr), sr * 0.49)) / sr, cw = Math.cos(w0), al = Math.sin(w0) / (2 * qlin), a0 = 1 + al;
+        if (type === 'lowpass') { b0 = (1 - cw) / 2 / a0; b1 = (1 - cw) / a0; b2 = b0; }
+        else if (type === 'highpass') { b0 = (1 + cw) / 2 / a0; b1 = -(1 + cw) / a0; b2 = b0; }
+        else { b0 = al / a0; b1 = 0; b2 = -al / a0; }
+        a1 = (-2 * cw) / a0; a2 = (1 - al) / a0;
+      }
+      const x = a[i0 + i], y = b0 * x + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2;
+      x2 = x1; x1 = x; y2 = y1; y1 = y;
+      a[i0 + i] = y;
+    }
+    return a;
+  }
+  const filt = (type) => (a, { f = 1000, f2 = 0, q = Math.SQRT1_2 } = {}) => biquad(a, type, 0, a.length, f, f2, q);
+  K.lp = filt('lowpass');
+  K.hp = filt('highpass');
+  K.bp = filt('bandpass');
+
+  /**
+   * Addiert einen gefilterten Rauschstoß wie das alte burst(): Rauschen (rate < 1 macht es dunkler, wie die Abspielrate),
+   * Filter mit gleitender Eckfrequenz, dann die alte Hüllkurve. q wie im BiquadFilterNode: bei Tief- und Hochpass in dB, beim Bandpass linear.
+   */
+  K.burst = (a, rnd, { type = 'lowpass', f = 2000, f2 = 0, q = 0.7, at = 0, dur = 0.1, gain = 0.5, attack = 0.001, rate = 1 } = {}) => {
+    const i0 = at0(a, at), n = Math.min(a.length - i0, Math.round(dur * sr));
+    if (n <= 0) return a;
+    const seg = new Float32Array(n);
+    let p = 0, v0 = rnd() * 2 - 1, v1 = rnd() * 2 - 1;
+    for (let i = 0; i < n; i++) {
+      seg[i] = v0 + (v1 - v0) * p;
+      p += rate;
+      while (p >= 1) { p -= 1; v0 = v1; v1 = rnd() * 2 - 1; }
+    }
+    biquad(seg, type, 0, n, f, f2, type === 'bandpass' ? q : 10 ** (q / 20));
+    for (let i = 0; i < n; i++) a[i0 + i] += seg[i] * envOld(i / sr, attack, dur, gain);
+    return a;
+  };
+
+  /** Multipliziert mit einer Hüllkurve aus Punkten [[t, pegel], …], exponentiell dazwischen. */
+  K.env = (a, pts) => {
+    const P = pts.map(([t, v]) => [t, Math.max(1e-5, v)]);
+    let j = 0;
+    for (let i = 0; i < a.length; i++) {
+      const t = i / sr;
+      while (j < P.length - 1 && t >= P[j + 1][0]) j++;
+      let v;
+      if (t <= P[0][0]) v = P[0][1];
+      else if (j >= P.length - 1) v = P[P.length - 1][1];
+      else { const [ta, va] = P[j], [tb, vb] = P[j + 1]; v = va * (vb / va) ** ((t - ta) / Math.max(1e-9, tb - ta)); }
+      a[i] *= v;
+    }
+    return a;
+  };
+  /** Multipliziert mit exp(−t/tau) ab at (davor still), linear eingeblendet über attack. */
+  K.decay = (a, { at = 0, attack = 0, tau = 0.1 } = {}) => {
+    const i0 = at0(a, at);
+    for (let i = 0; i < i0; i++) a[i] = 0;
+    for (let i = i0; i < a.length; i++) {
+      const t = (i - i0) / sr;
+      a[i] *= (attack > 0 && t < attack ? t / attack : 1) * Math.exp(-Math.max(0, t - attack) / tau);
+    }
+    return a;
+  };
+  /** Druckstoß nach Friedlander: gain·(1 − t/T)·exp(−b·t/T) für 0 ≤ t ≤ 4T. */
+  K.friedlander = (a, { at = 0, T = 0.004, b = 1.2, gain = 1 } = {}) => {
+    const i0 = at0(a, at), n = Math.min(a.length - i0, Math.round(4 * T * sr));
+    for (let i = 0; i < n; i++) { const x = i / sr / T; a[i0 + i] += gain * (1 - x) * Math.exp(-b * x); }
+    return a;
+  };
+  /** Klick: differenzierter Rauschstoß, quadratisch abfallend. */
+  K.click = (a, rnd, { at = 0, dur = 0.002, gain = 1 } = {}) => {
+    const i0 = at0(a, at), n = Math.min(a.length - i0, Math.max(2, Math.round(dur * sr)));
+    let last = 0;
+    for (let i = 0; i < n; i++) { const w = rnd() * 2 - 1, k = 1 - i / n; a[i0 + i] += gain * 0.5 * (w - last) * k * k; last = w; }
+    return a;
+  };
+  /** Sättigung: a = tanh(a·k) / tanh(k). */
+  K.drive = (a, k = 1) => {
+    const d = Math.tanh(k);
+    for (let i = 0; i < a.length; i++) a[i] = Math.tanh(a[i] * k) / d;
+    return a;
+  };
+  /** Addiert abklingende Sinustöne: modes = [[Hz, tau in ms, Pegel], …]. */
+  K.modal = (a, { at = 0, modes = [] } = {}) => {
+    const i0 = at0(a, at);
+    for (const [f, tauMs, g] of modes) {
+      const tau = tauMs / 1000, n = Math.min(a.length - i0, Math.round(tau * 7 * sr)), w = (2 * Math.PI * f) / sr, k = Math.exp(-1 / (tau * sr));
+      let e = g;
+      for (let i = 0; i < n; i++) { a[i0 + i] += e * Math.sin(w * i); e *= k; }
+    }
+    return a;
+  };
+  /** Gezupfte Saite (Karplus-Strong): klingt mit tau (s) ab; bright 0 … 1 macht den Anschlag heller. */
+  K.pluck = (a, rnd, { at = 0, f = 220, tau = 0.5, bright = 0.5, gain = 1 } = {}) => {
+    const i0 = at0(a, at), N = Math.max(2, Math.round(sr / f)), line = new Float32Array(N), g = Math.exp(-1 / (f * tau));
+    let lp = 0;
+    for (let i = 0; i < N; i++) { lp += (rnd() * 2 - 1 - lp) * (0.15 + 0.85 * bright); line[i] = lp; }
+    for (let i = 0, p = 0; i0 + i < a.length; i++) {
+      const q = (p + 1) % N, y = line[p];
+      a[i0 + i] += gain * y;
+      line[p] = g * 0.5 * (y + line[q]);
+      p = q;
+    }
+    return a;
+  };
+  /** Kammfilter mit Rückkopplung; damp 0 … 1 macht die Wiederholungen dunkler. */
+  K.comb = (a, { delay = 0.02, fb = 0.5, damp = 0 } = {}) => {
+    const D = Math.max(1, Math.round(delay * sr));
+    let s = 0;
+    for (let i = D; i < a.length; i++) { s = (1 - damp) * a[i - D] + damp * s; a[i] += fb * s; }
+    return a;
+  };
+  /** Mischt quelle ab at in ziel. */
+  K.mix = (dst, src, { at = 0, gain = 1 } = {}) => {
+    const i0 = at0(dst, at), n = Math.min(src.length, dst.length - i0);
+    for (let i = 0; i < n; i++) dst[i0 + i] += src[i] * gain;
+    return dst;
+  };
+  /** Ein- und Ausblenden (Kosinus) an den Rändern. */
+  K.fade = (a, { inT = 0, outT = 0 } = {}) => {
+    const ni = Math.min(a.length, Math.round(inT * sr)), no = Math.min(a.length, Math.round(outT * sr));
+    for (let i = 0; i < ni; i++) a[i] *= 0.5 - 0.5 * Math.cos((Math.PI * i) / ni);
+    for (let i = 0; i < no; i++) a[a.length - 1 - i] *= 0.5 - 0.5 * Math.cos((Math.PI * i) / no);
+    return a;
+  };
+  K.peak = (a) => { let p = 0; for (let i = 0; i < a.length; i++) { const v = Math.abs(a[i]); if (v > p) p = v; } return p; };
+  K.rms = (a) => { let s = 0; for (let i = 0; i < a.length; i++) s += a[i] * a[i]; return Math.sqrt(s / (a.length || 1)); };
+  K.norm = (a, peak = 1) => { const p = K.peak(a); if (p > 0) { const k = peak / p; for (let i = 0; i < a.length; i++) a[i] *= k; } return a; };
+  /** Gleichanteil entfernen: zieht den Mittelwert mit einer Hann-Glocke gewichtet ab (die Ränder bleiben unberührt). */
+  K.dc = (a) => {
+    const n = a.length;
+    let s = 0, w = 0;
+    for (let i = 0; i < n; i++) { s += a[i]; const h = Math.sin((Math.PI * i) / n); w += h * h; }
+    if (!w) return a;
+    const c = s / w;
+    for (let i = 0; i < n; i++) { const h = Math.sin((Math.PI * i) / n); a[i] -= c * h * h; }
+    return a;
+  };
+  return K;
+}
+
 const SHOT_SND = {
   rifle: { cut: 5200, dur: 0.2, noise: 0.85, f: 170, body: 0.6, rate: 1 },
   smg: { cut: 6500, dur: 0.13, noise: 0.7, f: 230, body: 0.4, rate: 1.3 },
@@ -5926,6 +6151,8 @@ function createApp(win) {
     cam(pose) { if (M) M.fixedCam = pose ? [...pose] : null; },
     freeze(on) { if (M) M.warm = on ? 999 : 0; },
   };
+  // Prüfhaken Klang (klang.mjs): Rechenkern der Klangschmiede
+  stage._sz.klang = { forge: (sr) => forge(sr) };
 
   return {
     onFocus: () => { if (menus.screen) menus.focus(); else if (!stage.contains(document.activeElement)) stage.focus({ preventScroll: true }); },
