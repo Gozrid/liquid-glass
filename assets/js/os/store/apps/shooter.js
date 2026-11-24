@@ -360,9 +360,13 @@ const MAX_INST = 1400, MAX_QUADS = 1600;
 const K_MATTE = 0, K_CAMO = 1, K_METAL = 2, K_GLOW = 3;
 const Q_GLOW = 0, Q_SMOKE = 1, Q_BEAM = 2, Q_DECAL = 3, Q_FLASH = 4, Q_DUST = 5;
 
+// Bildkette: die Szene entsteht als linearer HDR-Wert in einem Zwischenbild; Belichtung, Tonwertkurve (ACES) und Gamma
+// kommen erst im Schlussschritt. Nur im Rückfall ohne Float-Ziele (uLdr = 1) wenden shade() und der Himmel die Kurve selbst an.
+const GLSL_ACES = `
+vec3 aces(vec3 c) { return (c * (2.51 * c + .03)) / (c * (2.43 * c + .59) + .14); }`;
 const GLSL_LIGHT = `
 uniform vec3 uCam, uSunDir, uSunCol, uSkyCol, uGndCol, uFogCol;
-uniform float uFogDen, uExposure, uShadowTexel, uShadowOn;
+uniform float uFogDen, uExposure, uShadowTexel, uShadowOn, uLdr;
 uniform mat4 uShadowMat;
 uniform highp sampler2DShadow uShadow;
 uniform vec4 uLights[${MAX_LIGHTS}];
@@ -378,11 +382,8 @@ float sunShadow(vec3 wp, vec3 n, float ndl) {
   return (texture(uShadow, c + vec3(-t, -t, 0.)) + texture(uShadow, c + vec3(t, -t, 0.))
         + texture(uShadow, c + vec3(-t, t, 0.)) + texture(uShadow, c + vec3(t, t, 0.))) * .25;
 }
-vec3 tonemap(vec3 c) {
-  c *= uExposure;
-  c = (c * (2.51 * c + .03)) / (c * (2.43 * c + .59) + .14);
-  return pow(clamp(c, 0., 1.), vec3(1. / 2.2));
-}
+${GLSL_ACES}
+vec3 tonemap(vec3 c) { return pow(clamp(aces(c * uExposure), 0., 1.), vec3(1. / 2.2)); }
 vec3 shade(vec3 albedo, vec3 n, vec3 wp, float spec, float ao, float emis) {
   float ndl = max(dot(n, uSunDir), 0.);
   float sh = ndl > 0. ? sunShadow(wp, n, ndl) : 0.;
@@ -400,7 +401,7 @@ vec3 shade(vec3 albedo, vec3 n, vec3 wp, float spec, float ao, float emis) {
   col += uSunCol * spec * sh * pow(max(dot(n, normalize(uSunDir + view / dist)), 0.), 48.);
   col = mix(col, albedo * 2.4, emis);
   col = mix(col, uFogCol, clamp(1. - exp(-dist * uFogDen), 0., 1.));
-  return tonemap(col);
+  return uLdr > .5 ? tonemap(col) : col;
 }`;
 
 const VS_WORLD = `#version 300 es
@@ -466,8 +467,9 @@ void main() { vNdc = aPos; gl_Position = vec4(aPos, 1., 1.); }`;
 const FS_SKY = `#version 300 es
 precision highp float;
 uniform vec3 uF, uR, uU, uSunDir, uSunCol, uZenith, uFogCol;
-uniform float uTime, uCloud, uExposure;
+uniform float uTime, uCloud, uExposure, uLdr;
 in vec2 vNdc; out vec4 o;
+${GLSL_ACES}
 float h2(vec2 p) { vec3 q = fract(vec3(p.xyx) * .1031); q += dot(q, q.yzx + 33.33); return fract((q.x + q.y) * q.z); }
 float vn(vec2 p) { vec2 i = floor(p), f = fract(p); f = f * f * (3. - 2. * f);
   return mix(mix(h2(i), h2(i + vec2(1, 0)), f.x), mix(h2(i + vec2(0, 1)), h2(i + vec2(1, 1)), f.x), f.y); }
@@ -484,9 +486,7 @@ void main() {
     vec3 cc = mix(uFogCol * 1.1, vec3(1.05) + uSunCol * .12 * (.4 + sd), .55 + .45 * fbm(p * 1.7 - 2.));
     col = mix(col, cc, c * smoothstep(.005, .16, d.y) * .9);
   }
-  col *= uExposure;
-  col = (col * (2.51 * col + .03)) / (col * (2.43 * col + .59) + .14);
-  o = vec4(pow(clamp(col, 0., 1.), vec3(1. / 2.2)), 1.);
+  o = vec4(uLdr > .5 ? pow(clamp(aces(col * uExposure), 0., 1.), vec3(1. / 2.2)) : col, 1.);
 }`;
 const VS_QUAD = `#version 300 es
 layout(location=0) in vec3 aPos; layout(location=1) in vec2 aUV; layout(location=2) in vec4 aCol; layout(location=3) in float aKind;
@@ -495,11 +495,18 @@ out vec2 vUV; out vec4 vCol; out float vKind;
 void main() { vUV = aUV; vCol = aCol; vKind = aKind; gl_Position = uVP * vec4(aPos, 1.); }`;
 const FS_QUAD = `#version 300 es
 precision highp float;
+uniform float uExposure, uLdr;
 in vec2 vUV; in vec4 vCol; in float vKind;
 out vec4 o;
 float h2(vec2 p) { vec3 q = fract(vec3(p.xyx) * .1031); q += dot(q, q.yzx + 33.33); return fract((q.x + q.y) * q.z); }
 float vn(vec2 p) { vec2 i = floor(p), f = fract(p); f = f * f * (3. - 2. * f);
   return mix(mix(h2(i), h2(i + vec2(1, 0)), f.x), mix(h2(i + vec2(0, 1)), h2(i + vec2(1, 1)), f.x), f.y); }
+// Die Effektfarben sind als Anzeigewerte gedacht: Umkehrung von Gamma und ACES (bei der Grundbelichtung der Karte) liefert den linearen Wert,
+// der nach dem Schlussschritt wieder so aussieht.
+vec3 lin(vec3 c) {
+  vec3 y = pow(min(c, vec3(.97)), vec3(2.2)), a = 2.51 - 2.43 * y, b = .03 - .59 * y;
+  return (sqrt(b * b + .56 * a * y) - b) / (2. * a) / uExposure;
+}
 void main() {
   vec2 p = vUV * 2. - 1.;
   float d = length(p), a = 0., add = 1.;
@@ -510,12 +517,32 @@ void main() {
   else if (vKind < 4.5) { float ang = atan(p.y, p.x); a = pow(max(0., 1. - d * (1.25 - .45 * cos(ang * 4.))), 1.6); }   // Mündungsfeuer
   else { a = smoothstep(1., .1, d) * .8; add = 0.; }                                       // Staub
   a *= vCol.a;
-  o = vec4(vCol.rgb * a, add > .5 ? 0. : a);
+  if (uLdr > .5) o = vec4(vCol.rgb * a, add > .5 ? 0. : a);
+  else o = add > .5 ? vec4(lin(vCol.rgb * a), 0.) : vec4(lin(vCol.rgb) * a, a);
+}`;
+// Bildschirmfüllendes Dreieck (Puffer des Himmels) für alle Schritte nach der Szene
+const VS_POST = `#version 300 es
+layout(location=0) in vec2 aPos;
+out vec2 vUV;
+void main() { vUV = aPos * .5 + .5; gl_Position = vec4(aPos, 0., 1.); }`;
+// Schlussschritt: HDR-Zwischenbild → Belichtung → ACES → Gamma → Bildfläche
+const FS_FINAL = `#version 300 es
+precision highp float;
+uniform sampler2D uFarbe;
+uniform float uExposure, uLdr;
+in vec2 vUV; out vec4 o;
+${GLSL_ACES}
+void main() {
+  vec3 c = texture(uFarbe, vUV).rgb;
+  if (uLdr < .5) c = pow(clamp(aces(c * uExposure), 0., 1.), vec3(1. / 2.2));
+  o = vec4(c, 1.);
 }`;
 
 function createRenderer(canvas, { shadowSize = 2048 } = {}) {
-  const gl = canvas.getContext('webgl2', { antialias: true, alpha: false, depth: true, stencil: false, powerPreference: 'high-performance' });
+  // Gezeichnet wird in eigene Zwischenbilder; die Bildfläche bekommt nur den Schlussschritt (ohne Tiefe, ohne Kantenglättung).
+  const gl = canvas.getContext('webgl2', { antialias: false, alpha: false, depth: false, stencil: false, powerPreference: 'high-performance' });
   if (!gl) return null;
+  const floatOk = !!(gl.getExtension('EXT_color_buffer_float') || gl.getExtension('EXT_color_buffer_half_float'));
 
   const shader = (type, src) => {
     const s = gl.createShader(type);
@@ -541,6 +568,7 @@ function createRenderer(canvas, { shadowSize = 2048 } = {}) {
     world: program(VS_WORLD, FS_WORLD), inst: program(VS_INST, FS_INST),
     shadow: program(VS_SHADOW, FS_EMPTY), shadowInst: program(VS_SHADOW_INST, FS_EMPTY),
     sky: program(VS_SKY, FS_SKY), quad: program(VS_QUAD, FS_QUAD),
+    final: program(VS_POST, FS_FINAL),
   };
 
   // ---------- Texturen ----------
@@ -635,6 +663,58 @@ function createRenderer(canvas, { shadowSize = 2048 } = {}) {
     gl.bindVertexArray(null);
   }
 
+  // ---------- Zwischenbilder (bei jeder Größenänderung neu) ----------
+  // Einheiten 0 und 1 gehören der Szene (Textur-Array, Schattenkarte); die Schritte danach lesen nur aus Einheit 2 und höher.
+  // So hängt nie eine Textur, die gerade gelesen wird, zugleich am gezeichneten Framebuffer.
+  let ldr = !floatOk, tW = 0, tH = 0;
+  const T = { farbe: null, tiefe: null, szene: null };
+  function texTarget(w, h, fmt, filter = gl.LINEAR) {
+    const t = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, t);
+    gl.texStorage2D(gl.TEXTURE_2D, 1, fmt, w, h);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, filter);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, filter);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    return t;
+  }
+  /** Framebuffer aus Farbe (Textur) und Tiefe (Textur); prüft die Vollständigkeit. */
+  function fboOf(color, depth) {
+    const f = gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, f);
+    if (color) gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, color, 0);
+    if (depth) gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.TEXTURE_2D, depth, 0);
+    f.ok = gl.isContextLost() || gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE;
+    return f;
+  }
+  function freeTargets() {
+    for (const k of Object.keys(T)) {
+      const o = T[k];
+      if (o instanceof WebGLTexture) gl.deleteTexture(o);
+      else if (o instanceof WebGLFramebuffer) gl.deleteFramebuffer(o);
+      T[k] = null;
+    }
+  }
+  function allocTargets(w, h) {
+    freeTargets();
+    tW = w; tH = h;
+    const fmt = ldr ? gl.RGBA8 : gl.RGBA16F;
+    T.farbe = texTarget(w, h, fmt);
+    T.tiefe = texTarget(w, h, gl.DEPTH_COMPONENT24, gl.NEAREST);
+    T.szene = fboOf(T.farbe, T.tiefe);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    if (!T.szene.ok && !ldr) { ldr = true; allocTargets(w, h); }      // Float-Ziel abgelehnt: Rückfall auf RGBA8
+  }
+  /** Ein Schritt nach der Szene: bildschirmfüllendes Dreieck in fbo (null = Bildfläche). */
+  function post(pr, fbo, w, h) {
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+    gl.viewport(0, 0, w, h);
+    gl.useProgram(pr.p);
+    gl.bindVertexArray(skyVao);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+  }
+  function bindTex(unit, t) { gl.activeTexture(gl.TEXTURE0 + unit); gl.bindTexture(gl.TEXTURE_2D, t); }
+
   let worldVao = null, worldVbo = null, worldIbo = null, worldCount = 0;
   const lightVP = mat4(), shadowMat = mat4();
   let env = null;
@@ -689,6 +769,7 @@ function createRenderer(canvas, { shadowSize = 2048 } = {}) {
     gl.uniform3fv(u.uFogCol, env.fogCol);
     gl.uniform1f(u.uFogDen, env.fogDen);
     gl.uniform1f(u.uExposure, env.exposure);
+    gl.uniform1f(u.uLdr, ldr ? 1 : 0);
     gl.uniform1f(u.uShadowTexel, 1 / shadowRes);
     gl.uniform1f(u.uShadowOn, shadowsOn ? 1 : 0);
     gl.uniformMatrix4fv(u.uShadowMat, false, shadowMat);
@@ -704,6 +785,7 @@ function createRenderer(canvas, { shadowSize = 2048 } = {}) {
   function render(f) {
     if (!worldVao || gl.isContextLost()) return;
     const cam = f.cam, W = canvas.width, H = canvas.height;
+    if (W !== tW || H !== tH) allocTargets(W, H);
     aspect = W / H;
     tanHalf = Math.tan((cam.fov * DEG) / 2);
     mPerspective(proj, cam.fov * DEG, aspect, 0.07, 500);
@@ -749,7 +831,8 @@ function createRenderer(canvas, { shadowSize = 2048 } = {}) {
       gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     }
 
-    // --- Welt ---
+    // --- Welt (ins HDR-Zwischenbild) ---
+    gl.bindFramebuffer(gl.FRAMEBUFFER, T.szene);
     gl.viewport(0, 0, W, H);
     gl.clear(gl.DEPTH_BUFFER_BIT | gl.COLOR_BUFFER_BIT);
     gl.activeTexture(gl.TEXTURE1);
@@ -782,6 +865,7 @@ function createRenderer(canvas, { shadowSize = 2048 } = {}) {
     gl.uniform1f(P.sky.u.uTime, f.time || 0);
     gl.uniform1f(P.sky.u.uCloud, env.cloud);
     gl.uniform1f(P.sky.u.uExposure, env.exposure);
+    gl.uniform1f(P.sky.u.uLdr, ldr ? 1 : 0);
     gl.depthMask(false);
     gl.bindVertexArray(skyVao);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
@@ -791,6 +875,8 @@ function createRenderer(canvas, { shadowSize = 2048 } = {}) {
     gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
     gl.disable(gl.CULL_FACE);
     gl.useProgram(P.quad.p);
+    gl.uniform1f(P.quad.u.uExposure, env.exposure);
+    gl.uniform1f(P.quad.u.uLdr, ldr ? 1 : 0);
     gl.bindVertexArray(quadVao);
     if (f.quadCount) {
       gl.uniformMatrix4fv(P.quad.u.uVP, false, vp);
@@ -820,6 +906,18 @@ function createRenderer(canvas, { shadowSize = 2048 } = {}) {
       }
     }
     gl.depthMask(true);
+
+    // --- Schluss: Belichtung, Tonwertkurve, Gamma → Bildfläche ---
+    gl.disable(gl.DEPTH_TEST);
+    gl.disable(gl.BLEND);
+    gl.disable(gl.CULL_FACE);
+    bindTex(2, T.farbe);
+    gl.useProgram(P.final.p);
+    gl.uniform1i(P.final.u.uFarbe, 2);
+    gl.uniform1f(P.final.u.uExposure, env.exposure);
+    gl.uniform1f(P.final.u.uLdr, ldr ? 1 : 0);
+    post(P.final, null, W, H);
+    gl.activeTexture(gl.TEXTURE0);
     gl.bindVertexArray(null);
   }
 
