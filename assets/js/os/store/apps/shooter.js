@@ -2327,6 +2327,7 @@ function createMatch(cfg, hooks) {
     world, phys, nav, fx, soldiers, corpses, feed, cfg, mode: cfg.mode, teams, cam, view, nades, net,
     time: 0, clock: cfg.minutes * 60, state: 'warmup', warm: 4.2, overT: 0, scores: [0, 0], winner: null, draw: false,
     flags: [], uav: [0, 0], me: null, firstBlood: false, flashT: 0, scoped: false, domT: 0, spec: null,
+    fixedCam: null,                                // Prüfhaken: feste Kamera [x, y, z, yaw, pitch, fov] (siehe _sz.probe)
   };
 
   const isEnemy = (a, b) => a !== b && (!teams || a.team !== b.team);
@@ -3182,7 +3183,10 @@ function createMatch(cfg, hooks) {
     const s = me, v = view;
     v.shake = damp(v.shake, 0, 5, dt);
     const sh = v.shake * 0.02, tt = M.time * 47;
-    if (M.spec) {                                   // Zuschauer: schräg hinter einer anderen Figur
+    if (M.fixedCam) {                               // Prüfhaken: feste Kamera, ohne Wackeln und ohne Waffe
+      const p = M.fixedCam;
+      cam.x = p[0]; cam.y = p[1]; cam.z = p[2]; cam.yaw = p[3]; cam.pitch = p[4]; cam.roll = 0; cam.fov = p[5]; M.scoped = false;
+    } else if (M.spec) {                            // Zuschauer: schräg hinter einer anderen Figur
       const o = M.spec;
       basis(o.yaw, o.pitch * 0.5);
       cam.x = o.x - B[6] * 3.2 + B[0] * 0.5; cam.y = o.y + 2 - B[7] * 3.2; cam.z = o.z - B[8] * 3.2 + B[2] * 0.5;
@@ -3238,7 +3242,7 @@ function createMatch(cfg, hooks) {
       part(I, TA, 0, 1.7, 0, 0.07, 3.4, 0.07, POLE);
       part(I, TA, 0.42, 3.05, 0, 0.78, 0.5, 0.03, col, 0, 0, Math.sin(M.time * 2 + f.x) * 0.04);
     }
-    if (M.spec) { /* keine Waffe im Bild */ } else if (me.alive && !M.scoped) drawView(V, me, cam, view, cam.fov);
+    if (M.spec || M.fixedCam) { /* keine Waffe im Bild */ } else if (me.alive && !M.scoped) drawView(V, me, cam, view, cam.fov);
     else if (me.alive) { basis(cam.yaw, cam.pitch); me.mx = cam.x + B[6] * 0.9 - B[3] * 0.08; me.my = cam.y + B[7] * 0.9 - B[4] * 0.08; me.mzz = cam.z + B[8] * 0.9 - B[5] * 0.08; }
     const quadCount = fx.build(cam, () => {
       for (const f of M.flags) {
@@ -5917,6 +5921,11 @@ function createApp(win) {
   if (matchMedia('(hover: none) and (pointer: coarse)').matches) sys.notify({ title: 'Sperrzone', body: 'Zum Spielen brauchst du Maus und Tastatur – eine Steuerung für Touch-Geräte gibt es noch nicht.', icon: 'info', app: 'shooter' });
   ticker.add(frame);
   stage._sz = { get M() { return M; }, get net() { return net; }, api, keys, press, start: startMatch };      // für Tests und zum Nachsehen in der Konsole
+  // Prüfhaken: cam([x, y, z, yaw, pitch, fov] | null) setzt oder löst die feste Kamera, freeze(true) hält die Partie im Aufwärmen
+  stage._sz.probe = {
+    cam(pose) { if (M) M.fixedCam = pose ? [...pose] : null; },
+    freeze(on) { if (M) M.warm = on ? 999 : 0; },
+  };
 
   return {
     onFocus: () => { if (menus.screen) menus.focus(); else if (!stage.contains(document.activeElement)) stage.focus({ preventScroll: true }); },
