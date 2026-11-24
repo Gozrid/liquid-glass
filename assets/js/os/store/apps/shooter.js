@@ -2956,7 +2956,7 @@ const MUZZLE = {
  */
 function createFx(prefs = null, phys = null) {
   const quads = new Float32Array(MAX_QUADS * 4 * QSTRIDE);
-  const parts = [], tracers = [], decals = [], lights = [], chunks = [];
+  const parts = [], tracers = [], decals = [], lights = [], chunks = [], blood = [];
   const counts = new Int32Array(12);                 // Vierecke je Art im letzten Bild (Prüfungen, etwa Q_BLOOD)
   let qn = 0, rx = 1, ry = 0, rz = 0, ux = 0, uy = 1, uz = 0, cx = 0, cy = 0, cz = 0;
   const seedOf = () => (Math.random() * 64) | 0;
@@ -3018,6 +3018,12 @@ function createFx(prefs = null, phys = null) {
     sand: { v: 3, s: [0.08, 0.1], life: 8, fade: 3, n: [0, 0] },
     cloth: { v: 4, s: [0.012, 0.016], life: 40, fade: 4, n: [2, 2], box: [0.004, 0.004, 0.05], col: [0.45, 0.45, 0.43, K_MATTE] },
   };
+  /** Blut nur mit Einstellung „Blut“ (prefs.blood, Vorgabe an); Flecken: höchstens FX_MAX.blood, 20 s sichtbar, dann 4 s verblassend */
+  const bloodOn = () => prefs?.blood !== false;
+  function splat(x, y, z, axis, sign, s) {
+    if (blood.length >= FX_MAX.blood) blood.shift();
+    blood.push({ x, y, z, axis, sign, s, life: 24, fade: 4, a: 0.85, k: Q_BLOOD, c: [0.25, 0.035, 0.03], seed: seedOf(), rot: rnd(TAU) });
+  }
   /** Trümmerstück: kleiner Quader mit Drall, Schwerkraft 14, ein Aufprall auf der Höhe, die beim Entstehen einmal bestimmt wird */
   function chunk(x, y, z, vx, vy, vz, box, col, life) {
     if (chunks.length >= capOf(FX_MAX.chunks)) chunks.shift();
@@ -3062,9 +3068,27 @@ function createFx(prefs = null, phys = null) {
           { life: rnd(0.3, 0.6) * big, s: rnd(0.04, 0.07) * big, grow: rnd(0.35, 0.6) * big, c: col, a: kind === 'cloth' ? 0.2 : 0.38, k: Q_DUST, drag: 3, grav: -0.3 });
       }
     },
-    /** Treffer an einer Figur */
+    /**
+     * Treffer an einer Figur, (dx, dy, dz) = Schussrichtung. Mit Blut (prefs.blood, Vorgabe an): feiner Nebel und ein Strahl nach hinten
+     * (höchstens 2,5 m) – trifft er eine Fläche, bleibt dort ein Fleck von 8–16 cm. Ohne Blut: eine helle Staubwolke.
+     */
     flesh(x, y, z, dx, dy, dz) {
-      for (let i = 0; i < 3; i++) puff(x, y, z, -dx * rnd(0.5, 1.6) + rnd(-0.7, 0.7), rnd(-0.2, 0.9), -dz * rnd(0.5, 1.6) + rnd(-0.7, 0.7), { life: rnd(0.2, 0.4), s: rnd(0.04, 0.07), grow: 0.5, c: [0.36, 0.05, 0.04], a: 0.8, k: Q_DUST, drag: 4, grav: 2 });
+      if (!bloodOn()) {
+        for (let i = 0; i < 3; i++) puff(x, y, z, -dx * rnd(0.3, 1) + rnd(-0.5, 0.5), rnd(0, 0.7), -dz * rnd(0.3, 1) + rnd(-0.5, 0.5), { life: rnd(0.25, 0.45), s: rnd(0.05, 0.08), grow: 0.5, c: [0.8, 0.78, 0.74], a: 0.35, k: Q_DUST, drag: 4, grav: -0.2 });
+        return;
+      }
+      for (let i = 0; i < 3; i++) puff(x, y, z, -dx * rnd(0.5, 1.6) + rnd(-0.7, 0.7), rnd(-0.2, 0.9), -dz * rnd(0.5, 1.6) + rnd(-0.7, 0.7), { life: rnd(0.2, 0.4), s: rnd(0.04, 0.07), grow: 0.5, c: [0.36, 0.05, 0.04], a: 0.7, k: Q_BLOOD, drag: 4, grav: 2 });
+      for (let i = 0; i < 2; i++) puff(x, y, z, dx * rnd(1, 2.5) + rnd(-0.4, 0.4), dy * rnd(1, 2.5) + rnd(0, 0.6), dz * rnd(1, 2.5) + rnd(-0.4, 0.4), { life: rnd(0.25, 0.4), s: rnd(0.03, 0.05), grow: 0.6, c: [0.34, 0.05, 0.04], a: 0.55, k: Q_BLOOD, drag: 5, grav: 3 });
+      const l = Math.hypot(dx, dy, dz) || 1, d = [dx / l, dy / l, dz / l];
+      if (phys && Number.isFinite(phys.raycast(x + d[0] * 0.05, y + d[1] * 0.05, z + d[2] * 0.05, d[0], d[1], d[2], 2.5))) {
+        const t = RAY.t + 0.05, ax = RAY.axis;
+        splat(x + d[0] * t, y + d[1] * t, z + d[2] * t, ax, d[ax] > 0 ? -1 : 1, rnd(0.07, 0.14));
+      }
+    },
+    /** Abschuss: Fleck von 25–40 cm am Boden unter der Figur (nur mit Blut) */
+    pool(x, y, z) {
+      if (!bloodOn() || !phys) return;
+      splat(x + rnd(-0.15, 0.15), phys.floorBelow(x, y + 0.3, z, 0.05), z + rnd(-0.15, 0.15), 1, 1, rnd(0.23, 0.36));
     },
     explosion(x, y, z) {
       F.light(x, y + 0.6, z, 18, [5, 3.2, 1.6], 0.4);
@@ -3141,6 +3165,7 @@ function createFx(prefs = null, phys = null) {
       }
       for (let i = tracers.length - 1; i >= 0; i--) if ((tracers[i].t += dt) > tracers[i].dur) tracers.splice(i, 1);
       for (let i = decals.length - 1; i >= 0; i--) if ((decals[i].life -= dt) <= 0) decals.splice(i, 1);
+      for (let i = blood.length - 1; i >= 0; i--) if ((blood[i].life -= dt) <= 0) blood.splice(i, 1);
       for (let i = lights.length - 1; i >= 0; i--) if ((lights[i].life -= dt) <= 0) lights.splice(i, 1);
       for (let i = chunks.length - 1; i >= 0; i--) {
         const c = chunks[i];
@@ -3159,7 +3184,7 @@ function createFx(prefs = null, phys = null) {
       qn = 0; counts.fill(0);
       basis(cam.yaw, cam.pitch, cam.roll || 0);
       rx = B[0]; ry = B[1]; rz = B[2]; ux = B[3]; uy = B[4]; uz = B[5]; cx = cam.x; cy = cam.y; cz = cam.z;
-      for (const d of decals) {
+      for (const L of [decals, blood]) for (const d of L) {
         const a = Math.min(1, d.life / (d.fade || 4)) * (d.a ?? 0.85);
         flat(d.x, d.y, d.z, d.axis, d.sign, d.s, d.c[0], d.c[1], d.c[2], a, d.k, d.seed, d.rot || 0);
       }
@@ -3207,7 +3232,7 @@ function createFx(prefs = null, phys = null) {
       }
       return qn - before;
     },
-    clear() { parts.length = 0; tracers.length = 0; decals.length = 0; lights.length = 0; chunks.length = 0; },
+    clear() { parts.length = 0; tracers.length = 0; decals.length = 0; lights.length = 0; chunks.length = 0; blood.length = 0; },
     /** Trümmerstücke: zeichnet M.frame über den Instanz-Schreiber (Quader mit Drall, werfen Schatten) */
     chunks,
     /** Zahl der Vierecke je Art im letzten Bild (Prüfungen) und der Partikel */
@@ -3556,6 +3581,7 @@ function createMatch(cfg, hooks) {
   /** Figur fällt: liegen bleiben, Meldung, Zähler (auf allen Geräten gleich) */
   function fall(v, a, weapon, head) {
     v.alive = false; v.hp = 0; v.deaths++; v.streak = 0; v.lastKiller = a; v.multi = 0;
+    fx.pool(v.x, v.y, v.z);                             // Blutfleck am Boden (nur mit Einstellung „Blut“)
     const toA = Math.sin(v.yaw) * (a.x - v.x) - Math.cos(v.yaw) * (a.z - v.z);
     corpses.push({ s: { x: v.x, y: v.y, z: v.z, yaw: v.yaw, pitch: 0, crouchK: v.crouchK, phase: v.phase, speed: 0, ground: true, sprinting: false, reloadT: 0, guns: v.guns, cur: v.cur }, t: 0, dir: toA >= 0 ? 1 : -1, pal: friendly(v) ? PAL.friend : PAL.foe });
     if (corpses.length > 14) corpses.shift();
@@ -5460,6 +5486,7 @@ function createMenus(root, api) {
   const reduced = matchMedia('(prefers-reduced-motion: reduce)');
   const snd = (kind) => { try { api.snd?.(kind); } catch { /* ohne Ton */ } };
   const DEFAULTS = { sens: 1, adsSens: 0.8, invertY: false, fov: 75, volume: 0.8, quality: 'auto', shadows: true, fps: false, toggleAds: false, toggleCrouch: true };
+  DEFAULTS.blood = true;                               // Bild: dezentes Blut bei Treffern
   const STAT_NAMES = ['Schaden', 'Feuerrate', 'Reichweite', 'Beweglichkeit'];
   const TIPS = [
     'Wer rennt, kann nicht schießen – nimm rechtzeitig Tempo heraus.',
@@ -5854,6 +5881,7 @@ function createMenus(root, api) {
           row('Sichtfeld', '', slider('Sichtfeld', 60, 100, 1, P.fov, (v) => `${Math.round(v)}°`, live('fov'))),
           row('Qualität', 'Auto passt Auflösung und Effekte an die Bildrate an', seg('Qualität', [['auto', 'Auto'], ['low', 'Niedrig'], ['medium', 'Mittel'], ['high', 'Hoch']], P.quality, live('quality'))),
           row('Schatten', '', toggle('Schatten', P.shadows, live('shadows'))),
+          row('Blut', 'Treffer zeigen dezente Blutspuren', toggle('Blut', P.blood, live('blood'))),
           row('Bildrate anzeigen', '', toggle('Bildrate anzeigen', P.fps, live('fps'))),
           row('Vollbild', 'Das Spiel füllt den ganzen Bildschirm', bFull)),
         sec('Ton',
@@ -6238,11 +6266,13 @@ function createApp(win) {
   const stored = (key) => { const v = db.get(key, {}); return v && typeof v === 'object' && !Array.isArray(v) ? v : {}; };
   const num = (v, d, lo, hi) => (typeof v === 'number' && Number.isFinite(v) ? clamp(v, lo, hi) : d);
   const PREFS = { sens: 1, adsSens: 0.8, invertY: false, fov: 75, volume: 0.8, quality: 'auto', shadows: true, fps: false, toggleAds: false, toggleCrouch: true };
+  PREFS.blood = true;                                  // Bild: dezentes Blut bei Treffern
   const prefs = { ...PREFS, ...stored('prefs') };
   prefs.sens = num(prefs.sens, PREFS.sens, 0.2, 3); prefs.adsSens = num(prefs.adsSens, PREFS.adsSens, 0.3, 1.5);
   prefs.fov = num(prefs.fov, PREFS.fov, 60, 100); prefs.volume = num(prefs.volume, PREFS.volume, 0, 1);
   if (!Object.hasOwn(SHADOW_RES, prefs.quality)) prefs.quality = PREFS.quality;
   for (const k of ['invertY', 'shadows', 'fps', 'toggleAds', 'toggleCrouch']) if (typeof prefs[k] !== 'boolean') prefs[k] = PREFS[k];
+  if (typeof prefs.blood !== 'boolean') prefs.blood = PREFS.blood;
   const profile = { xp: 0, kills: 0, deaths: 0, assists: 0, headshots: 0, matches: 0, wins: 0, bestStreak: 0, shots: 0, hits: 0, time: 0, byWeapon: {}, ...stored('profile') };
   for (const k of ['xp', 'kills', 'deaths', 'assists', 'headshots', 'matches', 'wins', 'bestStreak', 'shots', 'hits', 'time']) profile[k] = Math.round(num(profile[k], 0, 0, 1e9));
   profile.hits = Math.min(profile.hits, profile.shots);       // mehr Treffer als Schüsse kann es nicht geben
