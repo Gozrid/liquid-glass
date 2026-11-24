@@ -2220,8 +2220,9 @@ for (const [name, seq] of Object.entries(SIGNALE)) {
 const BANK = new Map();
 const KF = forge();
 const KNORM = 0.9;
-/** Rechenzeit der Klangschmiede: Summe (ms), längste Scheibe (ms), Zahl der Scheiben */
-const KBAKE = { ms: 0, maxSlice: 0, slices: 0 };
+/** Rechenzeit der Klangschmiede: Summe (ms), längste sichtbare Scheibe (ms), Zahl der Scheiben, fertig, Wanduhr von Beginn bis Ende (ms) */
+const KBAKE = { ms: 0, maxSlice: 0, slices: 0, done: false, wall: 0 };
+let bakeJob = null;
 /**
  * Eine Variante berechnen. Gleichanteil weg (nicht bei Schleifen), Spitze auf 0,9 – der Faktor lvl stellt beim Abspielen
  * den Pegel wieder her, den make() geliefert hat. Laut wird ein Rezept also nur über gain.
@@ -2233,6 +2234,49 @@ function klangMake(name, v) {
   for (const c of ch) p = Math.max(p, KF.peak(c));
   if (p > 0) for (const c of ch) for (let i = 0; i < c.length; i++) c[i] *= KNORM / p;
   return { data: ch, lvl: p / KNORM, ab: null };
+}
+/**
+ * Berechnen in Scheiben (läuft ab App-Start): höchstens 8 ms je Scheibe, dann weiter per setTimeout(0); ist die Seite verdeckt, alles am Stück
+ * (dort drosselt der Browser die Zeitgeber, und niemand sieht ein Ruckeln). Reihenfolge: Oberfläche, die eigenen Waffen (first), der Rest,
+ * zuletzt die Raumantworten für 48 kHz. Schleifen (loop) gehören nicht dazu – Umgebung und Musik werden beim Laden der Karte berechnet.
+ * onProgress(0 … 1) nach jeder Scheibe. Liefert ein Promise, das mit dem letzten Rezept erfüllt ist.
+ */
+function klangBake(first = [], onProgress = null) {
+  if (!bakeJob) {
+    const names = Object.keys(KLANG).filter((n) => !KLANG[n].loop), seen = new Set(), todo = [];
+    for (const n of [...names.filter((x) => /^(ui|signal)\./.test(x)), ...first.filter((x) => KLANG[x]), ...names]) {
+      if (seen.has(n)) continue;
+      seen.add(n);
+      for (let v = 0; v < KLANG[n].n; v++) todo.push([n, v]);
+    }
+    for (const z of ZONEN) todo.push([null, z]);
+    const job = (bakeJob = { todo, i: 0, cbs: [], t0: performance.now() });
+    job.promise = new Promise((resolve) => {
+      let est = 0;                                   // längstes Stück bisher: keins anfangen, das die Scheibe über 8 ms triebe
+      const slice = () => {
+        const t0 = performance.now(), hidden = document.hidden;
+        for (let first = true; job.i < todo.length && (hidden || first || performance.now() - t0 + est < 8); first = false) {
+          const [n, v] = todo[job.i++], a = performance.now();
+          if (n) klangGet(n, v);
+          else { raumIR(KSR, v); KBAKE.ms += performance.now() - a; }
+          est = Math.max(est, Math.min(6, performance.now() - a));
+        }
+        const dt = performance.now() - t0;
+        KBAKE.slices++;
+        if (!hidden) KBAKE.maxSlice = Math.max(KBAKE.maxSlice, dt);
+        const p = job.i / todo.length;
+        for (const cb of job.cbs) try { cb(p); } catch { /* Anzeige egal */ }
+        if (job.i < todo.length) { setTimeout(slice, 0); return; }
+        KBAKE.done = true;
+        KBAKE.wall = performance.now() - job.t0;
+        job.cbs.length = 0;
+        resolve();
+      };
+      setTimeout(slice, 0);
+    });
+  }
+  if (onProgress) { if (KBAKE.done) onProgress(1); else bakeJob.cbs.push(onProgress); }
+  return bakeJob.promise;
 }
 /** Variante holen, fehlt sie, sofort berechnen. */
 function klangGet(name, v) {
@@ -2301,7 +2345,13 @@ function raumAntwort(name, sr) {
   }
   return ch;
 }
-const raumIR = (sr) => { let m = RAUM_IR.get(sr); if (!m) RAUM_IR.set(sr, (m = Object.fromEntries(ZONEN.map((z) => [z, raumAntwort(z, sr)])))); return m; };
+/** Raumantwort einer Zone (oder ohne zone: aller Zonen) bei der Abtastrate sr, einmal berechnet. */
+function raumIR(sr, zone) {
+  let m = RAUM_IR.get(sr);
+  if (!m) RAUM_IR.set(sr, (m = {}));
+  for (const z of zone ? [zone] : ZONEN) m[z] ||= raumAntwort(z, sr);
+  return zone ? m[zone] : m;
+}
 
 /**
  * Klang des Spiels. getPrefs() liefert die Vorgaben (volume …). Alle alten Methoden (shot, explosion, …) bleiben mit ihren Signaturen
@@ -2518,6 +2568,9 @@ function createSound(getPrefs) {
     voices() { purge(performance.now()); return pool.length; },
     state(o) { Object.assign(st, o); },
     stats: () => ({ ...stat, voices: pool.length }),
+    /** Alle Rezepte in Scheiben berechnen (siehe klangBake); first: Namen, die nach der Oberfläche zuerst drankommen. */
+    bake: (onProgress, first) => klangBake(first, onProgress),
+    ready: () => KBAKE.done,
     tap: null,
     /** Summe hinter Begrenzer und Ausgleich (für Mitschnitte in Prüfungen). */
     out() { graph(); return S.tap; },
@@ -5745,6 +5798,7 @@ function createApp(win) {
     return { onClose() {} };
   }
   const S = createSound(() => prefs);
+  S.bake(null, [loadout.primary, loadout.secondary].map((id) => `schuss.${WEAPONS[id]?.snd}.ich`));      // Klänge in Scheiben berechnen, die eigenen Waffen zuerst
 
   // ---------- Zustand ----------
   let M = null, paused = false, closed = false, locked = false, menuWorld = null, menuT = Math.random() * 50;
@@ -5877,8 +5931,12 @@ function createApp(win) {
     menus.show('loading', { map: cfg.map, mode: cfg.mode });
     menus.setLoading(map.name, 0.2);
     hud.hidden = true;
-    setTimeout(() => {
+    setTimeout(function begin() {
       if (closed || seq !== startSeq) return;       // inzwischen verlassen, geschlossen oder getrennt
+      if (!S.ready()) {                              // Klänge, die noch fehlen, vorher fertig rechnen (Fortschritt im Ladebild)
+        S.bake((p) => { if (seq === startSeq) menus.setLoading('Klänge werden berechnet', 0.2 + 0.6 * p); }).then(() => { if (seq === startSeq) menus.setLoading(map.name, 0.8); setTimeout(begin, 0); });
+        return;
+      }
       starting = false;
       try {
         M = createMatch(cfg, { snd: S, emit });
@@ -6502,6 +6560,9 @@ function createApp(win) {
     fresh: (name, v = 0) => klangOut(klangMake(name, v)),
     meta: (name) => { const { make, ...m } = KLANG[name]; return { ...m, lvl: BANK.get(name)?.map((d) => d?.lvl) || [] }; },
     get bakeMs() { return KBAKE.ms; },
+    bake: () => ({ ...KBAKE }),
+    /** Alles vergessen und neu berechnen (prüft das Ladebild): löscht die berechneten Varianten, die Raumantworten bleiben. */
+    reset() { BANK.clear(); bakeJob = null; Object.assign(KBAKE, { ms: 0, maxSlice: 0, slices: 0, done: false, wall: 0 }); S.bake(); },
     voices: () => S.voices(),
     play: (name, o) => !!S.play(name, o),
     stats: () => S.stats(),
