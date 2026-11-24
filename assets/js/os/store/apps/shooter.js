@@ -548,26 +548,30 @@ vec3 shadeS(vec3 albedo, vec3 n, vec3 ng, vec3 wp, float spec, float rough, floa
   vec3 light = mix(uGndCol, uSkyCol, n.y * .5 + .5) * ao * mix(.8, 1., occ) + uSunCol * ndl * sh, gl = vec3(0.);
   float e = clamp(2. / max(rough * rough * rough * rough, 1e-4) - 2., 1., 24.);
   vec3 nb = normalize(n + ng);                     // Punktlichter glänzen auf halb geglätteter Normale (feine Kanten flimmern sonst)
+  // Waffe in der Hand (uShadowShift > 0): Licht von hinten verdeckt der eigene Körper. Ohne das spiegeln Flächen, die zum Auge zeigen
+  // (Rückseite des Gehäuses), Sonne und Lampen im Rücken in voller Stärke – die Waffe liegt fest zur Kamera, also als gleichmäßig helle Fläche.
+  float vm = uShadowShift > 0. ? .95 : 0.;
   for (int i = 0; i < ${MAX_LIGHTS}; i++) {
     float r = uLights[i].w;
     if (r <= 0.) continue;
     vec3 d = uLights[i].xyz - wp, l = normalize(d);
     float a = max(0., 1. - dot(d, d) / (r * r)), nl = max(dot(n, l), 0.);
     light += uLightCol[i] * a * a * (.3 + .7 * nl);
-    gl += uLightCol[i] * a * a * nl * pow(max(dot(nb, normalize(l + V)), 0.), e) * F0 * (e + 2.) * .125;
+    gl += uLightCol[i] * a * a * nl * pow(max(dot(nb, normalize(l + V)), 0.), e) * F0 * (e + 2.) * .125 * (1. - vm * smoothstep(0., .5, dot(l, V)));
   }
   vec3 col = albedo * light + gl * occ;
   if (ndl > 0. && sh > 0.) {
     vec3 hv = normalize(uSunDir + V);
     float r = max(rough, .3), a2 = r * r * r * r, nh = max(dot(n, hv), 0.), dd = nh * nh * (a2 - 1.) + 1., k = (r + 1.) * (r + 1.) * .125;
     float F = F0 + (1. - F0) * pow(1. - max(dot(hv, V), 0.), 5.);
-    col += uSunCol * sh * occ * min(a2 / (3.14159 * dd * dd) * F * .25 * ndl / ((ndv * (1. - k) + k) * (ndl * (1. - k) + k)), 8.);
+    col += uSunCol * sh * occ * min(a2 / (3.14159 * dd * dd) * F * .25 * ndl / ((ndv * (1. - k) + k) * (ndl * (1. - k) + k)), 8.)
+      * (1. - vm * smoothstep(0., .5, dot(uSunDir, V)));
   }
   vec3 R = reflect(-V, n);
   float Fv = F0 + (1. - F0) * pow(1. - ndv, 5.);
   float offen = (sunLit(wp + ng * .1 + R * 1.2) + sunLit(wp + ng * .1 + R * 2.4) + sunLit(wp + ng * .1 + R * 3.6)) / 3.;
   vec3 sp = mix(himmel(R), vec3(1.05) + uSunCol * .1, uWolken * smoothstep(.005, .16, R.y));   // Wolken nur als mittlere Helligkeit
-  col += sp * Fv * occ * (1. - rough) * (1. - rough) * mix(.1, 1., offen);
+  col += sp * Fv * occ * (1. - rough) * (1. - rough) * mix(.1, 1., offen) * (1. - vm * smoothstep(0., .5, dot(R, V)));
   col = mix(col, albedo * EMIS_K, emis);
   col = mix(col, nebel(-V), clamp(1. - exp(-dist * uFogDen), 0., 1.));
   return uLdr > .5 ? tonemap(col) : col;
@@ -637,7 +641,7 @@ void main() {
   if (k > .5 && k < 1.5) {                                   // Tarnstoff: grobe und feine Flecken
     float a = h3(floor(vLocal * 11.) + 3.), b = h3(floor(vLocal * 23.));
     c *= .8 + .3 * step(.5, a) + .12 * (b - .5);
-  } else if (k > 1.5 && k < 2.5) { spec = .55; c *= .9 + .2 * h3(floor(vLocal * 40.)); }
+  } else if (k > 1.5 && k < 2.5) { spec = .38; c *= .9 + .2 * h3(floor(vLocal * 40.)); }
   o = vec4(shade(c, normalize(vNor), vPos, spec, 1., k > 2.5 ? 1. : 0.), 1.);
 }`;
 const VS_SHADOW = `#version 300 es
