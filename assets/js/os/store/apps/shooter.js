@@ -359,6 +359,16 @@ const QSTRIDE = 10;      // je Effekt-Ecke: Position 3 · UV 2 · Farbe 4 · Art
 const MAX_INST = 1400, MAX_QUADS = 1600;
 const K_MATTE = 0, K_CAMO = 1, K_METAL = 2, K_GLOW = 3;
 const Q_GLOW = 0, Q_SMOKE = 1, Q_BEAM = 2, Q_DECAL = 3, Q_FLASH = 4, Q_DUST = 5;
+/**
+ * Qualitätsstufen (Vertrag V4). scale = Auflösung, msaa = 4-fach abgetastet (sonst FXAA), glow = Stufen des Glühens,
+ * ssao = Proben (0 = aus), shadowTaps = Schatten-Abtastungen, rays = Sonnenstrahlen, detail = Kantenlänge der Detail-Texturen,
+ * particles = Anteil der Partikel-Obergrenze, dust = Schwebstaub. „Auto“ beginnt wie „Mittel“ mit voller Auflösung (siehe draw in der App).
+ */
+const TIERS = {
+  low: { scale: 0.6, msaa: false, glow: 3, ssao: 0, shadowTaps: 4, rays: false, detail: 256, particles: 0.6, dust: false },
+  medium: { scale: 0.8, msaa: false, glow: 5, ssao: 6, shadowTaps: 9, rays: true, detail: 256, particles: 1, dust: true },
+  high: { scale: 1, msaa: true, glow: 5, ssao: 10, shadowTaps: 16, rays: true, detail: 512, particles: 1, dust: true },
+};
 const Q_FLAT = 0.25;     // zur Art addiert: flach auf einer Fläche (Zeichen am Boden) – harter Tiefentest wie Einschusslöcher statt weicher Kante
 
 // Bildkette: die Szene entsteht als linearer HDR-Wert in einem Zwischenbild; Belichtung, Tonwertkurve (ACES) und Gamma
@@ -553,8 +563,28 @@ void main() {
   if (uLdr < .5) c = pow(clamp(aces(c * uExposure), 0., 1.), vec3(1. / 2.2));
   o = vec4(c, 1.);
 }`;
+// Kantenglättung ohne Mehrfachabtastung (FXAA nach Lottes, schlanke Fassung): liest das fertige RGBA8-Bild, schreibt auf die Bildfläche
+const FS_FXAA = `#version 300 es
+precision highp float;
+uniform sampler2D uBild;
+uniform vec2 uPx;
+in vec2 vUV; out vec4 o;
+void main() {
+  const vec3 L = vec3(.299, .587, .114);
+  vec3 m = texture(uBild, vUV).rgb;
+  float nw = dot(texture(uBild, vUV + vec2(-1., -1.) * uPx).rgb, L), ne = dot(texture(uBild, vUV + vec2(1., -1.) * uPx).rgb, L);
+  float sw = dot(texture(uBild, vUV + vec2(-1., 1.) * uPx).rgb, L), se = dot(texture(uBild, vUV + vec2(1., 1.) * uPx).rgb, L), lm = dot(m, L);
+  float lo = min(lm, min(min(nw, ne), min(sw, se))), hi = max(lm, max(max(nw, ne), max(sw, se)));
+  vec2 dir = vec2(-((nw + ne) - (sw + se)), (nw + sw) - (ne + se));
+  float red = max((nw + ne + sw + se) * .03125, 1. / 128.);
+  dir = clamp(dir / (min(abs(dir.x), abs(dir.y)) + red), -8., 8.) * uPx;
+  vec3 a = .5 * (texture(uBild, vUV - dir / 6.).rgb + texture(uBild, vUV + dir / 6.).rgb);
+  vec3 b = a * .5 + .25 * (texture(uBild, vUV - dir * .5).rgb + texture(uBild, vUV + dir * .5).rgb);
+  float lb = dot(b, L);
+  o = vec4(lb < lo || lb > hi ? a : b, 1.);
+}`;
 
-function createRenderer(canvas, { shadowSize = 2048 } = {}) {
+function createRenderer(canvas, { shadowSize = 2048, ldr: forceLdr = false } = {}) {
   // Gezeichnet wird in eigene Zwischenbilder; die Bildfläche bekommt nur den Schlussschritt (ohne Tiefe, ohne Kantenglättung).
   const gl = canvas.getContext('webgl2', { antialias: false, alpha: false, depth: false, stencil: false, powerPreference: 'high-performance' });
   if (!gl) return null;
@@ -584,7 +614,7 @@ function createRenderer(canvas, { shadowSize = 2048 } = {}) {
     world: program(VS_WORLD, FS_WORLD), inst: program(VS_INST, FS_INST),
     shadow: program(VS_SHADOW, FS_EMPTY), shadowInst: program(VS_SHADOW_INST, FS_EMPTY),
     sky: program(VS_SKY, FS_SKY), quad: program(VS_QUAD, FS_QUAD),
-    final: program(VS_POST, FS_FINAL),
+    final: program(VS_POST, FS_FINAL), fxaa: program(VS_POST, FS_FXAA),
   };
 
   // ---------- Texturen ----------
@@ -682,8 +712,18 @@ function createRenderer(canvas, { shadowSize = 2048 } = {}) {
   // ---------- Zwischenbilder (bei jeder Größenänderung neu) ----------
   // Einheiten 0 und 1 gehören der Szene (Textur-Array, Schattenkarte); die Schritte danach lesen nur aus Einheit 2 und höher.
   // So hängt nie eine Textur, die gerade gelesen wird, zugleich am gezeichneten Framebuffer.
-  let ldr = !floatOk, tW = 0, tH = 0;
-  const T = { farbe: null, tiefe: null, szene: null, fx: null };
+  let ldr = !floatOk || forceLdr, tW = 0, tH = 0, msaa = 0;
+  let tier = { msaa: true };                     // gewünschte Merkmale der Qualitätsstufe (setTier)
+  // szene: Ziel der Szene (bei Mehrfachabtastung: ms, danach Auflösen in auf); fx: nur farbe; ldr/ldrF: fertiges Bild vor FXAA
+  const T = { farbe: null, tiefe: null, szene: null, fx: null, msFarbe: null, msTiefe: null, ms: null, ldr: null, ldrF: null };
+  const samplesOf = (fmt) => { try { return [...(gl.getInternalformatParameter(gl.RENDERBUFFER, fmt, gl.SAMPLES) || [])]; } catch { return []; } };
+  function rbTarget(w, h, fmt) {
+    const r = gl.createRenderbuffer();
+    gl.bindRenderbuffer(gl.RENDERBUFFER, r);
+    gl.renderbufferStorageMultisample(gl.RENDERBUFFER, 4, fmt, w, h);
+    gl.bindRenderbuffer(gl.RENDERBUFFER, null);
+    return r;
+  }
   function texTarget(w, h, fmt, filter = gl.LINEAR) {
     const t = gl.createTexture();
     gl.bindTexture(gl.TEXTURE_2D, t);
@@ -708,6 +748,7 @@ function createRenderer(canvas, { shadowSize = 2048 } = {}) {
       const o = T[k];
       if (o instanceof WebGLTexture) gl.deleteTexture(o);
       else if (o instanceof WebGLFramebuffer) gl.deleteFramebuffer(o);
+      else if (o instanceof WebGLRenderbuffer) gl.deleteRenderbuffer(o);
       T[k] = null;
     }
   }
@@ -720,7 +761,25 @@ function createRenderer(canvas, { shadowSize = 2048 } = {}) {
     T.szene = fboOf(T.farbe, T.tiefe);
     T.fx = fboOf(T.farbe, null);
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-    if (!T.szene.ok && !ldr) { ldr = true; allocTargets(w, h); }      // Float-Ziel abgelehnt: Rückfall auf RGBA8
+    if (!T.szene.ok && !ldr) { ldr = true; allocTargets(w, h); return; }      // Float-Ziel abgelehnt: Rückfall auf RGBA8
+    // Mehrfachabtastung nur, wenn Farbe und Tiefe 4 Abtastungen anbieten und der Framebuffer vollständig ist; sonst FXAA
+    msaa = 0;
+    if (tier.msaa && samplesOf(fmt).includes(4) && samplesOf(gl.DEPTH_COMPONENT24).includes(4)) {
+      T.msFarbe = rbTarget(w, h, fmt);
+      T.msTiefe = rbTarget(w, h, gl.DEPTH_COMPONENT24);
+      T.ms = gl.createFramebuffer();
+      gl.bindFramebuffer(gl.FRAMEBUFFER, T.ms);
+      gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.RENDERBUFFER, T.msFarbe);
+      gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, T.msTiefe);
+      if (gl.isContextLost() || gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE) msaa = 4;
+      else { gl.deleteFramebuffer(T.ms); gl.deleteRenderbuffer(T.msFarbe); gl.deleteRenderbuffer(T.msTiefe); T.ms = T.msFarbe = T.msTiefe = null; }
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    }
+    if (!msaa) {
+      T.ldr = texTarget(w, h, gl.RGBA8);
+      T.ldrF = fboOf(T.ldr, null);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    }
   }
   /** Ein Schritt nach der Szene: bildschirmfüllendes Dreieck in fbo (null = Bildfläche). */
   function post(pr, fbo, w, h) {
@@ -773,7 +832,7 @@ function createRenderer(canvas, { shadowSize = 2048 } = {}) {
 
   const proj = mat4(), view = mat4(), vp = mat4(), vmProj = mat4(), vmVP = mat4();
   const lightPos = new Float32Array(MAX_LIGHTS * 4), lightCol = new Float32Array(MAX_LIGHTS * 3);
-  let shadowsOn = true, tanHalf = 1, aspect = 1;
+  let shadowsOn = true, tanHalf = 1, aspect = 1, drawMs = 0;
 
   function useLit(pr, cam) {
     const u = pr.u;
@@ -801,6 +860,11 @@ function createRenderer(canvas, { shadowSize = 2048 } = {}) {
    */
   function render(f) {
     if (!worldVao || gl.isContextLost()) return;
+    const t0 = performance.now();
+    draw(f);
+    drawMs += (performance.now() - t0 - drawMs) * 0.1;      // Zeit auf der CPU, geglättet (für _sz.bild.stats)
+  }
+  function draw(f) {
     const cam = f.cam, W = canvas.width, H = canvas.height;
     if (W !== tW || H !== tH) allocTargets(W, H);
     aspect = W / H;
@@ -851,7 +915,7 @@ function createRenderer(canvas, { shadowSize = 2048 } = {}) {
     }
 
     // --- Welt (ins HDR-Zwischenbild): Welt, Figuren und Himmel im Tiefenbereich 0,1…1 ---
-    gl.bindFramebuffer(gl.FRAMEBUFFER, T.szene);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, msaa ? T.ms : T.szene);
     gl.viewport(0, 0, W, H);
     gl.clear(gl.DEPTH_BUFFER_BIT | gl.COLOR_BUFFER_BIT);
     gl.depthRange(0.1, 1);
@@ -903,6 +967,15 @@ function createRenderer(canvas, { shadowSize = 2048 } = {}) {
       gl.depthRange(0.1, 1);
     }
 
+    // --- Auflösen: mehrfach abgetastete Farbe und Tiefe → texFarbe, texTiefe ---
+    if (msaa) {
+      gl.bindFramebuffer(gl.READ_FRAMEBUFFER, T.ms);
+      gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, T.szene);
+      gl.blitFramebuffer(0, 0, W, H, 0, 0, W, H, gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT, gl.NEAREST);
+      gl.bindFramebuffer(gl.READ_FRAMEBUFFER, null);
+      gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, null);
+    }
+
     // --- Durchsichtiges: fboFx (nur Farbe), Tiefentest und weiche Kanten im Shader gegen texTiefe ---
     gl.bindFramebuffer(gl.FRAMEBUFFER, T.fx);
     gl.disable(gl.DEPTH_TEST);
@@ -938,7 +1011,14 @@ function createRenderer(canvas, { shadowSize = 2048 } = {}) {
     gl.uniform1i(P.final.u.uFarbe, 2);
     gl.uniform1f(P.final.u.uExposure, env.exposure);
     gl.uniform1f(P.final.u.uLdr, ldr ? 1 : 0);
-    post(P.final, null, W, H);
+    post(P.final, msaa ? null : T.ldrF, W, H);
+    if (!msaa) {                                 // ohne Mehrfachabtastung: FXAA auf dem fertigen Bild
+      bindTex(2, T.ldr);
+      gl.useProgram(P.fxaa.p);
+      gl.uniform1i(P.fxaa.u.uBild, 2);
+      gl.uniform2f(P.fxaa.u.uPx, 1 / W, 1 / H);
+      post(P.fxaa, null, W, H);
+    }
     gl.activeTexture(gl.TEXTURE0);
     gl.bindVertexArray(null);
   }
@@ -961,6 +1041,11 @@ function createRenderer(canvas, { shadowSize = 2048 } = {}) {
   return {
     gl, render, setWorld, project, resize,
     setShadowSize(size) { if (Math.min(size, maxShadow) !== shadowRes) allocShadow(size); },
+    /** Merkmale der Qualitätsstufe (siehe TIERS); Zwischenbilder entstehen beim nächsten Bild neu, wenn sich etwas ändert. */
+    setTier(t) { if (!!t.msaa !== !!tier.msaa) tW = 0; tier = { ...t }; },
+    /** Rückfall ohne Float-Ziele erzwingen (Prüfhaken); ohne Float-Unterstützung bleibt er immer an. */
+    setLdr(on) { const v = !!on || !floatOk; if (v !== ldr) { ldr = v; tW = 0; } },
+    stats: () => ({ hdr: !ldr, msaa, fxaa: !msaa, floatOk, drawMs: Math.round(drawMs * 100) / 100, w: tW, h: tH }),
     dispose() { gl.getExtension('WEBGL_lose_context')?.loseContext(); },
   };
 }
@@ -5303,6 +5388,7 @@ function createApp(win) {
   let M = null, paused = false, closed = false, locked = false, menuWorld = null, menuT = Math.random() * 50;
   let net = null, lobbyOff = null, starting = false, startSeq = 0, startNet = false;
   const netQueue = [];            // Nachrichten, die eintreffen, während die Karte noch gebaut wird
+  let forceLdr = false;           // Rückfall ohne Float-Ziele erzwungen (_sz.bild.ldr)
   let scale = 1, slow = 0, fast = 0, fpsAcc = 0, fpsN = 0, endTimer = 0, faults = 0, wheelAt = 0, lostEl = null, bg = null, simAt = performance.now();
   let hitT = 0, hitKill = false, hitHead = false, hurtK = 0, lastWarm = 9, boardT = 0, hudT = 0, crouchOn = false, adsOn = false, radarMap = null;
   const arcs = [], keys = new Set(), P3 = [0, 0, 0];
@@ -5310,6 +5396,7 @@ function createApp(win) {
 
   function applyPrefs() {
     R.setShadowSize(SHADOW_RES[prefs.quality] || 2048);
+    R.setTier(TIERS[prefs.quality] || TIERS.medium);
     if (prefs.quality !== 'auto') scale = SCALES[prefs.quality];
     fpsEl.hidden = !prefs.fps;
     size();
@@ -5944,7 +6031,7 @@ function createApp(win) {
   gl.addEventListener('webglcontextrestored', () => {
     if (closed) return;
     let fresh = null;
-    try { fresh = createRenderer(gl); } catch (err) { console.error(err); }
+    try { fresh = createRenderer(gl, { ldr: forceLdr }); } catch (err) { console.error(err); }
     if (!fresh) { lostNote('Die Grafik ließ sich nicht wiederherstellen', 'Bitte schließe Sperrzone und öffne es erneut.'); return; }
     R = fresh;
     lostEl?.remove(); lostEl = null;
@@ -6045,6 +6132,12 @@ function createApp(win) {
   stage._sz.probe = {
     cam(pose) { if (M) M.fixedCam = pose ? [...pose] : null; },
     freeze(on) { if (M) M.warm = on ? 999 : 0; },
+  };
+  // Prüfhaken Bild: tier('high'|'medium'|'low'|'auto') stellt die Qualität (ohne zu speichern), ldr(true) erzwingt den Rückfall ohne Float-Ziele
+  stage._sz.bild = {
+    tier(name) { if (Object.hasOwn(SHADOW_RES, name)) { prefs.quality = name; applyPrefs(); } },
+    ldr(on) { forceLdr = !!on; R.setLdr(forceLdr); },
+    stats: () => ({ tier: prefs.quality, scale, ...R.stats() }),
   };
 
   return {
