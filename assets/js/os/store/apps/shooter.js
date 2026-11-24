@@ -2326,13 +2326,25 @@ function createSound(getPrefs) {
     return true;
   }
 
-  // ---------- Entfernung ----------
-  /** Lage einer Quelle vom Hörer aus: Pegel und Stereo (wie bisher) – oder null, wenn außer Hörweite. */
-  function place(L, x, y, z, reach) {
-    const dx = x - L.x, dz = z - L.z, d = Math.hypot(dx, y - L.y, dz);
+  // ---------- Entfernung und Verdeckung ----------
+  /** Freie Sicht vom Auge des Hörers zur Quelle (RAY bleibt unberührt: das Spiel liest ihn nach eigenen Strahlen). */
+  function sight(L, x, y, z) {
+    const t = RAY.t, i = RAY.i, ax = RAY.axis, r = phys.los(L.x, L.y, L.z, x, y + 0.15, z);
+    RAY.t = t; RAY.i = i; RAY.axis = ax;
+    return r;
+  }
+  /** Lage einer Quelle vom Hörer aus: Pegel, Tiefpass, Laufzeit, Stereo – oder null, wenn außer Hörweite. */
+  function place(L, x, y, z, reach, free) {
+    const dx = x - L.x, dz = z - L.z, d = Math.hypot(dx, y - L.y, dz), dh = Math.hypot(dx, dz);
     if (d > reach) return null;
+    let vol = (1 - (0.4 * d) / reach) / (1 + (d / (0.16 * reach)) ** 2);
+    let fc = Math.max(700, 18000 * Math.exp(-d / (0.35 * reach)));
     const side = d < 0.5 ? 0 : (dx * Math.cos(L.yaw) + dz * Math.sin(L.yaw)) / d;
-    return { d, vol: (1 - (0.4 * d) / reach) / (1 + (d / (0.16 * reach)) ** 2), fc: 0, pan: side * 0.85, delay: 0 };
+    const back = dh < 0.5 ? 0 : clamp(-(dx * Math.sin(L.yaw) - dz * Math.cos(L.yaw)) / dh, 0, 1);
+    vol *= 10 ** ((-1.5 * back) / 20);
+    fc *= 1 - 0.3 * back;
+    if (phys && !free && !sight(L, x, y, z)) { fc = Math.max(500, fc * 0.25); vol *= 0.5; }
+    return { d, vol, fc, pan: side * 0.85, delay: Math.min(d / 343, 0.35) };
   }
 
   /**
@@ -2364,7 +2376,8 @@ function createSound(getPrefs) {
     src.loop = R.loop;
     const rate = o.rate || 1;
     src.playbackRate.value = rate;
-    const head = src;
+    let head = src;
+    if (pl) { const lp = ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = pl.fc; lp.Q.value = -3; src.connect(lp); head = lp; nodes.push(lp); }
     head.connect(g);
     const vol = 10 ** (R.gain / 20) * B.lvl * (o.gain ?? 1) * (pl ? pl.vol : 1);
     g.gain.value = vol;
@@ -2385,6 +2398,7 @@ function createSound(getPrefs) {
   const S = {
     play,
     setWorld(p) { phys = p || null; },
+    /** Einmal je Bild (am Ende von M.aim): Hörer merken, Lautstärke nachführen. */
     listen(L) { LL = L; if (ctx && sum.gain.value !== vol()) sum.gain.setTargetAtTime(vol(), ctx.currentTime, 0.02); },
     voices() { purge(performance.now()); return pool.length; },
     state(o) { Object.assign(st, o); },
@@ -2747,6 +2761,7 @@ const navCache = new WeakMap();        // Karte → Wegenetz: hängt nur von der
 
 function createMatch(cfg, hooks) {
   const world = buildWorld(cfg.map), phys = createPhysics(world);
+  hooks.snd.setWorld?.(phys, world);               // Klang: Verdeckung und Raumzonen brauchen die Welt
   // Netz: null (allein), sonst { role: 'host' | 'client', id, send(msg, to, reliable) }. Der Gastgeber rechnet die Partie samt Bots;
   // Mitspieler bewegen nur die eigene Figur und melden Treffer – alles andere kommt als Zustand vom Gastgeber.
   const net = cfg.net || null, client = net?.role === 'client', hosting = net?.role === 'host';
@@ -3657,6 +3672,7 @@ function createMatch(cfg, hooks) {
       M.scoped = false;
     }
     L.x = cam.x; L.y = cam.y; L.z = cam.z; L.yaw = cam.yaw;
+    S.listen?.(L, dt);
   };
 
   const FLAG_COL = { n: [0.85, 0.85, 0.85, K_MATTE], f: [0.1, 0.42, 1, K_GLOW], e: [1, 0.12, 0.06, K_GLOW] };
