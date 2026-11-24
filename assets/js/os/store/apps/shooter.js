@@ -2366,6 +2366,35 @@ rezept('knall', {
     return K.norm(K.fade(a, { outT: 0.015 }), 1);
   },
 });
+// ---------- Treffer-Rückmeldung und eigener Schaden (Schritt 2.5) ----------
+rezept('treffer', {
+  n: 2, bus: 'ui', gain: spitze(-17, 'ui'), prio: 6, cap: 4,
+  make(K, rnd, v) { const a = K.buf(0.05); clank(K, rnd, a, 0, [[2500, 9, 1], [3900, 6, 0.5]], 1, v ? 1.06 : 0.96); return K.norm(K.fade(a, { outT: 0.015 }), 1); },
+});
+rezept('kopfschuss', {
+  n: 2, bus: 'ui', gain: spitze(-14, 'ui'), prio: 6, cap: 3,
+  make(K, rnd, v) { const a = K.buf(0.12); clank(K, rnd, a, 0, [[3600, 28, 1], [5450, 18, 0.6], [7900, 10, 0.35]], 1, v ? 1.05 : 0.96); return K.norm(K.fade(a, { outT: 0.035 }), 1); },
+});
+rezept('abschuss', {
+  n: 2, bus: 'ui', gain: spitze(-13, 'ui'), prio: 6, cap: 2,
+  make(K, rnd, v) {
+    const fk = v ? 1.06 : 0.95, a = K.buf(0.22), b = K.sine(K.buf(0.09), { f: 160 * fk, f2: 70 * fk, dur: 0.09, gain: 1 });
+    K.decay(b, { attack: 0.002, tau: 0.035 }); K.fade(b, { outT: 0.01 }); K.drive(b, 2); K.dc(b);
+    K.mix(a, b, { gain: 0.9 });
+    K.modal(a, { at: 0.004, modes: modesOf([[880, 60, 0.5], [1320, 80, 0.45]], 1, fk) });
+    return K.norm(K.fade(a, { outT: 0.02 }), 1);
+  },
+});
+rezept('schaden', {
+  bus: 'foley', gain: spitze(-11, 'foley'), prio: 7, cap: 2,
+  make(K, rnd, v) {
+    const fk = vary(v, 3, rnd, 0.1), a = K.mix(K.buf(0.16), noiseHit(K, rnd, 0.16, { lp: 420 * fk, lp2: 120 * fk, tau: 0.045 }), { gain: 0.8 });
+    const b = K.sine(K.buf(0.13), { f: 120 * fk, f2: 60 * fk, dur: 0.13, gain: 1 });
+    K.decay(b, { attack: 0.003, tau: 0.05 }); K.fade(b, { outT: 0.015 }); K.dc(b);
+    K.mix(a, b, { gain: 0.8 });
+    return K.norm(K.fade(a, { outT: 0.015 }), 1);
+  },
+});
 rezept('explosion.nah', {
   bus: 'welt', gain: altDb(0.9, 'welt'), prio: 8, cap: 4, reach: 140, send: 0.9,
   make(K, rnd, v) {
@@ -2391,35 +2420,6 @@ rezept('wechsel', { bus: 'foley', gain: altDb(0.14, 'foley'), prio: 5, cap: 2, s
 rezept('messer.schwung', {
   bus: 'foley', gain: altDb(0.25, 'foley'), prio: 6, cap: 2, send: 0.1,
   make(K, rnd, v) { const s = spread(v, rnd); return K.burst(K.buf(0.18), rnd, { type: 'bandpass', f: 1200 * s, f2: 3200 * s, q: 1.2, dur: 0.16, gain: 0.9, attack: 0.04 }); },
-});
-for (const [name, f, ft] of [['treffer', 2500, 1300], ['kopfschuss', 3600, 1900]]) {
-  rezept(name, {
-    bus: 'ui', gain: altDb(0.34, 'ui'), prio: 6, cap: 4,
-    make(K, rnd, v) {
-      const s = spread(v, rnd), a = K.buf(0.07);
-      K.burst(a, rnd, { type: 'bandpass', f: f * s, q: 6, dur: 0.045, gain: 1 });
-      K.tone(a, { type: 'triangle', f: ft * s, dur: 0.05, gain: 0.3 });
-      return a;
-    },
-  });
-}
-rezept('abschuss', {
-  bus: 'ui', gain: altDb(0.34, 'ui'), prio: 6, cap: 2,
-  make(K, rnd, v) {
-    const s = spread(v, rnd), a = K.buf(0.34);
-    K.tone(a, { f: 880 * s, dur: 0.12, gain: 0.28, at: 0.05 });
-    K.tone(a, { f: 1318 * s, dur: 0.2, gain: 0.26, at: 0.12 });
-    return a;
-  },
-});
-rezept('schaden', {
-  bus: 'foley', gain: altDb(0.4, 'foley'), prio: 7, cap: 2,
-  make(K, rnd, v) {
-    const s = spread(v, rnd, 0.07), a = K.buf(0.16);
-    K.burst(a, rnd, { f: 420 * s, f2: 120, dur: 0.14, gain: 1 });
-    K.tone(a, { f: 120 * s, f2: 60 * s, dur: 0.13, gain: 0.6 });
-    return a;
-  },
 });
 rezept('pfeifen', {
   bus: 'welt', gain: spitze(-20, 'welt'), prio: 4, cap: 3, send: 0.2,
@@ -2657,7 +2657,7 @@ function createSound(getPrefs) {
   let lsend = null, zoneL = 'hof', shown = 'hof', zoneT = 0, forced = null, shownVol = -1;
   const bus = {}, pool = [], last = {}, stat = { plays: 0, steals: 0, drops: 0, max: 0, by: {} }, st = { hp: 100, boom: 0 };
   const hallIn = {}, lzone = {}, zcache = new Map();
-  const burst = { kind: null, n: 0, t: 0, dt: 0 };         // eigener Feuerstoß: Art, Schüsse, letzter Schuss (s), Schussabstand (s)
+  const burst = { kind: null, n: 0, t: 0, dt: 0 }, ladder = { n: 0, t: -9 };         // eigener Feuerstoß: Art, Schüsse, letzter Schuss (s), Schussabstand (s)
   const vol = () => getPrefs().volume;
   const ok = () => !gone && sfx.enabled && audioReady() && vol() > 0;
 
@@ -2938,7 +2938,14 @@ function createSound(getPrefs) {
     dry() { play('leer', { own: true }); },
     swap() { play('wechsel', { own: true }); },
     swing() { play('messer.schwung', { own: true }); },
-    hit(head, kill) { play(head ? 'kopfschuss' : 'treffer'); if (kill) play('abschuss'); },
+    /** Treffer-Bestätigung. Leiter: jeder weitere Treffer binnen 0,4 s hebt die Tonhöhe um 6 %, höchstens fünfmal. */
+    hit(head, kill) {
+      const now = performance.now() / 1000;
+      ladder.n = now - ladder.t < 0.4 ? Math.min(5, ladder.n + 1) : 0;
+      ladder.t = now;
+      play(head ? 'kopfschuss' : 'treffer', { rate: 1.06 ** ladder.n });
+      if (kill) play('abschuss');
+    },
     hurt() { play('schaden', { own: true }); },
     /** Kugel knapp am Kopf vorbei: pan −1 … 1; kind = Waffenart des Schützen (Überschall knallt, 20 ms später das Pfeifen). */
     whiz(pan, kind) {
