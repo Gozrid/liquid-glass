@@ -2292,6 +2292,80 @@ for (const [grund, n, len] of [['stein', 4, 0.3], ['metall', 4, 0.35], ['holz', 
     },
   });
 }
+// ---------- Einschläge, Querschläger, Überschallknall und Pfeifen (Schritt 2.4) ----------
+/** Körner: n kurze Bandpass-Rauschstöße (Mitte f0 … f1, Länge d0 … d1 s) zwischen t0 und t1, Pegel g. dens: Dichte fällt mit der Zeit (Exponent). */
+function grains(K, rnd, a, { n, t0, t1, f0, f1, d0, d1, g, dens = 1 }) {
+  for (let i = 0; i < n; i++) {
+    const at = t0 + (t1 - t0) * rnd() ** dens, d = d0 + (d1 - d0) * rnd(), x = K.noise(K.buf(d), rnd, 'white');
+    K.bp(x, { f: f0 * (f1 / f0) ** rnd(), q: 2.5 });
+    K.fade(x, { inT: d * 0.2, outT: d * 0.6 });
+    K.mix(a, K.norm(x, g * (0.5 + 0.5 * rnd()) * (1 - 0.7 * ((at - t0) / Math.max(1e-3, t1 - t0)))), { at });
+  }
+  return a;
+}
+/** Rauschen mit Filter und Abklingen als eigene Schicht, auf Spitze 1 gebracht. */
+function noiseHit(K, rnd, len, { lp, lp2 = 0, bp, q = 1, hp, attack = 0.001, tau, color = 'white' }) {
+  const x = K.noise(K.buf(len), rnd, color);
+  if (hp) K.hp(x, { f: hp });
+  if (bp) K.bp(x, { f: bp, q });
+  if (lp) K.lp(x, { f: lp, f2: lp2 });
+  K.decay(x, { attack, tau });
+  return K.norm(x, 1);
+}
+const EINSCHLAG = {
+  beton: [4, 0.2, (K, rnd, a, fk) => {
+    K.click(a, rnd, { dur: 0.0015, gain: 0.8 });
+    K.mix(a, noiseHit(K, rnd, 0.12, { bp: 1800 * fk, q: 1.2, tau: 0.018 }), { gain: 0.8 });
+    grains(K, rnd, a, { n: 5, t0: 0.02, t1: 0.14, f0: 3000, f1: 6000, d0: 0.003, d1: 0.003, g: 10 ** (-12 / 20) });
+  }],
+  metall: [4, 0.25, (K, rnd, a, fk, v) => {
+    const f = pick(v, rnd, 1500, 2600);
+    K.click(a, rnd, { dur: 0.0012, gain: 0.7 });
+    K.modal(a, { modes: [[f, 45, 1], [1.47 * f, 30, 0.6], [2.09 * f, 20, 0.4], [2.93 * f, 12, 0.25]] });
+  }],
+  holz: [4, 0.15, (K, rnd, a, fk) => {
+    K.modal(a, { modes: modesOf([[420, 30, 1], [760, 18, 0.6]], 0.7, fk) });
+    K.mix(a, noiseHit(K, rnd, 0.06, { bp: 1200 * fk, q: 1.5, tau: 0.01 }), { gain: 0.9 });
+    grains(K, rnd, a, { n: 4, t0: 0.01, t1: 0.09, f0: 1500, f1: 3500, d0: 0.002, d1: 0.005, g: 0.3 });
+  }],
+  sand: [4, 0.15, (K, rnd, a, fk) => K.mix(a, noiseHit(K, rnd, 0.15, { lp: 1500 * fk, lp2: 500 * fk, attack: 0.003, tau: 0.05 }))],
+  stoff: [3, 0.1, (K, rnd, a, fk) => K.mix(a, noiseHit(K, rnd, 0.1, { lp: 900 * fk, tau: 0.025 }))],          // 0,1 statt 0,08 s: sonst endet es über −50 dBFS
+  koerper: [4, 0.12, (K, rnd, a, fk) => {
+    K.mix(a, noiseHit(K, rnd, 0.12, { lp: 500 * fk, tau: 0.03 }), { gain: 0.8 });
+    const b = K.sine(K.buf(0.06), { f: 140 * fk, f2: 70 * fk, dur: 0.06, gain: 1 });
+    K.decay(b, { attack: 0.002, tau: 0.025 }); K.fade(b, { outT: 0.01 }); K.dc(b);
+    K.mix(a, b, { gain: 0.7 });
+  }],
+};
+for (const [name, [n, len, fn]] of Object.entries(EINSCHLAG)) {
+  rezept(`einschlag.${name}`, {
+    n, bus: 'welt', gain: spitze(-16, 'welt'), prio: 3, cap: 6, reach: 26, send: 0.3,
+    make(K, rnd, v) { const a = K.buf(len); fn(K, rnd, a, vary(v, n, rnd, 0.07), v); return K.norm(K.fade(a, { outT: len * 0.5 }), 1); },
+  });
+}
+rezept('querschlaeger', {
+  n: 4, bus: 'welt', gain: spitze(-18, 'welt'), prio: 3, cap: 2, reach: 40, send: 0.35,
+  make(K, rnd, v) {
+    const a = K.buf(0.4), f0 = pick(v % 3, rnd, 1800, 3200) * (v === 3 ? 0.93 : 1), n = Math.round(0.36 * K.SR), x = new Float32Array(n);
+    let ph = 0;
+    for (let i = 0; i < n; i++) { const t = i / K.SR, f = f0 * (900 / f0) ** Math.min(1, t / 0.34) * (1 + 0.06 * Math.sin(2 * Math.PI * 35 * t)); x[i] = Math.sin(ph); ph += (2 * Math.PI * f) / K.SR; }
+    K.decay(x, { attack: 0.004, tau: 0.12 });
+    K.click(a, rnd, { dur: 0.001, gain: 0.8 });
+    K.modal(a, { modes: modesOf([[2700, 8, 1], [4100, 5, 0.5]], 0.6, vary(v, 4, rnd, 0.05)) });
+    K.mix(a, x, { at: 0.012, gain: 0.7 });
+    return K.norm(K.fade(a, { outT: 0.03 }), 1);
+  },
+});
+rezept('knall', {
+  bus: 'welt', gain: spitze(-14, 'welt'), prio: 5, cap: 3, send: 0.15,
+  make(K, rnd, v) {
+    const a = K.buf(0.03), n = Math.round(0.00025 * K.SR * vary(v, 3, rnd, 0.2)), i0 = 24;
+    for (let i = 0; i <= n; i++) a[i0 + i] += 1 - (2 * i) / n;                       // N-Welle: +1 nach −1
+    K.mix(a, noiseHit(K, rnd, 0.018, { hp: 2000, tau: 0.004 }), { at: 0.0006, gain: 0.35 });
+    K.hp(a, { f: 800 });
+    return K.norm(K.fade(a, { outT: 0.015 }), 1);
+  },
+});
 rezept('explosion.nah', {
   bus: 'welt', gain: altDb(0.9, 'welt'), prio: 8, cap: 4, reach: 140, send: 0.9,
   make(K, rnd, v) {
@@ -2303,12 +2377,6 @@ rezept('explosion.nah', {
     return a;
   },
 });
-for (const [name, fn] of Object.entries({
-  beton: (K, rnd, a, v) => K.burst(a, rnd, { type: 'bandpass', f: pick(v, rnd, 1400, 2200), q: 1.2, dur: 0.06, gain: 0.8 }),
-  metall: (K, rnd, a, v) => { K.tone(a, { type: 'square', f: pick(v, rnd, 1500, 2600), f2: 900, dur: 0.07, gain: 0.2 }); K.burst(a, rnd, { type: 'bandpass', f: 4200, q: 4, dur: 0.05, gain: 0.5 }); },
-  holz: (K, rnd, a, v) => K.burst(a, rnd, { type: 'bandpass', f: 700 * spread(v, rnd), q: 2, dur: 0.07, gain: 0.9 }),
-  koerper: (K, rnd, a, v) => K.burst(a, rnd, { f: 500 * spread(v, rnd), dur: 0.08, gain: 0.9 }),
-})) rezept(`einschlag.${name}`, { bus: 'welt', gain: altDb(0.28, 'welt'), prio: 3, cap: 6, reach: 26, send: 0.3, make(K, rnd, v) { const a = K.buf(0.09); fn(K, rnd, a, v); return a; } });
 for (const [name, len, fn] of [
   ['raus', 0.07, (K, rnd, a, s) => { K.burst(a, rnd, { type: 'bandpass', f: 1900 * s, q: 3, dur: 0.05, gain: 0.9 }); K.tone(a, { type: 'square', f: 420 * s, f2: 210 * s, dur: 0.05, gain: 0.12 }); }],
   ['rein', 0.09, (K, rnd, a, s) => { K.burst(a, rnd, { type: 'bandpass', f: 1300 * s, q: 2.5, dur: 0.07, gain: 1 }); K.tone(a, { type: 'square', f: 260 * s, f2: 150 * s, dur: 0.07, gain: 0.2 }); }],
@@ -2353,7 +2421,15 @@ rezept('schaden', {
     return a;
   },
 });
-rezept('pfeifen', { bus: 'welt', gain: altDb(0.2, 'welt'), prio: 4, cap: 3, send: 0.2, make: (K, rnd, v) => K.burst(K.buf(0.13), rnd, { type: 'bandpass', f: 2800 * spread(v, rnd), f2: 900, q: 3, dur: 0.11, gain: 0.9, attack: 0.02 }) });
+rezept('pfeifen', {
+  bus: 'welt', gain: spitze(-20, 'welt'), prio: 4, cap: 3, send: 0.2,
+  make(K, rnd, v) {
+    const x = K.noise(K.buf(0.11), rnd, 'white');
+    K.bp(x, { f: [3600, 2800, 2200][v % 3], f2: 900, q: 3 });
+    K.env(x, [[0, 0.02], [0.02, 1], [0.11, 0.003]]);
+    return K.norm(K.fade(x, { outT: 0.02 }), 1);
+  },
+});
 rezept('granate.splint', {
   bus: 'foley', gain: altDb(0.25, 'foley'), prio: 6, cap: 2, send: 0.1,
   make(K, rnd, v) {
@@ -2512,7 +2588,9 @@ const LIMIT = { threshold: -4, knee: 2, ratio: 20, attack: 0.002, release: 0.09 
  * Der Ausgleich dahinter nimmt das zurück: unter der Schwelle bleibt jeder Klang so laut wie geliefert, darüber wird begrenzt.
  */
 const LIMIT_TRIM = 10 ** (-1.94 / 20);
-const IMPACT_SND = { concrete: 'beton', metal: 'metall', wood: 'holz', body: 'koerper' };
+const IMPACT_SND = { concrete: 'beton', metal: 'metall', wood: 'holz', body: 'koerper', sand: 'sand', cloth: 'stoff' };
+/** Überschall-Munition: vorbeifliegende Kugeln knallen vor dem Pfeifen */
+const UEBERSCHALL = { rifle: true, dmr: true, sniper: true, lmg: true };
 const RELOAD_SND = { out: 'raus', in: 'rein', shell: 'patrone', bolt: 'verschluss' };
 /** Hülsen: Zeit bis zum Aufprall (s) und Abspielrate je Waffenart */
 const HUELSE_T = { shotgun: 0.75, sniper: 0.95 }, HUELSE_RATE = { pistol: 1.15, smg: 1.08, shotgun: 0.8, sniper: 0.9, lmg: 0.92 };
@@ -2839,7 +2917,10 @@ function createSound(getPrefs) {
       if (kf > 0) play(`schuss.${k}.fern`, { L, x, y, z, gain: kf });
     },
     explosion(L, x, y, z) { play('explosion.nah', { L, x, y, z }); },
-    impact(L, x, y, z, kind) { play(`einschlag.${IMPACT_SND[kind] || 'beton'}`, { L, x, y, z }); },
+    impact(L, x, y, z, kind) {
+      play(`einschlag.${IMPACT_SND[kind] || 'beton'}`, { L, x, y, z });
+      if (kind === 'metal' && Math.random() < 0.15) play('querschlaeger', { L, x, y, z, when: 0.008 });       // Querschläger
+    },
     /** Schritt; surf = Trefferart des Untergrunds (phys.surface). Eigene Schritte auf dem Bus foley, 4 dB leiser als fremde aus nächster Nähe. */
     step(L, x, y, z, own, loud = 1, surf) {
       const name = `schritt.${GRUND[surf] || 'stein'}`;
@@ -2859,7 +2940,12 @@ function createSound(getPrefs) {
     swing() { play('messer.schwung', { own: true }); },
     hit(head, kill) { play(head ? 'kopfschuss' : 'treffer'); if (kill) play('abschuss'); },
     hurt() { play('schaden', { own: true }); },
-    whiz(pan) { play('pfeifen', { pan }); },
+    /** Kugel knapp am Kopf vorbei: pan −1 … 1; kind = Waffenart des Schützen (Überschall knallt, 20 ms später das Pfeifen). */
+    whiz(pan, kind) {
+      const sup = !!UEBERSCHALL[kind];
+      if (sup) play('knall', { pan });
+      play('pfeifen', { pan, when: sup ? 0.02 : 0 });
+    },
     bounce(L, x, y, z, surf) { play(`granate.aufprall.${GRUND[surf] || 'stein'}`, { L, x, y, z }); },
     pin() { play('granate.splint', { own: true }); },
     ui(kind = 'tick') { play(`ui.${kind}`); },
@@ -3455,7 +3541,7 @@ function createMatch(cfg, hooks) {
         const cx = me.x - ox, cy = me.y + 1.5 - oy, cz = me.z - oz, tc = cx * dx + cy * dy + cz * dz;
         if (tc > 2 && tc < t) {
           const qx = cx - dx * tc, qy = cy - dy * tc, qz = cz - dz * tc;
-          if (qx * qx + qy * qy + qz * qz < 2.2) S.whiz(clamp(-(qx * Math.cos(L.yaw) + qz * Math.sin(L.yaw)), -1, 1));
+          if (qx * qx + qy * qy + qz * qz < 2.2) S.whiz(clamp(-(qx * Math.cos(L.yaw) + qz * Math.sin(L.yaw)), -1, 1), w.snd);
         }
       }
     }
