@@ -3002,9 +3002,9 @@ function createFx(prefs = null, phys = null) {
       grav: o.grav || 0, drag: o.drag || 0, frames: o.frames || 0, seed: o.seed ?? seedOf(), dir: o.dir || null, len: o.len || 0 });
   }
   let own = { kind: 'rifle', seed: 0 };              // letzter eigener Schuss: Art und Saat des Mündungsfeuers in der Hand
-  /** Seitenflammen und Flamme nach vorn eines fremden Mündungsfeuers: gestreckt, der helle Kopf sitzt an der Mündung */
+  /** Seitenflammen und Flamme nach vorn eines fremden Mündungsfeuers: gestreckt, der helle Kopf sitzt an der Mündung, die Spitze zeigt nach außen */
   function flame(x, y, z, dx, dy, dz, len, w, life, seed) {
-    puff(x + dx * len / 2, y + dy * len / 2, z + dz * len / 2, 0, 0, 0, { life, s: w, c: [1, 0.72, 0.38], k: Q_SPARK, dir: [-dx, -dy, -dz], len, seed });
+    puff(x, y, z, 0, 0, 0, { life, s: w, c: [1, 0.72, 0.38], k: Q_SPARK, dir: [-dx, -dy, -dz], len, seed });
   }
   const DUST = { concrete: [0.62, 0.6, 0.57], sand: [0.72, 0.6, 0.42], wood: [0.5, 0.36, 0.2], cloth: [0.7, 0.7, 0.7], metal: [0.45, 0.45, 0.47] };
 
@@ -3057,10 +3057,10 @@ function createFx(prefs = null, phys = null) {
         const s = m.s * rnd(3, 3.8), life = 0.05;
         puff(x, y, z, 0, 0, 0, { life, s, c: [1, 0.8, 0.5], k: Q_FLASH, seed });
         puff(x, y, z, 0, 0, 0, { life, s: s * 2, c: [1, 0.7, 0.4], a: 0.35, k: Q_GLOW });
-        flame(x, y, z, dx, dy, dz, s * 2.2, s * 0.3, life, seed);
+        flame(x, y, z, dx, dy, dz, s * rnd(1.3, 1.8), s * 0.3, life, seed);
         if (m.side) {
           const l = Math.hypot(dx, dz) || 1, sx = -dz / l, sz = dx / l;
-          for (const k of [-1, 1]) flame(x, y, z, sx * k * 0.8 + dx * 0.6, 0.1, sz * k * 0.8 + dz * 0.6, s * 0.95, s * 0.18, life, seed);
+          for (const k of [-1, 1]) flame(x, y, z, sx * k * 0.8 + dx * 0.6, rnd(-0.1, 0.25), sz * k * 0.8 + dz * 0.6, s * rnd(0.7, 1.1), s * 0.18, life, seed);
         }
       }
       for (let i = 0; i < m.sparks; i++) {
@@ -3157,7 +3157,12 @@ function createFx(prefs = null, phys = null) {
       const before = qn, m = MUZZLE[own.kind] || MUZZLE.rifle, s = m.s * (1.05 + 0.25 * ((own.seed * 0.618) % 1)), l = s * 0.85;
       bill(x, y, z, s, 1, 0.82, 0.55, 1, Q_FLASH, own.seed);
       bill(x, y, z, s * 2, 1, 0.72, 0.45, 0.2, Q_GLOW);
-      if (m.side) for (const k of [-1, 1]) streak(x + rx * k * l / 2, y + ry * k * l / 2, z + rz * k * l / 2, -rx * k, -ry * k, -rz * k, l, s * 0.16, 1, 0.74, 0.42, 0.8, Q_SPARK, own.seed);
+      // Seitenflammen setzen am Kern an, ungleich lang und leicht schräg (aus der Saat), damit kein sauberer Strich durch den Stern entsteht
+      if (m.side) for (const k of [-1, 1]) {
+        const h = ((own.seed * (k > 0 ? 0.381 : 0.727)) % 1), lk = l * (0.75 + 0.45 * h), t = (h - 0.5) * 0.5, n = 1 / Math.hypot(1, t);
+        const dx = (rx * k + ux * t) * n, dy = (ry * k + uy * t) * n, dz = (rz * k + uz * t) * n;
+        streak(x, y, z, -dx, -dy, -dz, lk, s * 0.16, 1, 0.74, 0.42, 0.8, Q_SPARK, own.seed);
+      }
       return qn - before;
     },
     clear() { parts.length = 0; tracers.length = 0; decals.length = 0; lights.length = 0; },
