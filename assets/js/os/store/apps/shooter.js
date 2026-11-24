@@ -448,11 +448,16 @@ function unitCube() {
 // ==========================================================================
 const MAX_LIGHTS = 8;
 const ISTRIDE = 20;      // je Quader: Matrix 16 · Farbe 3 · Art 1
-const QSTRIDE = 10;      // je Effekt-Ecke: Position 3 · UV 2 · Farbe 4 · Art 1
-const MAX_INST = 1400, MAX_QUADS = 1600;
+// je Effekt-Ecke: Position 3 · UV 2 · Farbe 4 · Art 1 · Zusatz 2 (Saat + Alter 0 … 1; Größe in m, bei flachen Arten die Fläche 0 … 5 = −x, +x, −y, +y, −z, +z)
+const QSTRIDE = 12;
+const MAX_INST = 1400, MAX_QUADS = 2600;   // Index mit 16 Bit: vier Ecken je Viereck, also nie über 16.384 Vierecke
 const K_MATTE = 0, K_CAMO = 1, K_METAL = 2, K_GLOW = 3;
+// Arten der Effekt-Vierecke. Leuchtend (additiv): Glühen, Leuchtspur, Mündungsfeuer, Funken, Feuer, Lichtkegel.
+// Beleuchtet (Sonne mit Schatten, Himmel, Punktlichter, Nebel): Rauch, Loch, Staub, Druckring, Blut, Risse und Dellen.
 const Q_GLOW = 0, Q_SMOKE = 1, Q_BEAM = 2, Q_DECAL = 3, Q_FLASH = 4, Q_DUST = 5;
-const Q_CONE = 9;        // Lichtkegel einer Lampe (6 bis 8 sind für die Effekte der Phase 5 vorgesehen)
+const Q_SPARK = 6, Q_FIRE = 7, Q_RING = 8, Q_CONE = 9, Q_BLOOD = 10, Q_CRACK = 11;
+/** Obergrenzen der Effekte (Partikel mal TIERS.particles) */
+const FX_MAX = { parts: 900, decals: 300, chunks: 60, blood: 24 };
 /**
  * Qualitätsstufen (Vertrag V4). scale = Auflösung, msaa = 4-fach abgetastet (sonst FXAA), glow = Stufen des Glühens,
  * ssao = Proben (0 = aus), shadowTaps = Schatten-Abtastungen, rays = Sonnenstrahlen, detail = Kantenlänge der Detail-Texturen,
@@ -688,54 +693,149 @@ void main() {
   }
   o = vec4(uLdr > .5 ? pow(clamp(aces(col * uExposure), 0., 1.), vec3(1. / 2.2)) : col, 1.);
 }`;
+// Licht für beleuchtete Effekte je Ecke (VS_QUAD, VS_STAUB): eine Abtastung der Schattenkarte und Punktlichter ohne Normale.
+// Flache Arten (Q_FLAT) tragen ihre Fläche in e.y; dort wird der Schatten etwas vor der Fläche geprüft.
+const GLSL_QLICHT = `
+uniform mat4 uShadowMat;
+uniform highp sampler2DShadow uShadow;
+uniform float uShadowOn;
+uniform vec4 uLights[${MAX_LIGHTS}];
+uniform vec3 uLightCol[${MAX_LIGHTS}];
+out vec2 vUV, vE; out vec4 vCol; out float vKind, vSh; out vec3 vPos, vPt;
+const vec3 FACE[6] = vec3[6](vec3(-1., 0., 0.), vec3(1., 0., 0.), vec3(0., -1., 0.), vec3(0., 1., 0.), vec3(0., 0., -1.), vec3(0., 0., 1.));
+void qLicht(float kind, vec2 e, vec3 p) {
+  float k = floor(kind + .01);
+  vSh = 1.; vPt = vec3(0.);
+  if (!(k == 1. || k == 3. || k == 5. || k == 8. || k == 10. || k == 11.)) return;
+  bool flach = kind - k > .1;
+  vec3 n = FACE[clamp(int(e.y + .5), 0, 5)];
+  if (uShadowOn > .5) {
+    vec3 c = (uShadowMat * vec4(flach ? p + n * .06 : p, 1.)).xyz;
+    if (c.x > 0. && c.x < 1. && c.y > 0. && c.y < 1. && c.z < 1.) vSh = texture(uShadow, c - vec3(0., 0., .002));
+  }
+  for (int i = 0; i < ${MAX_LIGHTS}; i++) {
+    float r = uLights[i].w;
+    if (r <= 0.) continue;
+    vec3 d = uLights[i].xyz - p;
+    float a = max(0., 1. - dot(d, d) / (r * r));
+    vPt += uLightCol[i] * a * a * (flach ? .3 + .7 * max(dot(n, normalize(d)), 0.) : .65);
+  }
+}`;
 const VS_QUAD = `#version 300 es
 layout(location=0) in vec3 aPos; layout(location=1) in vec2 aUV; layout(location=2) in vec4 aCol; layout(location=3) in float aKind;
+layout(location=4) in vec2 aE;
 uniform mat4 uVP;
-out vec2 vUV; out vec4 vCol; out float vKind;
-void main() { vUV = aUV; vCol = aCol; vKind = aKind; gl_Position = uVP * vec4(aPos, 1.); }`;
+${GLSL_QLICHT}
+void main() { vUV = aUV; vCol = aCol; vKind = aKind; vE = aE; vPos = aPos; qLicht(aKind, aE, aPos); gl_Position = uVP * vec4(aPos, 1.); }`;
 // Tiefe aus der Tiefentextur linear machen (nah 0,07, fern 500). Die Welt liegt im Tiefenbereich 0,1…1, die Waffe in der Hand in 0…0,1
 // (liefert Werte unter 0,07, liegt also vor allem); Himmel = 1,0 → 500.
 const GLSL_LINZ = `
 float linZ(float d) { float z = (d - .1) / .9 * 2. - 1.; return 2. * .07 * 500. / (500.07 - z * 499.93); }`;
-// Durchsichtiges zeichnet in fboFx (nur Farbe, keine Tiefe) und prüft die Tiefe selbst gegen uTiefe.
+/**
+ * Durchsichtiges zeichnet in fboFx (nur Farbe, keine Tiefe) und prüft die Tiefe selbst gegen uTiefe. Weiche Kante an Flächen je nach Größe.
+ * Beleuchtete Arten: Farbe = Albedo (Anzeigewert, linear gemacht) mal Himmel, Sonne (Schatten aus VS_QUAD) und Punktlichtern; Rauch mit
+ * Scheinnormale aus der Viereck-Koordinate. Leuchtende Arten als HDR (Faktor je Art; Farben über 1 leuchten stärker). Alles im Nebel.
+ * Saat (ganzzahliger Teil von vE.x) dreht und verschiebt das Rauschen – Vierecke sind nicht gedreht, damit die Scheinnormale stimmt.
+ */
 const FS_QUAD = `#version 300 es
 precision highp float;
 uniform highp sampler2D uTiefe;
-uniform float uExposure, uLdr, uTest;
-in vec2 vUV; in vec4 vCol; in float vKind;
+uniform float uExposure, uLdr, uTest, uFogDen;
+uniform vec3 uCam, uCamR, uCamU, uSunDir, uSunCol, uSkyCol, uGndCol, uFogCol, uZenith;
+in vec2 vUV, vE; in vec4 vCol; in float vKind, vSh; in vec3 vPos, vPt;
 out vec4 o;
 float h2(vec2 p) { vec3 q = fract(vec3(p.xyx) * .1031); q += dot(q, q.yzx + 33.33); return fract((q.x + q.y) * q.z); }
 float vn(vec2 p) { vec2 i = floor(p), f = fract(p); f = f * f * (3. - 2. * f);
   return mix(mix(h2(i), h2(i + vec2(1, 0)), f.x), mix(h2(i + vec2(0, 1)), h2(i + vec2(1, 1)), f.x), f.y); }
-// Die Effektfarben sind als Anzeigewerte gedacht: Umkehrung von Gamma und ACES (bei der Grundbelichtung der Karte) liefert den linearen Wert,
-// der nach dem Schlussschritt wieder so aussieht.
-vec3 lin(vec3 c) {
-  vec3 y = pow(min(c, vec3(.97)), vec3(2.2)), a = 2.51 - 2.43 * y, b = .03 - .59 * y;
-  return (sqrt(b * b + .56 * a * y) - b) / (2. * a) / uExposure;
-}
+float fbm(vec2 p) { return vn(p) * .55 + vn(p * 2.3 + 7.1) * .3 + vn(p * 5.1 + 3.7) * .15; }
+${GLSL_ACES}
+${GLSL_HIMMEL}
 ${GLSL_LINZ}
+const vec3 FACE[6] = vec3[6](vec3(-1., 0., 0.), vec3(1., 0., 0.), vec3(0., -1., 0.), vec3(0., 1., 0.), vec3(0., 0., -1.), vec3(0., 0., 1.));
+// Feiner Riss von der Mitte nach außen in Richtung w
+float riss(vec2 p, float w, float s) {
+  vec2 r = vec2(cos(w), sin(w));
+  float l = dot(p, r), q = abs(dot(p, vec2(-r.y, r.x)) + .05 * sin(l * 13. + s) * l);
+  return step(.05, l) * smoothstep(.95, .3, l) * smoothstep(.04, .012, q);
+}
 void main() {
-  float k = floor(vKind + .01), szene = 1e9, ich = 0.;
+  float k = floor(vKind + .01), szene = 1e9, ich = 0., saat = floor(vE.x), alter = fract(vE.x);
   bool flach = vKind - k > .1;
   if (uTest > .5) {                                                                        // Tiefentest gegen die Szene
     szene = linZ(texelFetch(uTiefe, ivec2(gl_FragCoord.xy), 0).r); ich = linZ(gl_FragCoord.z);
-    if (flach || k == 3.) { if (ich >= szene + .02 + .0005 * ich) discard; }               // Einschusslöcher, Zeichen am Boden
-    else if (k == 2. || k == 4.) { if (ich > szene) discard; }                             // Leuchtspur, fremdes Mündungsfeuer
+    if (flach || k == 3. || k == 11.) { if (ich >= szene + .02 + .0005 * ich) discard; }   // Löcher, Flecken, Zeichen am Boden
+    else if (k == 2. || k == 4. || k == 6.) { if (ich > szene) discard; }                  // Leuchtspur, fremdes Mündungsfeuer, Funken
   }
   vec2 p = vUV * 2. - 1.;
-  float d = length(p), a = 0., add = 1.;
+  float d = length(p), a = 0., wrap = -1., hdr = 3., dreh = saat * 2.39996;
+  vec2 q = mat2(cos(dreh), sin(dreh), -sin(dreh), cos(dreh)) * p;                          // gedrehte Koordinate für das Rauschen
+  vec3 c = vCol.rgb;
   if (k < .5) a = pow(max(0., 1. - d), 2.);                                                // Glühen
-  else if (k < 1.5) { a = smoothstep(1., .25, d) * (.55 + .45 * vn(vUV * 5. + vCol.a * 7.)); add = 0.; }   // Rauch
-  else if (k < 2.5) a = (1. - abs(p.y)) * smoothstep(0., .15, vUV.x) * smoothstep(1., .6, vUV.x);         // Leuchtspur
-  else if (k < 3.5) { a = smoothstep(1., .35, d + .25 * vn(vUV * 9.)); add = 0.; }         // Einschussloch
-  else if (k < 4.5) { float ang = atan(p.y, p.x); a = pow(max(0., 1. - d * (1.25 - .45 * cos(ang * 4.))), 1.6); }   // Mündungsfeuer
-  else if (k > 8.5 && k < 9.5) { float w = mix(1., .14, vUV.y); a = smoothstep(w, w * .2, abs(p.x)) * pow(vUV.y, 1.3) * smoothstep(1., .9, vUV.y); }   // Lichtkegel: oben schmal und hell
-  else { a = smoothstep(1., .1, d) * .8; add = 0.; }                                       // Staub
+  else if (k < 1.5) {                                                                      // Rauch: Rand mit Rauschen ausgefranst, innen Dichte
+    float n = fbm(q * 1.35 + saat * .37 + vec2(0., alter * .9));
+    a = smoothstep(1., .15, d + (n - .5) * .85) * (.55 + .55 * n); wrap = .35;
+  }
+  else if (k < 2.5) { a = (1. - abs(p.y)) * smoothstep(0., .15, vUV.x) * smoothstep(1., .6, vUV.x); hdr = 5.; }   // Leuchtspur
+  else if (k < 3.5) { a = smoothstep(1., .35, d + .25 * vn(vUV * 9. + saat)); c *= .5 + .5 * vn(p * 4. + saat); wrap = 0.; }   // Brandfleck
+  else if (k < 4.5) {                                                                      // Mündungsfeuer: unregelmäßiger Stern, weißer Kern
+    float w = atan(p.y, p.x), r = max(.14, .42 + .2 * sin(w * 5. + saat * 1.7) + .15 * sin(w * 3. - saat * 2.9) + .1 * sin(w * 8. + saat * .7));
+    a = pow(max(0., 1. - d / r), 1.3) * (.75 + .5 * vn(q * 6. + saat));
+    c = mix(c, vec3(1., .94, .84), pow(max(0., 1. - d * 1.7), 2.)); hdr = 5.;
+  }
+  else if (k < 5.5) { a = smoothstep(1., .15, d + (vn(q * 2.5 + saat) - .5) * .55) * .8; wrap = .6; }                 // Staub
+  else if (k < 6.5) {                                                                      // Funke: in Flugrichtung gestreckt, heller Kopf
+    a = pow(max(0., 1. - abs(p.y)), 2.) * smoothstep(0., .55, vUV.x) * smoothstep(1., .82, vUV.x);
+    c = mix(c, vec3(1., .92, .75), smoothstep(.55, 1., vUV.x)); hdr = 5.;
+  }
+  else if (k < 7.5) {                                                                      // Feuerball: Rauschen frisst ihn mit dem Alter auf
+    float n = fbm(q * 1.6 + saat + vec2(0., -alter * 1.3)), s = (1. - d) * (.5 + .75 * n), e = mix(.04, .6, alter);
+    a = smoothstep(e, e + .22, s);
+    c = mix(vec3(.85, .22, .05), vec3(1., .8, .45), clamp((s - e) * 2.4, 0., 1.)) * c; hdr = 4. * (1. - .65 * alter);
+  }
+  else if (k < 8.5) { a = smoothstep(1., .93, d) * smoothstep(.62, .9, d) * (.45 + .55 * vn(q * 7. + saat)); wrap = .5; }   // Druckring
+  else if (k < 9.5) { float w = mix(1., .14, vUV.y); a = smoothstep(w, w * .2, abs(p.x)) * pow(vUV.y, 1.3) * smoothstep(1., .9, vUV.y); hdr = 1.; }   // Lichtkegel
+  else if (k < 10.5) {                                                                     // Blut: Fleck mit Spritzern (flach) oder Nebel
+    if (flach) {
+      float b = smoothstep(.6, .48, d + (vn(q * 3. + saat) - .5) * .5), t = step(.8, vn(q * 9. + saat * 3.)) * smoothstep(1., .65, d);
+      a = max(b, t) * .9; c *= .8 + .4 * vn(q * 14.);
+    } else { a = smoothstep(1., .2, d + (vn(q * 3. + saat) - .5) * .6) * .75; wrap = .5; }
+    wrap = max(wrap, 0.);
+  }
+  else {                                                                                   // Risse und Dellen je Material (Saat mod 8)
+    float v = mod(saat, 8.), r1 = h2(vec2(saat, 1.7)) * 6.2832, n = vn(q * 6. + saat);
+    vec3 hell = c * 1.3, dunkel = c * .1;
+    if (v < .5) {                                                                          // Beton: heller Ausbruch, dunkler Kern, zwei Risse
+      float kern = smoothstep(.22, .15, d + (n - .5) * .1), aus = smoothstep(.66, .3, d + (vn(q * 4. + saat) - .5) * .4);
+      float rs = max(riss(p, r1, saat), riss(p, r1 + 2.2 + h2(vec2(saat, 3.1)) * 1.8, saat + 4.)) * .85;
+      float dk = max(kern, rs); c = mix(hell, dunkel, dk); a = max(aus * .6, dk);
+    } else if (v < 1.5) {                                                                  // Metall: dunkle Delle mit hellem Rand
+      float de = smoothstep(.46, .36, d), rd = smoothstep(.38, .48, d) * smoothstep(.7, .5, d);
+      c = mix(c * 1.8 + .06, c * .22, de); a = max(de * .9, rd * .7);
+    } else if (v < 2.5) {                                                                  // Holz: ausgefranstes helles Loch
+      float w = atan(p.y, p.x), f = .3 + .28 * vn(vec2(w * 2.6 + saat, saat)), loch = smoothstep(.22, .15, d + (n - .5) * .12);
+      float sp = smoothstep(f + .3, f, d) * (.45 + .55 * vn(vec2(w * 9., saat * 1.3)));
+      c = mix(hell * 1.25, dunkel, loch); a = max(loch, sp * .85);
+    } else if (v < 3.5) { a = smoothstep(1., .15, d + (n - .5) * .35) * .5; c *= .55; }    // Sand: flache dunkle Mulde
+    else { a = smoothstep(.55, .38, d + (n - .5) * .25) * .95; c = dunkel; }               // Stoff: kleines dunkles Loch
+    wrap = 0.;
+  }
   a *= vCol.a;
-  if (uTest > .5 && !flach && (k == 0. || k == 1. || k == 5. || k == 9.)) a *= clamp((szene - ich) / .4, 0., 1.);   // Rauch, Staub, Glühen, Lichtkegel: weiche Kante an Flächen
-  if (uLdr > .5) o = vec4(vCol.rgb * a, add > .5 ? 0. : a);
-  else if (add > .5 && !flach) o = vec4(pow(vCol.rgb, vec3(2.2)) * a * (k == 4. ? 8. : k == 2. ? 5. : k == 9. ? 1. : 3.), 0.);   // Leuchtendes als HDR: Mündungsfeuer ×8, Leuchtspur ×5, Glühen ×3, Kegel ×1
-  else o = add > .5 ? vec4(lin(vCol.rgb * a), 0.) : vec4(lin(vCol.rgb) * a, a);
+  if (uTest > .5 && !flach && (k == 0. || k == 1. || k == 5. || k == 7. || k == 9. || k == 10.)) {   // weiche Kante an Flächen, nach Größe
+    a *= clamp((szene - ich) / (k == 9. ? .4 : clamp(vE.y * .8, .04, .6)), 0., 1.);
+    if (k == 1. || k == 5. || k == 10.) a *= smoothstep(.12, .6, ich);                     // dicht vor der Kamera ausblenden
+  }
+  if (a < .002) discard;
+  vec3 V = uCam - vPos;
+  float dist = length(V), fog = clamp(1. - exp(-dist * uFogDen), 0., 1.);
+  V /= max(dist, 1e-4);
+  if (wrap >= 0.) {                                                                        // beleuchtet, deckend
+    vec3 n = flach ? FACE[clamp(int(vE.y + .5), 0, 5)] : normalize(uCamR * p.x + uCamU * p.y + V * sqrt(max(0., 1. - d * d)));
+    vec3 L = mix(uGndCol, uSkyCol, n.y * .5 + .5) + uSunCol * vSh * (wrap + (1. - wrap) * max(dot(n, uSunDir), 0.)) + vPt;
+    vec3 col = mix(pow(c, vec3(2.2)) * L, nebel(-V), fog);
+    if (uLdr > .5) col = pow(clamp(aces(col * uExposure), 0., 1.), vec3(1. / 2.2));
+    o = vec4(col * a, a);
+  } else if (uLdr > .5) o = vec4(c * a, 0.);
+  else o = vec4(pow(c, vec3(2.2)) * a * hdr * (1. - .8 * fog), 0.);                         // leuchtend als HDR
 }`;
 // Bildschirmfüllendes Dreieck (Puffer des Himmels) für alle Schritte nach der Szene
 const VS_POST = `#version 300 es
@@ -1087,6 +1187,7 @@ function createRenderer(canvas, { shadowSize = 2048, ldr: forceLdr = false } = {
     gl.enableVertexAttribArray(1); gl.vertexAttribPointer(1, 2, gl.FLOAT, false, st, 12);
     gl.enableVertexAttribArray(2); gl.vertexAttribPointer(2, 4, gl.FLOAT, false, st, 20);
     gl.enableVertexAttribArray(3); gl.vertexAttribPointer(3, 1, gl.FLOAT, false, st, 36);
+    gl.enableVertexAttribArray(4); gl.vertexAttribPointer(4, 2, gl.FLOAT, false, st, 40);
     const qi = new Uint16Array(MAX_QUADS * 6);
     for (let i = 0; i < MAX_QUADS; i++) qi.set([i * 4, i * 4 + 1, i * 4 + 2, i * 4, i * 4 + 2, i * 4 + 3], i * 6);
     gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, quadIbo);
@@ -1302,6 +1403,31 @@ function createRenderer(canvas, { shadowSize = 2048, ldr: forceLdr = false } = {
     gl.uniform3fv(u.uLightCol, lightCol);
   }
 
+  /** Uniforms der Effekt-Vierecke (FS_QUAD mit VS_QUAD oder VS_STAUB): Tiefe auf Einheit 2, Schattenkarte auf 1, Licht wie die Welt. */
+  function useQuad(pr, cam) {
+    const u = pr.u;
+    gl.useProgram(pr.p);
+    gl.uniform1i(u.uTiefe, 2);
+    gl.uniform1f(u.uExposure, env.exposure);
+    gl.uniform1f(u.uLdr, ldr ? 1 : 0);
+    gl.uniform1f(u.uFogDen, env.fogDen);
+    gl.uniform3f(u.uCam, cam.x, cam.y, cam.z);
+    basis(cam.yaw, cam.pitch, cam.roll || 0);
+    gl.uniform3f(u.uCamR, B[0], B[1], B[2]);
+    gl.uniform3f(u.uCamU, B[3], B[4], B[5]);
+    gl.uniform3fv(u.uSunDir, env.sunDir);
+    gl.uniform3fv(u.uSunCol, env.sunCol);
+    gl.uniform3fv(u.uSkyCol, env.skyCol);
+    gl.uniform3fv(u.uGndCol, env.gndCol);
+    gl.uniform3fv(u.uFogCol, env.fogCol);
+    gl.uniform3fv(u.uZenith, env.zenith);
+    gl.uniform1f(u.uShadowOn, shadowsOn ? 1 : 0);
+    gl.uniformMatrix4fv(u.uShadowMat, false, shadowMat);
+    gl.uniform1i(u.uShadow, 1);
+    gl.uniform4fv(u.uLights, lightPos);
+    gl.uniform3fv(u.uLightCol, lightCol);
+  }
+
   /**
    * Zeichnet ein Bild. f: { cam: {x, y, z, yaw, pitch, roll, fov}, inst, instCount, instShadowCount (≥ instCount: dahinter Quader nur
    *   für die Schattenkarte), vm, vmCount, vmFov, quads, quadCount (Welt), vmQuadCount (danach im Puffer, mit der Waffe gezeichnet),
@@ -1448,10 +1574,7 @@ function createRenderer(canvas, { shadowSize = 2048, ldr: forceLdr = false } = {
     gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
     gl.disable(gl.CULL_FACE);
     bindTex(2, T.tiefe);
-    gl.useProgram(P.quad.p);
-    gl.uniform1i(P.quad.u.uTiefe, 2);
-    gl.uniform1f(P.quad.u.uExposure, env.exposure);
-    gl.uniform1f(P.quad.u.uLdr, ldr ? 1 : 0);
+    useQuad(P.quad, cam);
     gl.bindVertexArray(quadVao);
     if (f.quadCount) {
       gl.uniform1f(P.quad.u.uTest, 1);
@@ -2811,33 +2934,58 @@ function createSound(getVolume) {
 // ==========================================================================
 // 9 · Spiel
 // ==========================================================================
-// ---------- 9a · Effekte: Funken, Staub, Leuchtspuren, Einschusslöcher, Lichtblitze ----------
-function createFx() {
+// ---------- 9a · Effekte: Funken, Staub, Rauch, Feuer, Leuchtspuren, Einschusslöcher, Trümmer, Blut, Lichtblitze ----------
+/**
+ * Effekte einer Partie. prefs: Einstellungen der App (quality für die Obergrenze, blood), phys: Kollision (Boden unter Trümmern,
+ * Strahl für Blutflecken). Partikel: puff(x, y, z, vx, vy, vz, o) mit o = { life, s, grow, c, a, k, grav, drag, frames, seed }
+ * (frames: höchstens so viele Bilder sichtbar, seed: Saat des Rauschens im Shader, sonst zufällig).
+ */
+function createFx(prefs = null, phys = null) {
   const quads = new Float32Array(MAX_QUADS * 4 * QSTRIDE);
   const parts = [], tracers = [], decals = [], lights = [];
+  const counts = new Int32Array(12);                 // Vierecke je Art im letzten Bild (Prüfungen, etwa Q_BLOOD)
   let qn = 0, rx = 1, ry = 0, rz = 0, ux = 0, uy = 1, uz = 0, cx = 0, cy = 0, cz = 0;
+  const seedOf = () => (Math.random() * 64) | 0;
+  /** Obergrenze der Partikel nach Qualitätsstufe (TIERS.particles; „Auto“ wie „Mittel“) */
+  const capOf = (n) => Math.round(n * (TIERS[prefs?.quality]?.particles ?? 1));
 
-  function corner(o, x, y, z, u, v, r, g, b, a, k) {
+  function corner(o, x, y, z, u, v, r, g, b, a, k, e0, e1) {
     quads[o] = x; quads[o + 1] = y; quads[o + 2] = z; quads[o + 3] = u; quads[o + 4] = v;
-    quads[o + 5] = r; quads[o + 6] = g; quads[o + 7] = b; quads[o + 8] = a; quads[o + 9] = k;
+    quads[o + 5] = r; quads[o + 6] = g; quads[o + 7] = b; quads[o + 8] = a; quads[o + 9] = k; quads[o + 10] = e0; quads[o + 11] = e1;
   }
-  /** Viereck aus Mittelpunkt und zwei Halbachsen */
-  function quad(x, y, z, ax, ay, az, bx, by, bz, r, g, b, a, k) {
+  /** Viereck aus Mittelpunkt und zwei Halbachsen; e0 = Saat + Alter, e1 = Größe (bei flachen Arten die Fläche 0 … 5) */
+  function quad(x, y, z, ax, ay, az, bx, by, bz, r, g, b, a, k, e0 = 0, e1 = 0) {
     if (qn >= MAX_QUADS) return;
     const o = qn++ * 4 * QSTRIDE;
-    corner(o, x - ax - bx, y - ay - by, z - az - bz, 0, 0, r, g, b, a, k);
-    corner(o + QSTRIDE, x + ax - bx, y + ay - by, z + az - bz, 1, 0, r, g, b, a, k);
-    corner(o + 2 * QSTRIDE, x + ax + bx, y + ay + by, z + az + bz, 1, 1, r, g, b, a, k);
-    corner(o + 3 * QSTRIDE, x - ax + bx, y - ay + by, z - az + bz, 0, 1, r, g, b, a, k);
+    counts[k | 0]++;
+    corner(o, x - ax - bx, y - ay - by, z - az - bz, 0, 0, r, g, b, a, k, e0, e1);
+    corner(o + QSTRIDE, x + ax - bx, y + ay - by, z + az - bz, 1, 0, r, g, b, a, k, e0, e1);
+    corner(o + 2 * QSTRIDE, x + ax + bx, y + ay + by, z + az + bz, 1, 1, r, g, b, a, k, e0, e1);
+    corner(o + 3 * QSTRIDE, x - ax + bx, y - ay + by, z - az + bz, 0, 1, r, g, b, a, k, e0, e1);
   }
-  /** Zur Kamera gedrehtes Viereck */
-  function bill(x, y, z, s, r, g, b, a, k, rot = 0) {
-    const c = Math.cos(rot) * s, sn = Math.sin(rot) * s;
-    quad(x, y, z, rx * c + ux * sn, ry * c + uy * sn, rz * c + uz * sn, ux * c - rx * sn, uy * c - ry * sn, uz * c - rz * sn, r, g, b, a, k);
+  /** Zur Kamera gedrehtes Viereck (nie um die Blickachse gedreht: die Saat dreht das Rauschen, die Scheinnormale bleibt richtig) */
+  function bill(x, y, z, s, r, g, b, a, k, e0 = 0) {
+    quad(x, y, z, rx * s, ry * s, rz * s, ux * s, uy * s, uz * s, r, g, b, a, k, e0, s);
+  }
+  /** Viereck in Richtung (dx, dy, dz) gestreckt, quer zum Blick: Länge len, halbe Breite w; u läuft vom Ende (0) zum Kopf (1) */
+  function streak(x, y, z, dx, dy, dz, len, w, r, g, b, a, k, e0 = 0) {
+    const vx = cx - x, vy = cy - y, vz = cz - z;
+    let sx = dy * vz - dz * vy, sy = dz * vx - dx * vz, sz = dx * vy - dy * vx;
+    const sl = w / (Math.hypot(sx, sy, sz) || 1), hl = len / 2;
+    sx *= sl; sy *= sl; sz *= sl;
+    quad(x - dx * hl, y - dy * hl, z - dz * hl, dx * hl, dy * hl, dz * hl, sx, sy, sz, r, g, b, a, k, e0, w);
+  }
+  /** Flach auf einer Fläche (axis 0 … 2, sign ±1), etwas davor; Kantenlänge 2·s, gedreht um rot */
+  function flat(x, y, z, axis, sign, s, r, g, b, a, k, e0, rot = 0) {
+    const o = 0.012 * sign, c = Math.cos(rot) * s, sn = Math.sin(rot) * s, f = axis * 2 + (sign > 0 ? 1 : 0);
+    if (axis === 0) quad(x + o, y, z, 0, sn, c, 0, c, -sn, r, g, b, a, k + Q_FLAT, e0, f);
+    else if (axis === 1) quad(x, y + o, z, c, 0, sn, -sn, 0, c, r, g, b, a, k + Q_FLAT, e0, f);
+    else quad(x, y, z + o, c, sn, 0, -sn, c, 0, r, g, b, a, k + Q_FLAT, e0, f);
   }
   function puff(x, y, z, vx, vy, vz, o) {
-    if (parts.length > 520) parts.shift();
-    parts.push({ x, y, z, vx, vy, vz, life: o.life, max: o.life, s: o.s, grow: o.grow || 0, r: o.c[0], g: o.c[1], b: o.c[2], a: o.a ?? 1, k: o.k, grav: o.grav || 0, drag: o.drag || 0, rot: Math.random() * TAU });
+    if (parts.length >= capOf(FX_MAX.parts)) parts.shift();
+    parts.push({ x, y, z, vx, vy, vz, life: o.life, max: o.life, s: o.s, grow: o.grow || 0, r: o.c[0], g: o.c[1], b: o.c[2], a: o.a ?? 1, k: o.k,
+      grav: o.grav || 0, drag: o.drag || 0, frames: o.frames || 0, seed: o.seed ?? seedOf() });
   }
   const DUST = { concrete: [0.62, 0.6, 0.57], sand: [0.72, 0.6, 0.42], wood: [0.5, 0.36, 0.2], cloth: [0.7, 0.7, 0.7], metal: [0.45, 0.45, 0.47] };
 
@@ -2852,8 +3000,8 @@ function createFx() {
     },
     /** Einschlag in die Welt: Loch, Staub oder Funken. axis/sign beschreiben die getroffene Fläche. */
     impact(x, y, z, axis, sign, kind) {
-      if (decals.length > 170) decals.shift();
-      decals.push({ x, y, z, axis, sign, s: rnd(0.014, 0.022), life: 40, k: Q_DECAL, c: 0.035 });
+      if (decals.length >= FX_MAX.decals) decals.shift();
+      decals.push({ x, y, z, axis, sign, s: rnd(0.014, 0.022), life: 40, k: Q_DECAL, c: [0.035, 0.035, 0.035], seed: seedOf() });
       const n = [0, 0, 0];
       n[axis] = sign;
       const col = DUST[kind] || DUST.concrete;
@@ -2872,15 +3020,15 @@ function createFx() {
       F.light(x, y + 0.6, z, 18, [5, 3.2, 1.6], 0.4);
       puff(x, y + 0.5, z, 0, 0, 0, { life: 0.14, s: 4.5, c: [1, 0.85, 0.6], k: Q_GLOW });
       for (let i = 0; i < 9; i++) puff(x + rnd(-0.6, 0.6), y + rnd(0.2, 1), z + rnd(-0.6, 0.6), rnd(-2.5, 2.5), rnd(0.5, 4), rnd(-2.5, 2.5), { life: rnd(0.25, 0.45), s: rnd(0.7, 1.2), grow: 3.5, c: [1, 0.5, 0.14], k: Q_GLOW, drag: 3 });
-      for (let i = 0; i < 12; i++) puff(x + rnd(-0.8, 0.8), y + rnd(0.2, 1.2), z + rnd(-0.8, 0.8), rnd(-2, 2), rnd(0.8, 3.2), rnd(-2, 2), { life: rnd(1.2, 2.4), s: rnd(0.8, 1.4), grow: 1.5, c: [0.16, 0.15, 0.14], a: 0.75, k: Q_SMOKE, drag: 1.6, grav: -0.5 });
+      for (let i = 0; i < 12; i++) puff(x + rnd(-0.8, 0.8), y + rnd(0.2, 1.2), z + rnd(-0.8, 0.8), rnd(-2, 2), rnd(0.8, 3.2), rnd(-2, 2), { life: rnd(1.2, 2.4), s: rnd(0.8, 1.4), grow: 1.5, c: [0.42, 0.4, 0.38], a: 0.75, k: Q_SMOKE, drag: 1.6, grav: -0.5 });
       for (let i = 0; i < 18; i++) puff(x, y + 0.3, z, rnd(-11, 11), rnd(2, 12), rnd(-11, 11), { life: rnd(0.3, 0.8), s: 0.04, c: [1, 0.7, 0.3], k: Q_GLOW, grav: 16, drag: 0.6 });
       for (let i = 0; i < 10; i++) { const a = rnd(TAU); puff(x, y + 0.15, z, Math.cos(a) * rnd(3, 7), rnd(0.2, 1), Math.sin(a) * rnd(3, 7), { life: rnd(0.7, 1.3), s: 0.5, grow: 2.2, c: [0.5, 0.45, 0.38], a: 0.5, k: Q_DUST, drag: 2.6 }); }
-      if (y < 0.4) decals.push({ x, y: 0, z, axis: 1, sign: 1, s: rnd(1.5, 2.1), life: 60, k: Q_DECAL, c: 0.015 });
+      if (y < 0.4) decals.push({ x, y: 0, z, axis: 1, sign: 1, s: rnd(1.5, 2.1), life: 60, k: Q_DECAL, c: [0.015, 0.015, 0.015], seed: seedOf() });
     },
     /** Mündungsfeuer einer fremden Waffe */
     muzzle(x, y, z) { puff(x, y, z, 0, 0, 0, { life: 0.05, s: rnd(0.2, 0.3), c: [1, 0.8, 0.45], k: Q_FLASH }); },
     /** Leuchtende Scheibe am Boden (nur während build(): markiert Stellungen) */
-    disc(x, y, z, r, c, a) { quad(x, y, z, r, 0, 0, 0, 0, r, c[0], c[1], c[2], a, Q_GLOW + Q_FLAT); },
+    disc(x, y, z, r, c, a) { quad(x, y, z, r, 0, 0, 0, 0, r, c[0], c[1], c[2], a, Q_GLOW + Q_FLAT, 0, 3); },
     /**
      * Lampe (Eintrag aus W.lamp, nur während build()): leuchtender Fleck unter der Leuchte, zur Kamera hin versetzt (sonst blendet ihn die
      * Leuchte dahinter weich aus), und ein Lichtkegel aus zwei gekreuzten senkrechten Vierecken (Länge min(y, 4) m). Die Deckkraft der
@@ -2913,39 +3061,50 @@ function createFx() {
     },
     /** Füllt den Puffer für dieses Bild. Liefert die Zahl der Vierecke. */
     build(cam, extra) {
-      qn = 0;
+      qn = 0; counts.fill(0);
       basis(cam.yaw, cam.pitch, cam.roll || 0);
       rx = B[0]; ry = B[1]; rz = B[2]; ux = B[3]; uy = B[4]; uz = B[5]; cx = cam.x; cy = cam.y; cz = cam.z;
       for (const d of decals) {
-        const a = Math.min(1, d.life / 4) * 0.85, o = 0.012 * d.sign, s = d.s;
-        if (d.axis === 0) quad(d.x + o, d.y, d.z, 0, 0, s, 0, s, 0, d.c, d.c, d.c, a, d.k);
-        else if (d.axis === 1) quad(d.x, d.y + o, d.z, s, 0, 0, 0, 0, s, d.c, d.c, d.c, a, d.k);
-        else quad(d.x, d.y, d.z + o, s, 0, 0, 0, s, 0, d.c, d.c, d.c, a, d.k);
+        const a = Math.min(1, d.life / (d.fade || 4)) * (d.a ?? 0.85);
+        flat(d.x, d.y, d.z, d.axis, d.sign, d.s, d.c[0], d.c[1], d.c[2], a, d.k, d.seed, d.rot || 0);
       }
-      for (const p of parts) if (p.k === Q_SMOKE || p.k === Q_DUST) { const t = p.life / p.max; bill(p.x, p.y, p.z, p.s, p.r, p.g, p.b, p.a * Math.min(1, t * 2), p.k, p.rot); }
+      for (const p of parts) {
+        if (p.k !== Q_SMOKE && p.k !== Q_DUST && p.k !== Q_BLOOD) continue;
+        const t = p.life / p.max;
+        bill(p.x, p.y, p.z, p.s, p.r, p.g, p.b, p.a * Math.min(1, t * 2), p.k, p.seed + Math.min(0.999, 1 - t));
+      }
       if (extra) extra();
-      for (const p of parts) if (p.k === Q_GLOW || p.k === Q_FLASH) { const t = p.life / p.max; bill(p.x, p.y, p.z, p.s, p.r, p.g, p.b, p.a * t, p.k, p.k === Q_FLASH ? p.rot : 0); }
+      for (const p of parts) {
+        if (p.k === Q_SMOKE || p.k === Q_DUST || p.k === Q_BLOOD) continue;
+        const t = p.life / p.max, e0 = p.seed + Math.min(0.999, 1 - t);
+        if (p.frames && --p.frames <= 0) p.life = 0;              // nur so viele Bilder sichtbar (Blitz)
+        if (p.k === Q_SPARK) {
+          const v = Math.hypot(p.vx, p.vy, p.vz) || 1, len = Math.min(0.25, v * 0.03);
+          streak(p.x, p.y, p.z, p.vx / v, p.vy / v, p.vz / v, len, p.s, p.r, p.g, p.b, p.a * Math.min(1, t * 2.5), Q_SPARK, e0);
+        } else if (p.k === Q_RING) {
+          const s = p.s;
+          quad(p.x, p.y, p.z, s, 0, 0, 0, 0, s, p.r, p.g, p.b, p.a * t, Q_RING + Q_FLAT, e0, 3);
+        } else bill(p.x, p.y, p.z, p.s, p.r, p.g, p.b, p.a * (p.k === Q_FIRE ? Math.min(1, t * 3) : t), p.k, e0);
+      }
       for (const t of tracers) {
         const k = t.t / t.dur, dx = (t.x1 - t.x0) / t.len, dy = (t.y1 - t.y0) / t.len, dz = (t.z1 - t.z0) / t.len;
         const head = k * t.len, tail = Math.max(0, head - Math.min(10, t.len * 0.5));
         const mx = t.x0 + dx * (head + tail) / 2, my = t.y0 + dy * (head + tail) / 2, mz = t.z0 + dz * (head + tail) / 2;
-        // Breite quer zur Blickrichtung
-        const vx = cx - mx, vy = cy - my, vz = cz - mz;
-        let sx = dy * vz - dz * vy, sy = dz * vx - dx * vz, sz = dx * vy - dy * vx;
-        const sl = t.w * (1 + Math.hypot(vx, vy, vz) * 0.03) / (Math.hypot(sx, sy, sz) || 1), hl = (head - tail) / 2;
-        sx *= sl; sy *= sl; sz *= sl;
-        quad(mx, my, mz, dx * hl, dy * hl, dz * hl, sx, sy, sz, 1, 0.86, 0.55, 0.9, Q_BEAM);
+        const w = t.w * (1 + Math.hypot(cx - mx, cy - my, cz - mz) * 0.03);       // Breite quer zur Blickrichtung, in der Ferne breiter
+        streak(mx, my, mz, dx, dy, dz, head - tail, w, 1, 0.86, 0.55, 0.9, Q_BEAM);
       }
       return qn;
     },
     /** Mündungsfeuer der eigenen Waffe: wird mit der Waffe gezeichnet (hinter den Welt-Effekten im Puffer). */
     flash(x, y, z, size) {
       const before = qn;
-      bill(x, y, z, size, 1, 0.82, 0.5, 1, Q_FLASH, Math.random() * TAU);
+      bill(x, y, z, size, 1, 0.82, 0.5, 1, Q_FLASH, seedOf());
       bill(x, y, z, size * 1.9, 1, 0.6, 0.25, 0.35, Q_GLOW);
       return qn - before;
     },
     clear() { parts.length = 0; tracers.length = 0; decals.length = 0; lights.length = 0; },
+    /** Zahl der Vierecke je Art im letzten Bild (Prüfungen) und der Partikel */
+    counts, get partCount() { return parts.length; },
   };
   return F;
 }
@@ -3146,7 +3305,7 @@ function createMatch(cfg, hooks) {
   if (!client && !navCache.has(world)) navCache.set(world, buildNav(world, phys));
   const nav = client ? null : navCache.get(world);
   const teams = MODES[cfg.mode].teams, skill = SKILLS[cfg.skill];
-  const fx = createFx(), I = instWriter(MAX_INST), V = instWriter(160);
+  const fx = createFx(hooks.prefs, phys), I = instWriter(MAX_INST), V = instWriter(160);
   const soldiers = [], corpses = [], nades = [], packs = [], feed = [];
   const S = hooks.snd, emit = hooks.emit;
   const L = { x: 0, y: 1.6, z: 0, yaw: 0 };          // Hörer (= Kamera)
@@ -6165,7 +6324,7 @@ function createApp(win) {
       if (closed || seq !== startSeq) return;       // inzwischen verlassen, geschlossen oder getrennt
       starting = false;
       try {
-        M = createMatch(cfg, { snd: S, emit });
+        M = createMatch(cfg, { snd: S, emit, prefs });
       } catch (err) {
         console.error('[Sperrzone]', err);
         if (cfg.net?.role === 'host') net?.send({ t: 'bye' }, null, true);      // die Mitspieler laden schon – sie sollen nicht vergeblich warten
