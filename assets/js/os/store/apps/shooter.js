@@ -458,8 +458,11 @@ const TIERS = {
   medium: { scale: 0.8, msaa: false, glow: 5, ssao: 6, shadowTaps: 9, rays: true, detail: 256, particles: 1, dust: true },
   high: { scale: 1, msaa: true, glow: 5, ssao: 10, shadowTaps: 16, rays: true, detail: 512, particles: 1, dust: true },
 };
-/** Belichtungsanpassung: Zielwert des Mittels, Grenzen um env.exposure, Zeiten in s (Bild wird heller → hell, dunkler → dunkel). */
-const BEL = { key: 0.18, lo: 0.66, hi: 1.5, hell: 0.35, dunkel: 1.2 };
+/**
+ * Belichtungsanpassung: Zielwert des Mittels, Grenzen um env.exposure, Zeiten in s (Bild wird heller → hell, dunkler → dunkel);
+ * blitz = Anstiegszeit des gedämpften Mittels (kurze Blitze wie Mündungsfeuer verschieben die Belichtung kaum).
+ */
+const BEL = { key: 0.18, lo: 0.66, hi: 1.5, hell: 0.35, dunkel: 1.2, blitz: 0.15 };
 const GRADE_NEUTRAL = { shadow: [1, 1, 1], light: [1, 1, 1], sat: 1, contrast: 1, rays: 0 };
 /** Radius der Schatten-Abtastung in Texeln je Zahl der Abtastungen (Niedrig, Mittel, Hoch) */
 const SHADOW_RAD = { 4: 1.2, 9: 1.6, 16: 2.2 };
@@ -784,18 +787,22 @@ void main() {
 // Anpassung im Wechsel zweier 1×1-Bilder: ziel = clamp(0,18 / mittel, 0,66 … 1,5) · env.exposure, mittel gemessen am mit env.exposure
 // belichteten Bild – so bleibt ein gewöhnlicher Blick bei der Grundbelichtung der Karte, nur deutlich Helleres oder Dunkleres wird ausgeglichen.
 // Wird das Bild heller, folgt die Belichtung in 0,35 s, wird es dunkler, in 1,2 s (wie das Auge: Blenden geht schneller als Gewöhnen ans Dunkel).
+// Kurze Blitze zählen kaum: das Mittel geht über ein gedämpftes Mittel (B), das in BEL.blitz steigt und sofort fällt. Dauerfeuer (Mündungsblitz
+// und sein Licht, je 40 ms) dunkelt die Szene so nicht ab; eine Explosion bleibt länger hell, blendet erst und regelt dann nach.
 const FS_ADAPT = `#version 300 es
 precision highp float;
 uniform sampler2D uLum, uAlt;
-uniform float uDt, uKey;
+uniform float uDt, uKey, uBlitz;
 uniform vec4 uBelK;      // Zielwert, untere und obere Grenze, Zeit zum Abdunkeln (BEL)
 uniform float uBelDunkel;
 in vec2 vUV; out vec4 o;
 void main() {
   vec2 m = textureLod(uLum, vec2(.5), 6.).rg;
-  float mittel = (m.g > 1e-3 ? exp(m.r / m.g) : uBelK.x / uKey) * uKey, ziel = clamp(uBelK.x / (mittel + 1e-4), uBelK.y, uBelK.z) * uKey;
-  float alt = texelFetch(uAlt, ivec2(0), 0).r;
-  o = vec4(alt + (ziel - alt) * (1. - exp(-uDt / (ziel < alt ? uBelK.w : uBelDunkel))), mittel, 0., 1.);
+  vec4 a = texelFetch(uAlt, ivec2(0), 0);
+  float mittel = (m.g > 1e-3 ? exp(m.r / m.g) : uBelK.x / uKey) * uKey;
+  float ruhig = mittel < a.b ? mittel : a.b + (mittel - a.b) * (1. - exp(-uDt / uBlitz));
+  float ziel = clamp(uBelK.x / (ruhig + 1e-4), uBelK.y, uBelK.z) * uKey;
+  o = vec4(a.r + (ziel - a.r) * (1. - exp(-uDt / (ziel < a.r ? uBelK.w : uBelDunkel))), mittel, ruhig, 1.);
 }`;
 // SSAO in halber Auflösung: Ort aus texTiefe, Normale aus den Nachbarn (je Achse die kleinere Differenz), Halbkugel mit Radius 0,5 m,
 // 6 oder 10 Proben (uKern, je Pixel gedreht), mit Reichweitenprüfung; Ergebnis hoch 1,5. Waffe in der Hand und Himmel bleiben frei (1).
@@ -1473,6 +1480,7 @@ function createRenderer(canvas, { shadowSize = 2048, ldr: forceLdr = false } = {
       gl.uniform1f(P.adapt.u.uKey, env.exposure);
       gl.uniform4f(P.adapt.u.uBelK, BEL.key, BEL.lo, BEL.hi, BEL.hell);
       gl.uniform1f(P.adapt.u.uBelDunkel, BEL.dunkel);
+      gl.uniform1f(P.adapt.u.uBlitz, BEL.blitz);
       post(P.adapt, T.belF[belCur], 1, 1);
       bindTex(4, T.bel[belCur]);
       belReset = false;
