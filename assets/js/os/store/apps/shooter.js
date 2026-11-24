@@ -2153,6 +2153,50 @@ for (const [kind, P] of Object.entries(SCHUSS)) {
   rezept(`schuss.${kind}.nah`, { n: 4, bus: 'welt', gain: P.db + 1.5, prio: 7, cap: 6, reach: 110, send: 0.4, sendD: 0.5, make: (K, rnd, v) => makeShot(K, rnd, v, P, 'nah') });
   rezept(`schuss.${kind}.fern`, { n: 4, bus: 'welt', gain: P.db + 1.5, prio: 6, cap: 6, reach: 110, send: 0.4, sendD: 0.5, make: (K, rnd, v) => makeShot(K, rnd, v, P, 'fern') });
 }
+/**
+ * Pegel neuer Rezepte als Spitze an der Summe (dBFS, Lautstärke 1, ohne Entfernung): ihr make() liefert Spitze 1, gain ist dann die Spitze
+ * vor dem Bus – also Spitze minus Bus-Pegel.
+ */
+const spitze = (db, bus) => db - BUSSE[bus];
+/** Schabe-Rauschen: Bandpass f (q linear), Hüllkurve wie burst (Anstieg attack, dann exponentiell bis dur). */
+const scrape = (K, rnd, a, { at = 0, dur = 0.06, f = 1500, f2 = 0, q = 1.5, gain = 0.5, attack = 0.004 }) => K.burst(a, rnd, { type: 'bandpass', f, f2, q, at, dur, gain, attack });
+/** Kurzer Metall-Klick: Klick plus Resonanzen (Frequenzen mal fk). */
+const clank = (K, rnd, a, at, modes, g = 1, fk = 1) => { K.click(a, rnd, { at, dur: 0.0015, gain: 0.6 * g }); K.modal(a, { at, modes: modesOf(modes, g, fk) }); return a; };
+
+// ---------- Mechanik, Ausklang, Magazin-Hinweis (Schritt 2.2) ----------
+rezept('mech.pump', {
+  bus: 'foley', gain: spitze(-16, 'foley'), prio: 7, cap: 2, send: 0.15,
+  make(K, rnd, v) {
+    const fk = vary(v, 3, rnd, 0.05), tk = vary(v, 3, rnd, 0.08), a = K.buf(0.42);
+    for (const [at, g] of [[0, 0.8], [0.17 * tk, 1]]) {
+      scrape(K, rnd, a, { at, dur: 0.06, f: 1100 * fk, q: 1.5, gain: 0.35 * g });
+      clank(K, rnd, a, at + 0.012, [[780, 18, 1], [1650, 10, 0.6], [2900, 6, 0.4]], g, fk);
+      K.tone(a, { f: 190 * fk, f2: 120 * fk, at: at + 0.01, dur: 0.03, gain: 0.5 * g, attack: 0.001 });
+    }
+    return K.norm(K.fade(a, { outT: 0.02 }), 1);
+  },
+});
+rezept('mech.bolt', {
+  bus: 'foley', gain: spitze(-17, 'foley'), prio: 7, cap: 2, send: 0.15,
+  make(K, rnd, v) {
+    const fk = vary(v, 3, rnd, 0.05), tk = vary(v, 3, rnd, 0.08), a = K.buf(0.75);
+    [[0, 0.8], [0.16, 0.6], [0.42, 0.7], [0.55, 1]].forEach(([at, g]) => clank(K, rnd, a, at * tk, MECH.heavy, g, fk * (1 + (at > 0.3 ? 0.04 : 0))));
+    scrape(K, rnd, a, { at: 0.16 * tk, dur: 0.26 * tk, f: 2000 * fk, q: 1.2, gain: 10 ** (-18 / 20) * 2.5, attack: 0.05 });
+    return K.norm(K.fade(a, { outT: 0.03 }), 1);
+  },
+});
+for (const [kind, fk] of [['rifle', 1], ['smg', 1.12], ['lmg', 0.85]]) {
+  rezept(`ausklang.${kind}`, {
+    bus: 'waffe', gain: spitze(-24, 'waffe'), prio: 6, cap: 1, send: 1,
+    make(K, rnd, v) {
+      const a = K.noise(K.buf(0.9), rnd, 'pink'), k = fk * vary(v, 3, rnd, 0.06);
+      K.hp(a, { f: 500 * k }); K.lp(a, { f: 2200 * k, f2: 1400 * k });
+      K.decay(a, { attack: 0.03, tau: 0.28 });
+      echoes(K, a, [[0.14, -6], [0.26, -10]], 1600 * k);
+      return K.norm(K.fade(a, { outT: 0.08 }), 1);
+    },
+  });
+}
 rezept('explosion.nah', {
   bus: 'welt', gain: altDb(0.9, 'welt'), prio: 8, cap: 4, reach: 140, send: 0.9,
   make(K, rnd, v) {
@@ -2194,7 +2238,10 @@ for (const [name, len, fn] of [
   ['patrone', 0.07, (K, rnd, a, s) => { K.burst(a, rnd, { type: 'bandpass', f: 1500 * s, q: 3, dur: 0.05, gain: 0.8 }); K.tone(a, { type: 'triangle', f: 520 * s, f2: 300 * s, dur: 0.05, gain: 0.2 }); }],
   ['verschluss', 0.16, (K, rnd, a, s) => { K.burst(a, rnd, { type: 'bandpass', f: 2600 * s, q: 4, dur: 0.04, gain: 0.9 }); K.burst(a, rnd, { type: 'bandpass', f: 1700 * s, q: 4, dur: 0.05, gain: 0.9, at: 0.09 }); }],
 ]) rezept(`nachladen.${name}`, { bus: 'foley', gain: altDb(0.3, 'foley'), prio: 6, cap: 2, send: 0.1, make(K, rnd, v) { const a = K.buf(len); fn(K, rnd, a, spread(v, rnd)); return a; } });
-rezept('leer', { bus: 'foley', gain: altDb(0.2, 'foley'), prio: 6, cap: 2, send: 0.1, make: (K, rnd, v) => K.burst(K.buf(0.05), rnd, { type: 'bandpass', f: 3200 * spread(v, rnd), q: 5, dur: 0.03, gain: 0.9 }) });
+rezept('leer', {
+  n: 2, bus: 'foley', gain: spitze(-22, 'foley'), prio: 6, cap: 2, send: 0.1,
+  make(K, rnd, v) { const a = K.buf(0.06); clank(K, rnd, a, 0, [[3300, 5, 1], [5200, 3, 0.5], [1400, 8, 0.4]], 1, v ? 1.07 : 0.95); return K.norm(K.fade(a, { outT: 0.005 }), 1); },
+});
 rezept('wechsel', { bus: 'foley', gain: altDb(0.14, 'foley'), prio: 5, cap: 2, send: 0.1, make: (K, rnd, v) => K.burst(K.buf(0.18), rnd, { type: 'bandpass', f: 900 * spread(v, rnd), q: 0.8, dur: 0.16, gain: 0.9, attack: 0.05 }) });
 rezept('messer.schwung', {
   bus: 'foley', gain: altDb(0.25, 'foley'), prio: 6, cap: 2, send: 0.1,
@@ -2394,6 +2441,8 @@ const LIMIT = { threshold: -4, knee: 2, ratio: 20, attack: 0.002, release: 0.09 
 const LIMIT_TRIM = 10 ** (-1.94 / 20);
 const IMPACT_SND = { concrete: 'beton', metal: 'metall', wood: 'holz', body: 'koerper' };
 const RELOAD_SND = { out: 'raus', in: 'rein', shell: 'patrone', bolt: 'verschluss' };
+/** Automatische Waffen mit Ausklang nach einem Feuerstoß */
+const AUSKLANG = { rifle: true, smg: true, lmg: true };
 /**
  * Raumantworten der vier Zonen: Länge (s), Impulsdichte je s (Anfang → Ende), RT60 (s), Filter (Bandpass bp oder gleitender Tiefpass lp, Hz),
  * frühe Echos [ms, dB] (earlyLp: eigener Tiefpass, spread: links und rechts versetzt, s), Flatterecho comb [links s, rechts s, Rückkopplung], Rückweg (dB).
@@ -2455,6 +2504,7 @@ function createSound(getPrefs) {
   let lsend = null, zoneL = 'hof', shown = 'hof', zoneT = 0, forced = null, shownVol = -1;
   const bus = {}, pool = [], last = {}, stat = { plays: 0, steals: 0, drops: 0, max: 0, by: {} }, st = { hp: 100, boom: 0 };
   const hallIn = {}, lzone = {}, zcache = new Map();
+  const burst = { kind: null, n: 0, t: 0, dt: 0 };         // eigener Feuerstoß: Art, Schüsse, letzter Schuss (s), Schussabstand (s)
   const vol = () => getPrefs().volume;
   const ok = () => !gone && sfx.enabled && audioReady() && vol() > 0;
 
@@ -2677,6 +2727,8 @@ function createSound(getPrefs) {
       LL = L;
       if (!ctx) return;
       level(true);
+      // Ausklang: ein Feuerstoß aus mindestens 3 Schüssen ist zu Ende, wenn für das 1,6-Fache des Schussabstands nichts mehr kam
+      if (burst.n >= 3 && performance.now() / 1000 - burst.t > 1.6 * burst.dt) { play(`ausklang.${burst.kind}`, { own: true }); burst.n = 0; }
       if ((zoneT -= dt) <= 0) { zoneT = 0.25; zoneL = zoneAt(L.x, Math.max(0, L.y - 1.6), L.z); fadeZone(); }
     },
     /** Raum vorgeben (Hörprobe): 'hof' | 'halle' | 'gasse' | 'raum' | 'aus' (ohne Hall) – null: wieder selbst bestimmen. */
@@ -2692,9 +2744,20 @@ function createSound(getPrefs) {
     /** Summe hinter Begrenzer und Ausgleich (für Mitschnitte in Prüfungen). */
     out() { graph(); return S.tap; },
     /** Schuss. L = Hörer {x, y, z, yaw}; own = die eigene Waffe. */
-    shot(kind, L, x, y, z, own = false) {
+    shot(kind, L, x, y, z, own = false, magK = 1) {
       const k = SCHUSS[kind] ? kind : 'rifle';
-      if (own) { play(`schuss.${k}.ich`, { own: true }); return; }
+      if (own) {
+        play(`schuss.${k}.ich`, { own: true });
+        if (k === 'shotgun') play('mech.pump', { own: true, when: 0.28 });
+        else if (k === 'sniper') play('mech.bolt', { own: true, when: 0.35 });
+        // Magazin-Hinweis: unter 30 % zusätzlich der Leer-Klick, 18 dB (bei 0,3) bis 8 dB (letzter Schuss) unter der Spitze des Schusses, höher
+        if (magK < 0.3) { const q = clamp(1 - magK / 0.3, 0, 1); play('leer', { own: true, gain: 10 ** ((SCHUSS[k].db - 18 + 10 * q + 22) / 20), rate: 1 + 0.25 * q }); }
+        // Feuerstoß automatischer Waffen merken (Ausklang in listen)
+        const now = performance.now() / 1000;
+        if (AUSKLANG[k] && burst.kind === k && now - burst.t < 0.3) { burst.dt = now - burst.t; burst.n++; } else Object.assign(burst, { kind: k, n: 1, dt: 0 });
+        burst.t = now;
+        return;
+      }
       // fremd: nah und fern zugleich, übergeblendet zwischen 25 und 60 m
       const kf = sstep(25, 60, Math.hypot(x - L.x, y - L.y, z - L.z));
       if (kf < 1) play(`schuss.${k}.nah`, { L, x, y, z, gain: 1 - kf });
@@ -3324,7 +3387,7 @@ function createMatch(cfg, hooks) {
     s.kickAnim = Math.min(1.6, s.kickAnim + (w.pellets > 1 || w.scope ? 1.5 : w.auto ? 0.75 : 1.1));
     fx.light(s.mx, s.my, s.mzz, 7, [2.6, 1.8, 0.8], 0.05);
     if (s.me) M.flashT = 0.04; else fx.muzzle(s.mx, s.my, s.mzz);
-    S.shot(w.snd, L, s.x, s.y + 1.4, s.z, s.me);
+    S.shot(w.snd, L, s.x, s.y + 1.4, s.z, s.me, gun.mag / w.mag);
     if (net) {
       const e = end.map((v) => Math.round(v * 100) / 100);
       if (client) net.send({ t: 'fire', w: gun.id, h: claims.slice(0, 8), e, k: endK }, null, true);
