@@ -3105,6 +3105,41 @@ rezept('musik.stufe', {
   },
 });
 
+// ---------- Zustände (Schritt 7.5): nahe Explosion, wenig Leben ----------
+rezept('zustand.piepen', {
+  n: 2, bus: 'ui', gain: spitze(-21, 'ui'), prio: 8, cap: 1,
+  make(K, rnd, v) {
+    const a = K.sine(K.buf(5), { f: v ? 4230 : 4200, gain: 1 });
+    K.decay(a, { attack: 0.03, tau: 1.5 });
+    return K.norm(K.fade(a, { outT: 1.2 }), 1);
+  },
+});
+/** Herzschlag: Doppelschlag (0 und 0,14 – 0,17 s), der zweite leiser – dumpfer Sinus 55 → 38 Hz und tiefes Rauschen. */
+rezept('zustand.herz', {
+  bus: 'foley', gain: spitze(-14, 'foley'), prio: 8, cap: 2,
+  make(K, rnd, v) {
+    const fk = vary(v, 3, rnd, 0.14), a = K.buf(0.5), t2 = 0.14 + 0.02 * v + 0.01 * rnd();      // Varianten: Tonhöhe und Abstand der Schläge
+    for (const [at, g] of [[0, 1], [t2, 0.6]]) {
+      const b = K.sine(K.buf(0.22), { f: 55 * fk, f2: 38 * fk, dur: 0.12, gain: 1 });
+      K.decay(b, { attack: 0.008, tau: 0.05 }); K.fade(b, { outT: 0.03 }); K.dc(b);
+      K.mix(a, b, { at, gain: g });
+      K.mix(a, noiseHit(K, rnd, 0.12, { lp: 160 * fk, attack: 0.006, tau: 0.03 }), { at, gain: 0.35 * g });
+    }
+    return K.norm(K.fade(a, { outT: 0.05 }), 1);
+  },
+});
+/** Leises Atmen: Einatmen (Bandpass steigend um 1,2 kHz) und Ausatmen (Bandpass fallend um 800 Hz). */
+rezept('zustand.atem', {
+  bus: 'foley', gain: spitze(-30, 'foley'), prio: 4, cap: 1,
+  make(K, rnd, v) {
+    const fk = vary(v, 3, rnd, 0.1), a = K.buf(2.1);
+    const inh = K.noise(K.buf(0.8), rnd, 'pink'); K.bp(inh, { f: 900 * fk, f2: 1500 * fk, q: 0.9 }); K.env(inh, [[0, 0.01], [0.5, 1], [0.8, 0.01]]);
+    const exh = K.noise(K.buf(1.1), rnd, 'pink'); K.bp(exh, { f: 900 * fk, f2: 600 * fk, q: 0.8 }); K.env(exh, [[0, 0.01], [0.15, 1], [1.1, 0.005]]);
+    K.mix(a, K.norm(inh, 0.7), { at: 0.02 }); K.mix(a, K.norm(exh, 1), { at: 0.9 });
+    return K.norm(K.fade(a, { outT: 0.08 }), 1);
+  },
+});
+
 /** Gruppen der Rezepte (Hörprobe): Name → Gruppe; KLANG_GRUPPEN in der Reihenfolge der Anzeige. */
 const KLANG_GRUPPEN = ['Waffen', 'Mechanik', 'Hülsen', 'Schritte', 'Einschläge', 'Treffer', 'Foley', 'Explosion', 'Funk-Signale', 'Umgebung', 'Musik', 'Zustände', 'Spaß-Paket'];
 const klangGruppe = (n) => (/^schuss\./.test(n) ? 'Waffen' : /^(mech|ausklang)\.|^leer$/.test(n) ? 'Mechanik' : /^huelse\./.test(n) ? 'Hülsen'
@@ -3353,7 +3388,9 @@ function createSound(getPrefs) {
   const beds = [];
   /** Umgebung der Karte: want = AMB_KARTE-Eintrag, ready = Schleifen berechnet, on = laufende Schleifen, t = Zeit bis zum nächsten Einzelklang (s). */
   const amb = { want: null, ready: false, on: [], t: 8, inside: false };
-  let ambIn = null, ambLp = null, lastListen = 0, tickId = 0;
+  let ambIn = null, ambLp = null, lastListen = 0, tickId = 0, NYQ = 24000;
+  /** Zustände (Schritt 7.5): je Bus außer ui eine Senke und ein Tiefpass (nahe Explosion), dazu am Bus welt der Tiefpass bei wenig Leben. */
+  const zst = {}, hp = { lp: null, f: 0, k: 0, beat: 0, breath: 0 };
   /** Ortsfeste Quellen der Karte: { name, x, y, z, reach, v (laufende Stimme oder null) } – sie klingen nur in Reichweite (Schritt 7.2). */
   const srcs = [];
   /** Musik: want = gewünschte Dauermusik (Rezeptname oder null), v = laufende Stimme (Schritt 7.4). */
@@ -3388,16 +3425,25 @@ function createSound(getPrefs) {
     pre.connect(dry);
     dry.connect(outN);
     setTimeout(() => { try { sum.disconnect(pre); pre.disconnect(); dry.disconnect(); } catch { /* schon ab */ } }, 1000);
-    for (const [b, db] of Object.entries(BUSSE)) { bus[b] = ctx.createGain(); bus[b].gain.value = 10 ** (db / 20); bus[b].connect(sum); }
+    NYQ = ctx.sampleRate / 2;                       // ein Tiefpass auf Nyquist lässt alles unverändert durch
+    const lowpass = () => { const f = ctx.createBiquadFilter(); f.type = 'lowpass'; f.frequency.value = NYQ; f.Q.value = 0; return f; };
+    for (const [b, db] of Object.entries(BUSSE)) {
+      bus[b] = ctx.createGain(); bus[b].gain.value = 10 ** (db / 20);
+      if (b === 'ui') { bus[b].connect(sum); continue; }
+      const duck = ctx.createGain(), lp = lowpass();
+      bus[b].connect(duck); duck.connect(lp);
+      if (b === 'welt') { hp.lp = lowpass(); hp.f = NYQ; lp.connect(hp.lp); hp.lp.connect(sum); } else lp.connect(sum);
+      zst[b] = { duck, lp };
+    }
     // Umgebung der Karte (Schleifen und Einzelklänge): innen (Zone halle oder raum) Tiefpass 1,2 kHz und −5 dB, überblendet in 0,4 s
-    ambIn = ctx.createGain(); ambLp = ctx.createBiquadFilter();
-    ambLp.type = 'lowpass'; ambLp.frequency.value = 20000; ambLp.Q.value = 0;
+    ambIn = ctx.createGain(); ambLp = lowpass();
     ambIn.connect(ambLp); ambLp.connect(bus.amb);
     tickId = setInterval(tick, 100);
     // Hall: je Zone ein ConvolverNode. Ortsgebundene Stimmen senden in die Zone der Quelle, alles andere über lsend in die Zone des Hörers
     // (lzone blendet beim Zonenwechsel über).
-    const ir = raumIR(ctx.sampleRate), hallOut = ctx.createGain();
-    hallOut.connect(sum);
+    const ir = raumIR(ctx.sampleRate), hallOut = ctx.createGain(), hDuck = ctx.createGain(), hLp = lowpass();
+    hallOut.connect(hDuck); hDuck.connect(hLp); hLp.connect(sum);
+    zst.hall = { duck: hDuck, lp: hLp };
     lsend = ctx.createGain();
     for (const z of ZONEN) {
       const ab = ctx.createBuffer(2, ir[z][0].length, ctx.sampleRate), cv = ctx.createConvolver(), ret = ctx.createGain();
@@ -3611,7 +3657,7 @@ function createSound(getPrefs) {
     if (on === amb.inside || !ambIn) return;
     amb.inside = on;
     const t = ctx.currentTime;
-    ambLp.frequency.cancelScheduledValues(t); ambLp.frequency.setTargetAtTime(on ? 1200 : 20000, t, 0.4 / 3);
+    ambLp.frequency.cancelScheduledValues(t); ambLp.frequency.setTargetAtTime(on ? 1200 : NYQ, t, 0.4 / 3);
     ambIn.gain.cancelScheduledValues(t); ambIn.gain.setTargetAtTime(on ? 10 ** (-5 / 20) : 1, t, 0.4 / 3);
   }
   // ---------- Ortsfeste Quellen (Schritt 7.2) ----------
@@ -3650,6 +3696,35 @@ function createSound(getPrefs) {
    * Alle 100 ms (ab dem ersten Klang): ruft listen nicht mehr (Partie verlassen, Fenster verdeckt), enden die Umgebung und die Quellen der Karte;
    * ruft es wieder, beginnen sie neu.
    */
+  // ---------- Zustände (Schritt 7.5) ----------
+  /**
+   * Nahe Explosion (k = 1 direkt daneben … 0 in 10 m), ab delay s: alle Busse außer ui um bis zu 12 dB gesenkt und mit Tiefpass bis 900 Hz,
+   * nach 0,35 s in rund 0,85 s zurück (zusammen 1,2 s); dazu das Piepen (Sinus 4,2 kHz, tau 1,5 s).
+   */
+  function boomFx(k, delay = 0) {
+    const t = ctx.currentTime + delay, g = 10 ** ((-12 * k) / 20), f = NYQ * (900 / NYQ) ** k;
+    for (const z of Object.values(zst)) {
+      for (const [p, v, back] of [[z.duck.gain, g, 1], [z.lp.frequency, f, NYQ]]) {
+        p.cancelScheduledValues(t);
+        p.setTargetAtTime(v, t, 0.015);
+        p.setTargetAtTime(back, t + 0.35, 0.85 / 3);
+      }
+    }
+    play('zustand.piepen', { gain: k, when: delay });
+  }
+  /**
+   * Wenig Leben (unter 40): k = 0 bei 40 … 1 bei 10. Bus welt mit Tiefpass von 8 kHz (bei 40) bis 2,5 kHz (bei 10); darüber offen.
+   * Herzschlag und Atmen laufen in listen.
+   */
+  function lowHp(v) {
+    const on = v > 0 && v < 40, k = on ? clamp((40 - v) / 30, 0, 1) : 0, f = on ? 8000 * (2500 / 8000) ** k : NYQ;
+    hp.k = on ? Math.max(0.001, k) : 0;
+    if (!hp.lp || Math.abs(Math.log(f / hp.f)) < 0.03) return;
+    hp.f = f;
+    const t = ctx.currentTime;
+    hp.lp.frequency.cancelScheduledValues(t);
+    hp.lp.frequency.setTargetAtTime(f, t, 0.1);
+  }
   /** Dauermusik dem Wunsch angleichen: alte ausblenden (1,5 s), neue einblenden, sobald berechnet. Während der Hörprobe (Raum vorgegeben) still. */
   function musicPump() {
     const want = forced ? null : mus.want, cur = mus.v && !mus.v.off && !mus.v.ending ? mus.v.name : null;
@@ -3662,7 +3737,7 @@ function createSound(getPrefs) {
   function tick() {
     if (gone) return;
     musicPump();
-    if (performance.now() - lastListen > 600) { if (amb.on.length) ambStop(1); srcStop(); }
+    if (performance.now() - lastListen > 600) { if (amb.on.length) ambStop(1); srcStop(); if (hp.k) lowHp(100); }
   }
 
   const S = {
@@ -3690,6 +3765,11 @@ function createSound(getPrefs) {
       for (const v of beds) if (v.pos && !v.ending) follow(v, occ);
       if (amb.want && amb.ready && !amb.on.length && ok()) ambStart();
       if (amb.on.length && (amb.t -= dt) <= 0) { amb.t = 6 + 14 * Math.random(); ambOne(); }
+      // wenig Leben: Herzschlag (70 Schläge je Minute bei 40, 130 bei 10) und leises Atmen
+      if (hp.k) {
+        if ((hp.beat -= dt) <= 0) { hp.beat = 60 / (70 + 60 * hp.k); play('zustand.herz', { gain: 0.6 + 0.4 * hp.k }); }
+        if ((hp.breath -= dt) <= 0) { hp.breath = 3.2 - 1.2 * hp.k; play('zustand.atem', { gain: 0.6 + 0.4 * hp.k, rate: 1 + 0.15 * hp.k }); }
+      } else { hp.beat = 0; hp.breath = 0.6; }
     },
     /** Raum vorgeben (Hörprobe): 'hof' | 'halle' | 'gasse' | 'raum' | 'aus' (ohne Hall) – null: wieder selbst bestimmen. Solange vorgegeben, schweigt die Musik. */
     room(z) { forced = z && (z === 'aus' || RAUM[z]) ? z : null; fadeZone(); if (ctx) musicPump(); },
@@ -3705,7 +3785,15 @@ function createSound(getPrefs) {
     motif(name, when = 0) { if (KLANG[`musik.${name}`]) play(`musik.${name}`, { when }); },
     zone: () => forced || zoneL,
     voices() { purge(performance.now()); return pool.length; },
-    state(o) { Object.assign(st, o); },
+    /** Zustände: { hp } je Bild (Lebenspunkte der eigenen Figur, gefallen: 100), { boom: 0 … 1, delay } bei einer nahen Explosion. */
+    state(o) {
+      Object.assign(st, o);
+      if (!ctx) return;
+      if (o.boom > 0) boomFx(clamp(o.boom, 0, 1), o.delay || 0);
+      if (o.hp !== undefined) lowHp(o.hp);
+    },
+    /** Pegel und Tiefpass der Busse (Prüfungen): je Bus { gain, duck, lp }, welt zusätzlich hpLp; hall. */
+    busse: () => Object.fromEntries([...Object.keys(BUSSE), 'hall'].map((b) => [b, { gain: bus[b]?.gain.value ?? null, duck: zst[b]?.duck.gain.value ?? 1, lp: zst[b]?.lp.frequency.value ?? null, ...(b === 'welt' ? { hpLp: hp.lp?.frequency.value } : {}) }])),
     stats: () => ({ ...stat, by: { ...stat.by }, voices: pool.length, beds: beds.length, bedNames: beds.map((v) => v.name) }),
     /** Dauerklänge mit ihren aktuellen Werten (Prüfungen): Name, Pegel, Tiefpass, Stereo-Lage. */
     beds: () => beds.map((v) => ({ name: v.name, gain: v.g.gain.value, fc: v.lp?.frequency?.value ?? null, pan: v.pan?.pan?.value ?? null, pos: v.pos || null })),
@@ -3737,9 +3825,10 @@ function createSound(getPrefs) {
     },
     /** Explosion: nah und fern zugleich, übergeblendet zwischen 30 und 70 m. */
     explosion(L, x, y, z) {
-      const kf = sstep(30, 70, Math.hypot(x - L.x, y - L.y, z - L.z));
+      const d = Math.hypot(x - L.x, y - L.y, z - L.z), kf = sstep(30, 70, d);
       if (kf < 1) play('explosion.nah', { L, x, y, z, gain: 1 - kf });
       if (kf > 0) play('explosion.fern', { L, x, y, z, gain: kf });
+      if (d < 10 && ok()) S.state({ boom: 1 - d / 10, delay: d / 343 + 0.03 });       // nahe Explosion: kurz taub (nach dem ersten Knall)
     },
     impact(L, x, y, z, kind) {
       play(`einschlag.${IMPACT_SND[kind] || 'beton'}`, { L, x, y, z });
@@ -7653,6 +7742,7 @@ function createApp(win) {
     }
     // Gesundheit, Munition
     const hp = Math.max(0, Math.ceil(me.hp));
+    S.state?.({ hp: me.alive ? hp : 100 });       // Klang: wenig Leben (Herzschlag, dumpfe Welt)
     hpNum.textContent = hp;
     hpBar.parentNode.style.setProperty('--p', hp / 100);
     hpEl.classList.toggle('low', hp < 40);
@@ -7936,6 +8026,7 @@ function createApp(win) {
     /** Schleifen im Hintergrund berechnen (Promise) und ihre Rechenzeit (KLOOP). */
     later: (names) => klangLater(names),
     beds: () => S.beds(),
+    busse: () => S.busse(),
     loops: () => ({ ...KLOOP, by: { ...KLOOP.by } }),
   };
 
