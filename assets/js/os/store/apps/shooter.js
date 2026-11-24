@@ -3291,6 +3291,8 @@ function createMatch(cfg, hooks) {
 // Wer ein Spiel eröffnet, ist die Mitte eines Sterns: alle anderen verbinden sich nur mit ihm.
 // Zusammengefunden wird über zwei Codes, die sich die Spieler selbst schicken – die Einladung hin, die Antwort zurück.
 // ==========================================================================
+/** Protokollversion: steht in den Vorgaben der Nachricht „start“. Mitspieler mit einer anderen Version lehnen die Partie ab. */
+const NET_V = 2;
 const NET_CSS = `
 .szn { container: szn / inline-size; display: flex; flex-direction: column; gap: 14px; min-width: 0; min-height: 0; font-size: 13px; color: var(--fg); }
 .szn-head { display: flex; align-items: center; gap: 10px; min-width: 0; }
@@ -5262,6 +5264,8 @@ function createApp(win) {
   }
   /** Vorgaben des Gastgebers prüfen – nur was hier ankommt, erreicht die Partie. Liefert null, wenn sie nicht zu gebrauchen sind. */
   function remoteCfg(c) {
+    // Protokollversion: wer anders rechnet, spielt nicht mit (ältere Fassungen kennen diese Prüfung nicht)
+    if (c && typeof c === 'object' && c.v !== NET_V) { notice('Sperrzone', 'Der Gastgeber nutzt eine andere Version von Sperrzone. Ladet beide die Seite neu.', 'close'); return null; }
     if (!c || typeof c !== 'object' || !MAPS.some((x) => x.id === c.map) || !Object.hasOwn(MODES, c.mode) || !Array.isArray(c.roster)) return null;
     const teams = MODES[c.mode].teams;
     const roster = c.roster.slice(0, 24).filter((r) => r && typeof r === 'object').map((r) => ({
@@ -5298,6 +5302,7 @@ function createApp(win) {
     if (hosting) {
       const base = { map: cfg.map, mode: cfg.mode, limit: cfg.limit, minutes: cfg.minutes, size: cfg.size, skill: cfg.skill };
       base.roster = makeRoster(base, net.peers.map((p) => ({ id: p.id, name: p.name })));
+      base.v = NET_V;                                // Protokollversion
       net.send({ t: 'start', cfg: base }, null, true);
       cfg.roster = base.roster;
       cfg.net = { role: 'host', id: 0, send: (msg, to, rel) => net.send(msg, to, rel) };
