@@ -5401,7 +5401,7 @@ function createFx(prefs = null, phys = null, world = null) {
         const head = k * t.len, tail = Math.max(0, head - Math.min(10, t.len * 0.5));
         const mx = t.x0 + dx * (head + tail) / 2, my = t.y0 + dy * (head + tail) / 2, mz = t.z0 + dz * (head + tail) / 2;
         const w = t.w * (1 + Math.hypot(cx - mx, cy - my, cz - mz) * 0.03);       // Breite quer zur Blickrichtung, in der Ferne breiter
-        streak(mx, my, mz, dx, dy, dz, head - tail, w, 1, 0.86, 0.55, 0.9, Q_BEAM);
+        streak(t.x0 + dx * head, t.y0 + dy * head, t.z0 + dz * head, dx, dy, dz, head - tail, w, 1, 0.86, 0.55, 0.9, Q_BEAM);      // streak() nimmt den Kopf, nicht die Mitte
       }
       return qn;
     },
