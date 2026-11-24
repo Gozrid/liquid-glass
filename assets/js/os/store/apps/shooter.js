@@ -914,7 +914,10 @@ void main() {
     float d = texelFetch(uTiefe, ivec2(gl_FragCoord.xy), 0).r;
     if (d >= .1 && d < 1.) c *= mix(1., texture(uAo, vUV).r, .8 * (1. - smoothstep(.4, 1.5, dot(c * bel, vec3(.2126, .7152, .0722)))));
   }
-  if (uStrahlenK > 0.) c += texture(uStrahlen, vUV).rgb * uStrahlenK;     // Sonnenstrahlen (env.grade.rays, ausgeblendet ohne Sonne vor der Kamera)
+  if (uStrahlenK > 0.) {                                                  // Sonnenstrahlen (env.grade.rays, ausgeblendet ohne Sonne vor der Kamera)
+    vec3 r = texture(uStrahlen, vUV).rgb * uStrahlenK;
+    c = uLdr > .5 ? 1. - (1. - min(c, 1.)) * (1. - min(r, 1.)) : c + r;  // im Rückfall (Anzeigewerte) weich überlagert statt addiert, sonst brennt der Himmel aus
+  }
   if (uLdr < .5) c = pow(clamp(aces(c * bel + g), 0., 1.), vec3(1. / 2.2));
   else c = min(c + g, 1.);
   float l = dot(c, vec3(.2126, .7152, .0722));
@@ -1512,7 +1515,7 @@ function createRenderer(canvas, { shadowSize = 2048, ldr: forceLdr = false } = {
     if (tier.rays && T.str && env.grade?.rays) {
       basis(cam.yaw, cam.pitch, cam.roll || 0);
       const sd = env.sunDir, vor = B[6] * sd[0] + B[7] * sd[1] + B[8] * sd[2];
-      if (vor > 0.1 && project(cam.x + sd[0] * 400, cam.y + sd[1] * 400, cam.z + sd[2] * 400, sonne)) strK = env.grade.rays * sstep(0.1, 0.4, vor);
+      if (vor > 0.1 && project(cam.x + sd[0] * 400, cam.y + sd[1] * 400, cam.z + sd[2] * 400, sonne)) strK = env.grade.rays * sstep(0.1, 0.4, vor) * (ldr ? 0.5 : 1);
     }
     if (strK > 0) {
       bindTex(2, T.farbe);
