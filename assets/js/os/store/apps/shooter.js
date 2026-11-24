@@ -859,6 +859,7 @@ function worldBuilder() {
     flip: false,             // true: alles wird an der Mittellinie gespiegelt (z → −z)
     name: '', env: null, bounds: null, ground: 'concrete',
     spawns: [[], []], pois: [], flags: [], lamps: [],
+    barrels: [],             // explosive Fässer (Phase 8): { x, y, z, col = Index der Kollisionsbox }
 
     /** Quader ab der Ecke (x, y, z). o: tint, emis, ghost (nur sichtbar), clip (nur Hindernis), yaw/tilt (nur Optik), noAO */
     box(x, y, z, sx, sy, sz, m = 'concrete', o = {}) {
@@ -877,6 +878,14 @@ function worldBuilder() {
       if (W.flip) cz = -cz;
       mesh.cyl(cx, y, cz, r, hgt, MAT[m], o.tint || WHITE, o.emis || 0, o.seg || 10);
       if (!o.ghost) cols.push([cx - r * 0.82, y, cz - r * 0.82, cx + r * 0.82, y + hgt, cz + r * 0.82, MAT[m]]);
+      return W;
+    },
+    /** Explosives Fass: dieselbe Kollisionsbox wie ein Fass aus W.cyl (Radius 0,31, Höhe 0,92), aber ohne feste Geometrie – die Partie zeichnet es. */
+    fass(cx, cz, y = 0) {
+      if (W.flip) cz = -cz;
+      const r = 0.31;
+      W.barrels.push({ x: cx, y, z: cz, col: cols.length });
+      cols.push([cx - r * 0.82, y, cz - r * 0.82, cx + r * 0.82, y + 0.92, cz + r * 0.82, MAT.plate]);
       return W;
     },
     /** Mauer entlang einer Achse mit Öffnungen [von, bis, Brüstung, Sturz]. axis 'x': bei z = fixed, 'z': bei x = fixed. */
@@ -917,7 +926,9 @@ function worldBuilder() {
     finish() {
       const n = cols.length, c = new Float32Array(n * 6), cm = new Uint8Array(n);
       cols.forEach((b, i) => { c.set(b.slice(0, 6), i * 6); cm[i] = b[6]; });
-      return { name: W.name, env: W.env, bounds: W.bounds, groundHit: W.ground, mesh: mesh.finish(), cols: c, colMat: cm, colCount: n, spawns: W.spawns, pois: W.pois, flags: W.flags, lamps: W.lamps };
+      const barrelOf = new Int16Array(n).fill(-1);          // Kollisionsbox → Fass (−1: kein Fass)
+      W.barrels.forEach((b, i) => { barrelOf[b.col] = i; });
+      return { name: W.name, env: W.env, bounds: W.bounds, groundHit: W.ground, mesh: mesh.finish(), cols: c, colMat: cm, colCount: n, spawns: W.spawns, pois: W.pois, flags: W.flags, lamps: W.lamps, barrels: W.barrels, barrelOf };
     },
   };
   return W;
@@ -1048,7 +1059,7 @@ function mapFrachthof(W) {
     crate(W, -24.1, 0, -9.6, 1.3);
     crate(W, -24.2, 0, -6.6, 1.5); crate(W, -24.05, 1.5, -6.5, 1.2);
     crate(W, -19.2, 0, -13.6, 1.4);
-    barrel(W, -18.2, -11.5, C_BLUE); barrel(W, -18.9, -11.0, C_RED);
+    W.fass(-18.2, -11.5); W.fass(-18.9, -11.0);              // explosive Fässer (Phase 8)
 
     // Deckung vor dem Startbereich
     container(W, -10.1, -21.6, CONT_40, 'x', C_RED);
@@ -1062,7 +1073,7 @@ function mapFrachthof(W) {
     container(W, 3.6, -13.6, CONT_20, 'z', C_GREEN);
     container(W, 3.6, -13.6, CONT_20, 'z', C_YEL, CONT_H);
     crate(W, -5.2, 0, -11.8, 1.3); crate(W, -3.8, 0, -11.2, 1.1); crate(W, -5.05, 1.3, -11.65, 0.9);
-    barrel(W, -2.2, -10.4, C_RED); barrel(W, -1.5, -10.9, C_BLUE);
+    W.fass(-2.2, -10.4); W.fass(-1.5, -10.9);
     barrier(W, -2, -6.4, 4, 'x');
     W.box(-15.6, 0, -3.6, 0.9, 9.4, 0.9, 'plate', CRANE);
     W.box(10.6, 0, -3.6, 0.9, 9.4, 0.9, 'plate', CRANE);
@@ -1248,7 +1259,7 @@ function mapOase(W) {
     crate(W, -24.4, 0, -20.7, 1.2);
     W.box(-19.1, 0, -20.6, 2.6, 0.85, 1, 'planks', { tint: OASE_HOLZ });
     W.box(-10.2, 0, -24.5, 1.6, 1.9, 0.6, 'planks', { tint: OASE_DUNKEL });
-    crate(W, -14.6, 0, -20.5, 1); barrel(W, -9.1, -19.9, OASE_TERRA);
+    crate(W, -14.6, 0, -20.5, 1); W.fass(-9.1, -19.9);              // explosive Fässer (Phase 8)
     W.box(-23.6, 0.02, -24.2, 3, 0.02, 2, 'cloth', oaseDeko([0.6, 0.16, 0.12]));
     oaseLicht(W, -17, 2.6, -22, 8);
 
@@ -1329,14 +1340,14 @@ function mapOase(W) {
     crate(W, -8.4, 0, -11, 0.8); crate(W, 6.1, 0, -9.4, 0.8);
     W.box(-3.4, 0, -4.6, 2.8, 1.05, 0.5, 'plaster', OCK);
     W.box(1.6, 0, -7, 0.5, 1.05, 2.6, 'plaster', OCK);
-    crate(W, -1.6, 0, -13.2, 1.1); barrel(W, -3.1, -13.4, OASE_TERRA); barrel(W, 2.9, -13.3, OASE_BLAU);
+    crate(W, -1.6, 0, -13.2, 1.1); W.fass(-3.1, -13.4); barrel(W, 2.9, -13.3, OASE_BLAU);
     oaseKarren(W, 6.4, -13.6, 'x');
     W.box(-4.2, 0.02, -8.2, 2.4, 0.02, 1.6, 'cloth', oaseDeko([0.62, 0.18, 0.14]));
     oaseKrug(W, -9.6, -13.3); oaseKrug(W, -9.1, -13.5, 0.2, 0.42); oaseKrug(W, 9.6, -5.2);
 
     // ---------- Querstraße vor dem Markt, Seitengassen ----------
     crate(W, 2.7, 0, -18.9, 1.2); crate(W, 3.95, 0, -18.7, 0.9);
-    barrel(W, -3.4, -18.5, OASE_TERRA); barrel(W, -2.7, -18.2, OASE_HOLZ);
+    W.fass(-3.4, -18.5); barrel(W, -2.7, -18.2, OASE_HOLZ);
     oaseKarren(W, -19.2, -17.2, 'x');
     W.box(16.5, 0, -16.6, 2.8, 1.05, 0.5, 'plaster', TER);
     oasePalme(W, 22.8, -16.4, 6.4, 0.9);
@@ -1345,7 +1356,7 @@ function mapOase(W) {
     oasePalme(W, -30.2, -24.4, 6.2, 1);
     oaseKarren(W, 28.4, -23.6, 'z');
     oasePalme(W, 30.3, -25.2, 5.6, 2.6);
-    barrel(W, -30.8, -9.8, OASE_TERRA); barrel(W, -30.9, -9, OASE_BLAU); crate(W, -31.3, 0, -11.6, 1.1);
+    W.fass(-30.8, -9.8); barrel(W, -30.9, -9, OASE_BLAU); crate(W, -31.3, 0, -11.6, 1.1);
     W.box(28.5, 0, -10.2, 0.5, 1.1, 2.6, 'plaster', HEL);
     crate(W, 30.2, 0, -7.6, 1.1);
     oaseKrug(W, -13.6, -8); oaseKrug(W, -13.5, -7.4, 0.19, 0.4); oaseKrug(W, 13.6, -12.6); oaseKrug(W, -24.4, -5.9); oaseKrug(W, 24.3, -18.4, 0.28, 0.6);
@@ -1796,6 +1807,8 @@ const WEAPONS = {
 const PRIMARIES = ['falke', 'wespe', 'rammbock', 'luchs', 'habicht', 'amboss'];
 const KNIFE = [[0, 0.02, -0.16, 0.006, 0.034, 0.19, 's'], [0, 0.02, -0.05, 0.03, 0.012, 0.012, 'd'], [0, 0.02, 0.01, 0.024, 0.03, 0.11, 'd']];
 const NADE = { fuse: 2.7, radius: 6.8, dmg: 165, speed: 16.5, count: 2 };
+// Explosive Fässer: Lebenspunkte, Explosion (Radius, Schaden), Zischen von/bis (s), Wiederkehr (s), Rauch danach (s), Schaden durch eine Explosion daneben
+const FASS = { hp: 60, radius: 5.5, dmg: 130, fuse: [0.12, 0.22], back: 45, smoke: 10, chain: 100 };
 const MELEE = { range: 2.3, dmg: 100, time: 0.62 };
 // Rutschen: Dauer, Tempo von/bis (mal w.move), Abbruch darunter, Sperre danach, Tempo nach Sprung, Streuung aus der Hüfte, Kamera, Bots je Sekunde
 const SLIDE = { dur: 0.75, v0: 8.0, v1: 4.0, min: 3.2, cd: 0.6, keep: 0.85, spread: 1.3, roll: 0.06, fov: 3, dust: 0.08, botRate: 0.25 };
@@ -2126,6 +2139,12 @@ function createFx() {
       const c = DUST[kind] || DUST.concrete;
       for (let i = 0; i < 2; i++) puff(x + rnd(-0.2, 0.2), y + 0.06, z + rnd(-0.2, 0.2), rnd(-0.5, 0.5), rnd(0.2, 0.7), rnd(-0.5, 0.5), { life: rnd(0.45, 0.8), s: rnd(0.1, 0.18), grow: 0.9, c, a: kind === 'metal' ? 0.2 : 0.45, k: Q_DUST, drag: 2.5, grav: -0.2 });
     },
+    /** Aufsteigender Rauch (ausgebranntes Fass, Rauchsäule des Luftschlags); c = Farbe, a = Deckkraft, s = Größe */
+    smoke(x, y, z, c, a = 0.5, s = 0.35) {
+      puff(x, y, z, rnd(-0.2, 0.2), rnd(0.9, 1.5), rnd(-0.2, 0.2), { life: rnd(2.2, 3.4), s, grow: 0.7, c, a, k: Q_SMOKE, drag: 0.5, grav: -0.12 });
+    },
+    /** Glut, Funken, Leuchten (zischendes Fass, Leuchtfleck des Luftschlags): ein leuchtender Fleck, der in life Sekunden vergeht */
+    glow(x, y, z, s, c, life = 0.1) { puff(x, y, z, 0, 0, 0, { life, s, c, k: Q_GLOW }); },
   };
   return F;
 }
@@ -2556,6 +2575,7 @@ function createMatch(cfg, hooks) {
     const ox = s.x, oy = s.y + eyeOf(s), oz = s.z, end = [0, 0, 0];
     let hitAny = false, endK = -1;
     claims.length = 0;
+    let fassClaim = -1, fassN = 0;                  // Fässer: Mitspieler melden das Fass, das die erste Kugel traf
     for (let p = 0; p < w.pellets; p++) {
       const a = Math.random() * TAU, r = Math.tan(Math.sqrt(Math.random()) * spread * DEG), sx = Math.cos(a) * r, sy = Math.sin(a) * r;
       let dx = fwx + rx * sx + ux * sy, dy = fwy + ry * sx + uy * sy, dz = fwz + rz * sx + uz * sy;
@@ -2578,6 +2598,12 @@ function createMatch(cfg, hooks) {
           fx.impact(ex, ey, ez, hit.axis, d > 0 ? -1 : 1, kind);
           if (p === 0) { S.impact(L, ex, ey, ez, kind); endK = hit.axis * 2 + (d > 0 ? 0 : 1) + 6 * Math.max(0, HIT_KINDS.indexOf(kind)); }
         }
+      }
+      // Fässer: Kugeln ziehen ihren Waffenschaden ab (Mitspieler melden es dem Gastgeber)
+      if (!hit.s && hit.wall && hit.i >= 0 && world.barrelOf[hit.i] >= 0) {
+        const bi = world.barrelOf[hit.i];
+        if (!client) hitBarrel(bi, lerp(w.dmg, w.dmgFar, sstep(w.r0, w.r1, t)), s);
+        else if (p === 0 || bi === fassClaim) { fassClaim = bi; fassN++; }
       }
       // Kugeln, die knapp am eigenen Kopf vorbeigehen, pfeifen
       if (p === 0 && !s.me && me.alive && hit.s !== me && isEnemy(s, me)) {
@@ -2602,7 +2628,7 @@ function createMatch(cfg, hooks) {
     S.shot(w.snd, L, s.x, s.y + 1.4, s.z, s.me);
     if (net) {
       const e = end.map((v) => Math.round(v * 100) / 100);
-      if (client) net.send({ t: 'fire', w: gun.id, h: claims.slice(0, 8), e, k: endK }, null, true);
+      if (client) net.send({ t: 'fire', w: gun.id, h: claims.slice(0, 8), e, k: endK, ...(fassClaim >= 0 ? { b: fassClaim, bn: fassN } : {}) }, null, true);
       else net.send({ t: 'shot', id: s.id, w: gun.id, e, k: endK }, null, false);
     }
   }
@@ -2648,17 +2674,30 @@ function createMatch(cfg, hooks) {
     const dm = Math.hypot(me.x - x, me.y + 1 - y, me.z - z);
     if (dm < 22) view.shake = Math.min(1.4, view.shake + (1 - dm / 22) * 1.1);
   }
-  function explode(g) {
-    boom(g.x, g.y, g.z);
-    if (hosting) net.send({ t: 'boom', p: [g.x, g.y, g.z] }, null, true);
+  /**
+   * Explosion mit Schaden (Granate, Fass, Luftschlag). o = { radius, dmg, cover }: cover = Anteil des Schadens hinter Deckung (Vorgabe 0,12; 0 = Deckung schützt ganz).
+   * Getroffen werden der Urheber selbst (zu 70 %) und seine Gegner – wie bei Granaten. Fässer in Reichweite verlieren FASS.chain Lebenspunkte.
+   */
+  function blast(x, y, z, owner, o, weapon) {
+    boom(x, y, z);
+    if (hosting) net.send({ t: 'boom', p: [x, y, z] }, null, true);
+    const cover = o.cover ?? 0.12;
     for (const s of soldiers) {
-      if (!s.alive || !(s === g.owner || isEnemy(g.owner, s))) continue;
-      const d = Math.hypot(s.x - g.x, s.y + 0.9 - g.y, s.z - g.z);
-      if (d >= NADE.radius) continue;
-      const open = phys.los(g.x, g.y + 0.3, g.z, s.x, s.y + 1.1, s.z) || phys.los(g.x, g.y + 0.3, g.z, s.x, s.y + 0.3, s.z);
-      damage(s, g.owner, NADE.dmg * (1 - d / NADE.radius) ** 1.15 * (open ? 1 : 0.12) * (s === g.owner ? 0.7 : 1), { weapon: 'nade', dist: d });
+      if (!s.alive || !(s === owner || isEnemy(owner, s))) continue;
+      const d = Math.hypot(s.x - x, s.y + 0.9 - y, s.z - z);
+      if (d >= o.radius) continue;
+      const open = phys.los(x, y + 0.3, z, s.x, s.y + 1.1, s.z) || phys.los(x, y + 0.3, z, s.x, s.y + 0.3, s.z);
+      if (!open && !cover) continue;
+      damage(s, owner, o.dmg * (1 - d / o.radius) ** 1.15 * (open ? 1 : cover) * (s === owner ? 0.7 : 1), { weapon, dist: d });
+    }
+    for (let i = 0; i < barrels.length; i++) {
+      const b = barrels[i];
+      if (b.st !== 0 || Math.hypot(b.x - x, b.y + 0.46 - y, b.z - z) >= o.radius) continue;
+      if (!cover && !phys.los(x, y + 0.3, z, b.x, b.y + 1.05, b.z)) continue;
+      hitBarrel(i, FASS.chain, owner);
     }
   }
+  function explode(g) { blast(g.x, g.y, g.z, g.owner, NADE, 'nade'); }
   function stepNades(dt) {
     for (let i = nades.length - 1; i >= 0; i--) {
       const g = nades[i];
@@ -2693,6 +2732,51 @@ function createMatch(cfg, hooks) {
     if ((s.slideFx -= dt) > 0) return;
     s.slideFx = SLIDE.dust;
     fx.dust?.(s.x - s.slideDx * 0.3, s.y, s.z - s.slideDz * 0.3, groundKind(s));
+  }
+
+  // ---------- Fässer: 0 steht, 1 zischt, 2 ausgebrannt (nach FASS.back Sekunden steht ein neues da) ----------
+  const barrels = world.barrels.map((b) => ({ x: b.x, y: b.y, z: b.z, col: b.col, hp: FASS.hp, st: 0, t: 0, by: null, fx: 0 }));
+  M.barrels = barrels;
+  /** Zustand eines Fasses setzen (auf allen Geräten; der Gastgeber meldet ihn weiter) */
+  function fassState(i, st) {
+    const b = barrels[i];
+    b.st = st; b.fx = 0;
+    if (st === 0) { b.hp = FASS.hp; b.by = null; b.t = 0; }
+    else if (st === 1) { b.t = rnd(FASS.fuse[0], FASS.fuse[1]); S.fuse?.(L, b.x, b.y + 0.9, b.z, b.t); }
+    else b.t = FASS.back;
+    if (hosting) net.send({ t: 'fass', i, s: st }, null, true);
+  }
+  /** Schaden an einem Fass – rechnet nur, wer die Partie rechnet. by = wer es zuletzt getroffen hat (dem gehört die Explosion) */
+  function hitBarrel(i, dmg, by) {
+    const b = barrels[i];
+    if (client || !b || b.st !== 0 || !by || M.state !== 'live') return;
+    b.hp -= dmg; b.by = by;
+    if (b.hp <= 0) fassState(i, 1);
+  }
+  function stepBarrels(dt) {
+    for (let i = 0; i < barrels.length; i++) {
+      const b = barrels[i];
+      if (b.st === 1) {
+        if ((b.fx -= dt) <= 0) { b.fx = 0.03; fx.glow?.(b.x + rnd(-0.12, 0.12), b.y + 0.95, b.z + rnd(-0.12, 0.12), rnd(0.08, 0.16), [1, 0.62, 0.25], 0.09); }
+        if ((b.t -= dt) <= 0 && !client) { fassState(i, 2); blast(b.x, b.y + 0.35, b.z, b.by, FASS, 'fass'); }
+      } else if (b.st === 2) {
+        b.t -= dt;
+        if (FASS.back - b.t < FASS.smoke && (b.fx -= dt) <= 0) { b.fx = 0.18; fx.smoke?.(b.x + rnd(-0.1, 0.1), b.y + 0.7, b.z + rnd(-0.1, 0.1), [0.13, 0.12, 0.11], 0.5 * (1 - (FASS.back - b.t) / FASS.smoke) + 0.15, 0.3); }
+        if (b.t <= 0 && !client) fassState(i, 0);
+      }
+    }
+  }
+  /** Bots: ein stehendes Fass höchstens 4 m neben dem Ziel, frei zu sehen und mehr als 7 m vom Bot entfernt (sonst −1) */
+  function fassNear(s, tg) {
+    if (!tg) return -1;
+    for (let i = 0; i < barrels.length; i++) if (fassOk(s, tg, i)) return i;
+    return -1;
+  }
+  function fassOk(s, tg, i) {
+    const b = barrels[i];
+    if (!b || !tg || !tg.alive || b.st !== 0 || Math.hypot(b.x - tg.x, b.z - tg.z) >= 4 || Math.hypot(b.x - s.x, b.z - s.z) <= 7) return false;
+    const ey = s.y + eyeOf(s), dx = b.x - s.x, dy = b.y + 0.5 - ey, dz = b.z - s.z, l = Math.hypot(dx, dy, dz);
+    return phys.raycast(s.x, ey, s.z, dx / l, dy / l, dz / l, l) === Infinity || RAY.i === b.col;      // freie Sicht: der erste Treffer ist das Fass selbst
   }
 
   // ---------- Bewegung und Handlungen einer Figur ----------
@@ -2881,6 +2965,9 @@ function createMatch(cfg, hooks) {
       }
       b.last = { x: best.x, y: best.y, z: best.z }; b.lastT = M.time;
     } else if (b.target) { b.target = null; b.seeT = 0; b.goal = null; b.repath = 0; b.lostAt = M.time; b.lostDir = b.strafe; }
+    // Fässer: steht das Ziel neben einem Fass, zielt der Bot jedes zweite Mal darauf (neu gewürfelt je Ziel)
+    if (b.target !== b.fassFor) { b.fassFor = b.target; b.fass = b.target && Math.random() < 0.5 ? fassNear(s, b.target) : -1; }
+    else if (b.fass >= 0 && !fassOk(s, b.target, b.fass)) b.fass = -1;
     if (!b.target && cfg.mode !== 'dom' && (!b.last || M.time - b.lastT > 2)) {              // Schüsse in der Nähe hören
       for (const e of soldiers) {
         if (!e.alive || !isEnemy(s, e) || M.time - e.shotAt > 0.5) continue;
@@ -2937,6 +3024,10 @@ function createMatch(cfg, hooks) {
       const aimY = t.y + lerp(1.2, 0.8, t.crouchK) + (cfg.skill === 2 ? 0.15 : 0);
       lookYaw = Math.atan2(dx, -dz) + b.ex;
       lookPitch = Math.atan2(aimY - (s.y + eyeOf(s)), dist) + b.ey;
+      if (b.fass >= 0 && barrels[b.fass]?.st === 0) {        // Fässer: auf das Fass neben dem Ziel halten
+        const f = barrels[b.fass], qx = f.x - s.x, qz = f.z - s.z;
+        lookYaw = Math.atan2(qx, -qz) + b.ex; lookPitch = Math.atan2(f.y + 0.5 - (s.y + eyeOf(s)), Math.hypot(qx, qz)) + b.ey;
+      }
       const off = Math.abs(angDiff(s.yaw, lookYaw)) + Math.abs(lookPitch - s.pitch);
       if (b.seeT > skill.react && off < Math.atan2(0.5, dist) * 2 + 0.05) {
         if (b.rest > 0) b.rest -= dt;
@@ -3108,6 +3199,11 @@ function createMatch(cfg, hooks) {
           if (damage(v, s, lerp(w.dmg, w.dmgFar, sstep(w.r0, w.r1, dist)) * (zone === 0 ? w.head : zone === 2 ? 0.85 : 1), { head: zone === 0, zone, weapon: m.w, dist })) any = true;
         }
         if (any) s.hits++;
+        // Fässer: die erste Kugel traf ein Fass – geglaubt, wenn es steht und der gemeldete Endpunkt höchstens 2 m daneben liegt
+        if (Number.isInteger(m.b) && barrels[m.b]) {
+          const f = barrels[m.b], fe = vec3(m.e, 600), n = Number.isInteger(m.bn) ? clamp(m.bn, 1, w.pellets) : 1, d = Math.hypot(f.x - s.x, f.z - s.z);
+          if (fe && f.st === 0 && d < 240 && Math.hypot(fe[0] - f.x, fe[1] - (f.y + 0.46), fe[2] - f.z) < 2) hitBarrel(m.b, lerp(w.dmg, w.dmgFar, sstep(w.r0, w.r1, d)) * n, s);
+        }
         const e = vec3(m.e, 600), k = Number.isInteger(m.k) ? m.k : -1;
         if (!e) return;                           // ohne brauchbaren Endpunkt gibt es weder Bild noch Ton
         shotFx(s, m.w, e, k);
@@ -3189,6 +3285,7 @@ function createMatch(cfg, hooks) {
     }
     else if (m.t === 'pts') { const pts = fin(m.p, 0); me.score += pts; emit('points', { label: String(m.l), pts }); }
     else if (m.t === 'boom') { const p = vec3(m.p, 600); if (p) boom(p[0], p[1], p[2]); }
+    else if (m.t === 'fass') { const i = Number.isInteger(m.i) ? m.i : -1; if (barrels[i] && (m.s === 0 || m.s === 1 || m.s === 2) && barrels[i].st !== m.s) fassState(i, m.s); }
     else if (m.t === 'flag') { const f = Number.isInteger(m.i) ? M.flags[m.i] : null; if (f && (m.o === 0 || m.o === 1)) { f.owner = m.o; emit('flag', { f, was: m.was }); } }
     else if (m.t === 'tbl') {
       for (const r of Array.isArray(m.r) ? m.r : []) {
@@ -3223,6 +3320,7 @@ function createMatch(cfg, hooks) {
       if (M.state === 'over') M.overT += dt;
       if (me.alive) stepSoldier(me, dt, M.state !== 'live'); else me.respawnT -= dt;
       for (const s of soldiers) if (s.ext && s.alive) extStep(s, dt);
+      stepBarrels(dt);                             // Fässer
       fx.update(dt);
       stepCorpses(dt);
       netTick(dt);
@@ -3243,6 +3341,7 @@ function createMatch(cfg, hooks) {
     }
     if (hosting) netTick(dt);
     stepNades(dt);
+    stepBarrels(dt);                               // Fässer
     stepFlags(dt);
     fx.update(dt);
     stepCorpses(dt);
@@ -3298,6 +3397,7 @@ function createMatch(cfg, hooks) {
   };
 
   const FLAG_COL = { n: [0.85, 0.85, 0.85, K_MATTE], f: [0.1, 0.42, 1, K_GLOW], e: [1, 0.12, 0.06, K_GLOW] };
+  const FASS_C = { red: [0.42, 0.04, 0.025, K_METAL], band: [0.8, 0.52, 0.03, K_MATTE], burnt: [0.028, 0.026, 0.024, K_MATTE], burntBand: [0.07, 0.05, 0.035, K_MATTE] };
   const PACK = [0.2, 0.24, 0.14, K_MATTE], PACK_L = [1, 0.75, 0.2, K_GLOW], NADE_C = [0.13, 0.17, 0.1, K_MATTE], POLE = [0.1, 0.1, 0.11, K_METAL];
   const lightsOut = [];
   /** Sammelt alles Bewegliche für den Renderer. */
@@ -3309,6 +3409,16 @@ function createMatch(cfg, hooks) {
       drawSoldier(I, c.s, c.pal, 1 - (1 - k) * (1 - k), c.dir);
     }
     for (const g of nades) { mIdent(TA); mTrans(TA, g.x, g.y, g.z); mRotY(TA, g.rot); mRotX(TA, g.rot * 0.7); I.box(TA, 0.085, 0.11, 0.085, NADE_C); part(I, TA, 0, 0.07, 0, 0.03, 0.04, 0.03, GUN.s); }
+    // Fässer: zwei um 45° verdrehte Körper und ein gelbes Warnband aus zwei Ringen; ausgebrannt dunkel, niedriger und gekippt
+    barrels.forEach((b, i) => {
+      const dead = b.st === 2, hh = dead ? 0.92 * 0.7 : 0.92, body = dead ? FASS_C.burnt : FASS_C.red, band = dead ? FASS_C.burntBand : FASS_C.band;
+      mIdent(TA); mTrans(TA, b.x, b.y, b.z); mRotY(TA, i * 1.7);
+      if (dead) mRotX(TA, 0.2); else if (b.st === 1) mRotY(TA, Math.sin(M.time * 70) * 0.06);
+      part(I, TA, 0, hh / 2, 0, 0.56, hh, 0.56, body);
+      part(I, TA, 0, hh / 2, 0, 0.56, hh, 0.56, body, 0, Math.PI / 4);
+      part(I, TA, 0, hh * 0.64, 0, 0.585, 0.13, 0.585, band);
+      part(I, TA, 0, hh * 0.64, 0, 0.585, 0.13, 0.585, band, 0, Math.PI / 4);
+    });
     for (const p of packs) { mIdent(TA); mTrans(TA, p.x, p.y + 0.16 + Math.sin(M.time * 2.5 + p.x) * 0.04, p.z); mRotY(TA, M.time * 1.3 + p.z); I.box(TA, 0.34, 0.2, 0.22, PACK); part(I, TA, 0, 0.04, 0, 0.35, 0.04, 0.23, PACK_L); }
     for (const f of M.flags) {
       const col = f.owner < 0 ? FLAG_COL.n : f.owner === me.team ? FLAG_COL.f : FLAG_COL.e;
@@ -4443,6 +4553,7 @@ function createMenus(root, api) {
     'Schüsse verraten deine Stellung auf der Karte der Gegner.',
     'Das Messer (V) erledigt Gegner in Reichweite mit einem einzigen Hieb.',
     'Duck dich aus dem Sprint heraus (C), dann rutschst du ein Stück – schießen kannst du dabei.',
+    'Rote Fässer explodieren nach ein paar Treffern – und reißen Fässer daneben mit.',
   ];
   const KEYS = [
     [['W', 'A', 'S', 'D'], 'Bewegen'], [['Maus'], 'Zielen'], [['Linksklick'], 'Feuern'], [['Rechtsklick'], 'Anlegen'], [['R'], 'Nachladen'],
@@ -5195,7 +5306,7 @@ const HUD_CSS = `
 @media (prefers-reduced-motion: reduce) { .szh-flag.on, .szh-streak { animation: none; } }
 `;
 
-const WNAME = { nade: 'Granate', knife: 'Messer', fall: 'Sturz' };
+const WNAME = { nade: 'Granate', knife: 'Messer', fall: 'Sturz', fass: 'Fass' };
 const weaponLabel = (id) => WNAME[id] || WEAPONS[id]?.name || '';
 const mmss = (t) => { t = Math.max(0, Math.ceil(t)); return `${Math.floor(t / 60)}:${String(t % 60).padStart(2, '0')}`; };
 const SCALES = { low: 0.6, medium: 0.8, high: 1 }, SHADOW_RES = { low: 1024, medium: 2048, high: 4096, auto: 2048 };
@@ -5543,7 +5654,7 @@ function createApp(win) {
     else if (type === 'died') {
       adsOn = false; crouchOn = false;
       const self = d.by === M.me;
-      deadEl.replaceChildren(h('small', self ? 'Ausgeschaltet' : 'Ausgeschaltet von'), h('b', self ? (d.weapon === 'fall' ? 'Sturz' : 'eigene Granate') : d.by.name), self ? '' : h('span', weaponLabel(d.weapon)));
+      deadEl.replaceChildren(h('small', self ? 'Ausgeschaltet' : 'Ausgeschaltet von'), h('b', self ? ({ fall: 'Sturz', fass: 'Fass' }[d.weapon] || 'eigene Granate') : d.by.name), self ? '' : h('span', weaponLabel(d.weapon)));
       deadEl.hidden = false;
     } else if (type === 'spawn') { if (d.me) deadEl.hidden = true; }
     else if (type === 'feed') paintFeed();
