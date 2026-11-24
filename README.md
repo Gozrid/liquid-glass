@@ -31,7 +31,7 @@ Entworfen und programmiert von Claude Fable 5.2 (Anthropic) in Claude Code.
 | Werkzeuge | Tafel (Kanban) · Fokus · Farben |
 | Entwicklung | Code (Editor mit Ausführen in der Sandbox) |
 
-**Sperrzone** ist ein Shooter aus der Ich-Perspektive mit eigenem WebGL2-Renderer (Schatten der Sonne, erzeugte Texturen, Figuren aus Quadern): zwei Karten, sieben Waffen, Team-Deathmatch, Frei für alle und Herrschaft, Bots mit Wegesuche in drei Stufen, Laufbahn mit Rängen – und Mehrspieler für bis zu acht Spieler, die sich über Einladungscodes direkt von Gerät zu Gerät verbinden (WebRTC, kein Server).
+**Sperrzone** ist ein Shooter aus der Ich-Perspektive mit eigenem WebGL2-Renderer (Schatten der Sonne, erzeugte Texturen, Figuren aus Quadern): zwei Karten, sieben Waffen, Team-Deathmatch, Frei für alle und Herrschaft, Bots mit Wegesuche in drei Stufen, Laufbahn mit Rängen – und Mehrspieler für bis zu acht Spieler, die sich über Einladungscodes direkt von Gerät zu Gerät verbinden (WebRTC, kein Server). Ab Sperrzone 2.0 prüfen Mitspieler die Protokollversion des Gastgebers und lehnen eine andere ab; ältere Fassungen kennen diese Prüfung noch nicht – darum spielen alle mit frisch geladener Seite.
 
 Fest eingebaut sind Dateien, Web, Notizen, Terminal, Rechner, Malen, Klang, Prisma (Spiel), Aktivität, Einstellungen und der App Store. Kalender, Fotos, Musik, Wetter und Uhr sind vorinstalliert.
 
