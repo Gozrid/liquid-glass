@@ -3452,7 +3452,9 @@ function createSound(getPrefs) {
   const beds = [];
   /** Umgebung der Karte: want = AMB_KARTE-Eintrag, ready = Schleifen berechnet, on = laufende Schleifen, t = Zeit bis zum nächsten Einzelklang (s). */
   const amb = { want: null, ready: false, on: [], t: 8, inside: false };
-  let ambIn = null, ambLp = null, lastListen = 0, tickId = 0, NYQ = 24000, lim = null, trim = null, shownMix = '', graphAt = 0;
+  let ambIn = null, ambLp = null, lastListen = 0, tickId = 0, NYQ = 24000, lim = null, trim = null, shownMix = '', graphAt = 0, graphT = 0;
+  /** Begrenzer für Tag und Nacht, je { lim, trim (Ausgleich), to (Ziel des Ausgleichs) }; lim/trim zeigen auf den gerade gültigen. */
+  const lims = {};
   /** Zustände (Schritt 7.5): je Bus außer ui eine Senke und ein Tiefpass (nahe Explosion), dazu am Bus welt der Tiefpass bei wenig Leben. */
   const zst = {}, hp = { lp: null, f: 0, k: 0, beat: 0, breath: 0 };
   /** Ortsfeste Quellen der Karte: { name, x, y, z, reach, v (laufende Stimme oder null) } – sie klingen nur in Reichweite (Schritt 7.2). */
@@ -3471,19 +3473,21 @@ function createSound(getPrefs) {
     ctx = a.ctx;
     sum = ctx.createGain();
     sum.gain.value = shownVol = vol();
-    lim = ctx.createDynamicsCompressor();
-    const night = !!getPrefs().night, LV = night ? LIMIT_NACHT : LIMIT;
-    for (const k in LV) lim[k].value = LV[k];
-    trim = ctx.createGain();
-    const dry = ctx.createGain(), outN = ctx.createGain();
-    sum.connect(lim);
-    lim.connect(trim);
-    trim.connect(outN);
+    const night = !!getPrefs().night, dry = ctx.createGain(), outN = ctx.createGain();
+    // Zwei Begrenzer nebeneinander (Tag nach V3; Nacht: Schwelle −14 dB, Verhältnis 8), jeder mit seinem Ausgleich; der Nachtmodus blendet
+    // zwischen beiden über (mixLevel). Ein DynamicsCompressor übernimmt neue Werte sofort – bei lauten Klängen wäre das ein Pegelsprung.
+    for (const [id, LV, to] of [['tag', LIMIT, LIMIT_TRIM], ['nacht', LIMIT_NACHT, NACHT_TRIM]]) {
+      const l = ctx.createDynamicsCompressor(), tg = ctx.createGain();
+      for (const k in LV) l[k].value = LV[k];
+      sum.connect(l); l.connect(tg); tg.connect(outN);
+      lims[id] = { lim: l, trim: tg, to };
+    }
+    ({ lim, trim } = lims[night ? 'nacht' : 'tag']);
     outN.connect(a.out);
     // Ein frisch angelegter DynamicsCompressor regelt in seinen ersten rund 100 ms kräftig herunter (gemessen −11 dB für einen Klang, der
     // gleich beim Anlegen startet). Die ersten 0,15 s läuft die Summe deshalb am Begrenzer vorbei, dann wird in 0,1 s übergeblendet.
-    const t0 = ctx.currentTime;
-    trim.gain.setValueAtTime(0, t0); trim.gain.setValueAtTime(0, t0 + 0.15); trim.gain.linearRampToValueAtTime(night ? NACHT_TRIM : LIMIT_TRIM, t0 + 0.25);
+    const t0 = (graphT = ctx.currentTime);
+    for (const q of Object.values(lims)) { q.trim.gain.setValueAtTime(0, t0); q.trim.gain.setValueAtTime(0, t0 + 0.15); q.trim.gain.linearRampToValueAtTime(q.trim === trim ? q.to : 0, t0 + 0.25); }
     shownMix = `${night}`;
     dry.gain.setValueAtTime(1, t0); dry.gain.setValueAtTime(1, t0 + 0.15); dry.gain.linearRampToValueAtTime(0, t0 + 0.25);
     const pre = ctx.createDelay(0.05);
@@ -3541,10 +3545,13 @@ function createSound(getPrefs) {
       const g = 10 ** (db / 20) * (b === 'amb' ? am : b === 'musik' ? mu : fx);
       if (first) bus[b].gain.value = g; else bus[b].gain.setTargetAtTime(g, t, 0.02);
     }
-    if (night !== nightWas) {
-      const LV = night ? LIMIT_NACHT : LIMIT;
-      lim.threshold.setValueAtTime(LV.threshold, t); lim.ratio.setValueAtTime(LV.ratio, t);
-      if (performance.now() - graphAt > 300) { trim.gain.cancelScheduledValues(t); trim.gain.setTargetAtTime(night ? NACHT_TRIM : LIMIT_TRIM, t, 0.03); }
+    if (night !== nightWas) {                         // Nachtmodus: in 80 ms vom einen Begrenzer zum anderen überblenden (gleich laut, wo keiner regelt)
+      ({ lim, trim } = lims[night ? 'nacht' : 'tag']);
+      const early = t < graphT + 0.15, s0 = Math.max(t, graphT + 0.15);           // noch im Umweg der ersten 0,15 s: dessen Überblendung übernehmen
+      for (const q of Object.values(lims)) {
+        const g = q.trim.gain;
+        g.cancelScheduledValues(t); g.setValueAtTime(early ? 0 : g.value, s0); g.linearRampToValueAtTime(q.trim === trim ? q.to : 0, s0 + (early ? 0.1 : 0.08));
+      }
     }
   }
   /** Summe folgt prefs.volume (auch im Menü, etwa beim Schieben des Reglers): je Bild weich, vor einem neuen Klang sofort. */
