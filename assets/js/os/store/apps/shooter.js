@@ -3,7 +3,7 @@
 //
 // Aufbau der Datei:
 //   1 Mathematik · 2 Texturen · 3 Geometrie · 4 Renderer · 5 Welt und Karten · 6 Kollision und Wege
-//   7 Waffen und Daten · 8 Klang · 9 Spiel (Effekte, Figuren, Partie mit Bots und Abgleich im Netz)
+//   7 Waffen und Daten · 8 Klang (8a Klangschmiede: Rechenkern · 8b Rezepte · 8c Mischpult) · 9 Spiel (Effekte, Figuren, Partie mit Bots und Abgleich im Netz)
 //   10 Netz (Verbindung, Lobby) · 11 Menüs · 12 Oberfläche im Einsatz · 13 App
 
 import { h, clamp, lerp, TAU, ticker } from '../../../core/util.js';
@@ -123,12 +123,18 @@ function mRotZ(o, a) {
 }
 
 // ==========================================================================
-// 2 · Texturen: jede Oberfläche wird einmal berechnet (256², kachelbar) und landet in einem Textur-Array
+// 2 · Texturen: jede Oberfläche wird einmal berechnet (256², kachelbar) und landet in einem Textur-Array.
+//     Dazu ein zweites Array mit Details (Normale, Rauheit, Vertiefung) aus Höhe und Rauheit, die jede Malfunktion mitliefert.
 // ==========================================================================
 const TEX = 256;
 const MAT = {};          // Name → Lage im Textur-Array
 const MAT_DEF = [];      // { name, scale: Meter je Wiederholung, fit: je Fläche einmal, hit: Einschlag-Art, paint }
 const defMat = (name, scale, hit, paint, fit = false) => { MAT[name] = MAT_DEF.length; MAT_DEF.push({ name, scale, hit, paint, fit }); };
+// Malfunktion paint(u, v, o, N): o[0..2] = Farbe, o[3] = Glanzstärke, o[4] = Höhe (0 … 1, Vorgabe 0,5), o[5] = Rauheit (Vorgabe 0,9).
+// Höhen in den Malfunktionen: hgt(Summe) bildet −1 … 1 auf 0 … 1 ab (−1 = tiefste Fuge, +1 = höchste Kante).
+const hgt = (x) => 0.5 + 0.5 * clamp(x, -1, 1);
+/** Normalen-Stärke je Material (Höhe → Normale im Detail-Array) */
+const MAT_BUMP = { plain: 0, concrete: 0.6, asphalt: 0.8, rib: 1.6, plate: 1, wood: 1, brick: 1.4, plaster: 0.4, sand: 0.7, tile: 1, roof: 0.6, hazard: 0.4, cloth: 0.5, gravel: 1.3, planks: 1 };
 
 /** Kachelbares Werte-Rauschen auf festen Gittern (ein Gitter je Lage, damit sich Oktaven nicht gleichen). */
 function noiseSet(seed) {
@@ -154,111 +160,195 @@ function noiseSet(seed) {
 const sstep = (a, b, x) => { const t = clamp((x - a) / (b - a), 0, 1); return t * t * (3 - 2 * t); };
 const gray = (o, c, s) => { o[0] = c; o[1] = c; o[2] = c; o[3] = s; };
 
-defMat('plain', 2, 'concrete', (u, v, o, N) => gray(o, 0.92 + 0.08 * N.fbm(u, v, 8, 8, 3), 0.1));
+defMat('plain', 2, 'concrete', (u, v, o, N) => {
+  const n = N.fbm(u, v, 8, 8, 3);
+  gray(o, 0.92 + 0.08 * n, 0.1);
+  o[5] = 0.9 + (n - 0.5) * 0.2;
+});
 defMat('concrete', 3, 'concrete', (u, v, o, N) => {
   const n = N.fbm(u, v, 4, 4, 5), f = N.at(4, u * 64, v * 64, 64, 64), st = N.fbm(u, v, 16, 2, 3), w = N.white();
   let c = 0.5 + (n - 0.5) * 0.3 + (f - 0.5) * 0.06 + (w - 0.5) * 0.05 - Math.max(0, st - 0.56) * 0.4;
-  if (w > 0.985) c -= 0.1;
-  if (Math.min(u, 1 - u, v, 1 - v) < 0.006) c *= 0.7;
+  let h = (n - 0.5) * 0.6 + (f - 0.5) * 0.3;
+  if (w > 0.985) { c -= 0.1; h -= 0.6; }                                    // Poren
+  if (Math.min(u, 1 - u, v, 1 - v) < 0.006) { c *= 0.7; h = -1; }           // Plattenfugen
   o[0] = c; o[1] = c * 0.99; o[2] = c * 0.96; o[3] = 0.08;
+  o[4] = hgt(h); o[5] = 0.88 + (n - 0.5) * 0.2;
 });
 defMat('asphalt', 4, 'concrete', (u, v, o, N) => {
   const n = N.fbm(u, v, 4, 4, 4), f = N.at(4, u * 64, v * 64, 64, 64), w = N.white();
   let c = 0.17 + (n - 0.5) * 0.1 + (f - 0.5) * 0.05 + (w - 0.5) * 0.08;
+  let h = (f - 0.5) * 0.5 + (w - 0.5) * 0.12;                               // Korn
   if (w > 0.982) c += 0.13;
-  if (Math.abs(N.fbm(u, v, 3, 3, 4) - 0.5) < 0.0045) c *= 0.5;
+  // Risse: Höhenlinie eines Rauschens, Abstand in Metern über den Anstieg (gleich breit, statt dort fett, wo das Rauschen flach ist);
+  // ein zweites Rauschen lässt sie abbrechen, damit keine geschlossenen Schlingen entstehen. Fein und flach: in der Ferne verschwinden sie.
+  // Kleine Verwerfung des Orts macht den Verlauf zackig statt glatt geschwungen.
+  const e = 1 / 1024, cf = (a, b) => N.fbm(a + 0.012 * (N.at(3, a * 40, b * 40, 40, 40) - 0.5), b + 0.012 * (N.at(2, a * 40, b * 40, 40, 40) - 0.5), 3, 3, 4);
+  const gr = Math.hypot(cf(u + e, v) - cf(u - e, v), cf(u, v + e) - cf(u, v - e)) / (2 * e);
+  const dm = (Math.abs(cf(u, v) - 0.5) / Math.max(gr, 0.4)) * 4, seg = sstep(0.22, 0.36, N.at(5, u * 5, v * 5, 5, 5));
+  c *= 1 - 0.36 * (1 - sstep(0.004, 0.012, dm)) * seg;
+  h -= 0.28 * (1 - sstep(0.002, 0.011, dm)) * seg;                           // Risse (schmale, flache Rinne)
   o[0] = c; o[1] = c; o[2] = c * 1.04; o[3] = 0.1 + 0.3 * n;
+  o[4] = hgt(h); o[5] = 0.82 + (n - 0.5) * 0.2;
 });
 defMat('rib', 2.44, 'metal', (u, v, o, N) => {          // Wellblech eines Containers: senkrechte Rippen
-  const p = (u * 8) % 1, w = sstep(0.1, 0.25, p) - sstep(0.6, 0.75, p);
+  const p = (u * 8) % 1, w = sstep(0.1, 0.25, p) - sstep(0.6, 0.75, p), n = N.fbm(u, v, 4, 4, 4);
   let c = 0.74 + 0.18 * w + 0.1 * sstep(0.1, 0.18, p) * (1 - sstep(0.18, 0.26, p)) - 0.15 * sstep(0.58, 0.66, p) * (1 - sstep(0.66, 0.76, p));
-  c *= 0.94 + 0.2 * (N.fbm(u, v, 4, 4, 4) - 0.5) - Math.max(0, N.fbm(u, v, 16, 2, 3) - 0.56) * 0.5;
+  c *= 0.94 + 0.2 * (n - 0.5) - Math.max(0, N.fbm(u, v, 16, 2, 3) - 0.56) * 0.5;
   if (N.fbm(u, v, 8, 8, 3) > 0.72) c *= 0.9;
   gray(o, c, 0.35);
+  o[4] = w; o[5] = 0.5 + (n - 0.5) * 0.2;                                   // Rippenprofil
 });
 defMat('plate', 2, 'metal', (u, v, o, N) => {
   const n = N.fbm(u, v, 4, 4, 4), eu = Math.min(u, 1 - u), ev = Math.min(v, 1 - v);
   let c = 0.66 + (n - 0.5) * 0.16 + (N.at(4, u * 8, v * 64, 8, 64) > 0.86 ? 0.05 : 0);
-  if (Math.min(eu, ev) < 0.008) c *= 0.6;
-  if ((eu > 0.025 && eu < 0.05 && Math.abs(((v * 8) % 1) - 0.5) < 0.1) || (ev > 0.025 && ev < 0.05 && Math.abs(((u * 8) % 1) - 0.5) < 0.1)) c *= 0.7;
+  let h = (n - 0.5) * 0.2;
+  if (Math.min(eu, ev) < 0.008) { c *= 0.6; h = -1; }                       // Kanten
+  const ru = Math.abs(((v * 8) % 1) - 0.5), rv = Math.abs(((u * 8) % 1) - 0.5);
+  if ((eu > 0.025 && eu < 0.05 && ru < 0.1) || (ev > 0.025 && ev < 0.05 && rv < 0.1)) {
+    c *= 0.7;
+    const a = eu > 0.025 && eu < 0.05 && ru < 0.1 ? [(eu - 0.0375) / 0.0125, ru / 0.1] : [(ev - 0.0375) / 0.0125, rv / 0.1];
+    h = Math.max(h, Math.sqrt(Math.max(0, 1 - a[0] * a[0] - a[1] * a[1])) * 2 - 1);       // Nieten als Kuppen
+  }
   gray(o, c, 0.5);
+  o[4] = hgt(h); o[5] = 0.4 + (n - 0.5) * 0.2;
 });
 defMat('wood', 1, 'wood', (u, v, o, N) => {             // Kistenseite: Rahmen, Bretter, Diagonalstrebe
   const e = Math.min(u, 1 - u, v, 1 - v), frame = e < 0.12, diag = !frame && Math.abs(u - v) < 0.07;
   const upright = frame ? Math.min(u, 1 - u) < Math.min(v, 1 - v) : diag;
   const g = upright ? N.fbm(u, v, 32, 2, 3) : N.fbm(u, v, 2, 32, 3);
-  let c = 0.72 + 0.5 * (g - 0.5) * 2 * 0.5;
-  if (frame) c *= 1.1;
-  else if (diag) c *= 1.04;
+  let c = 0.72 + 0.5 * (g - 0.5) * 2 * 0.5, h = (g - 0.5) * 2 * 0.2;      // Maserung
+  if (frame) { c *= 1.1; h += 0.5; }                                         // Rahmen
+  else if (diag) { c *= 1.04; h += 0.5; }
   else {
-    if (((v * 5) % 1) < 0.045) c *= 0.5;
+    if (((v * 5) % 1) < 0.045) { c *= 0.5; h = -1; }                        // Brettfugen
     if (e < 0.14 || Math.abs(Math.abs(u - v) - 0.078) < 0.01) c *= 0.62;
   }
   o[0] = 0.66 * c; o[1] = 0.48 * c; o[2] = 0.29 * c; o[3] = 0.04;
+  o[4] = hgt(h); o[5] = 0.75 + (g - 0.5) * 0.2;
 }, true);
 defMat('brick', 2, 'concrete', (u, v, o, N) => {
   const row = Math.floor(v * 8), uu = u * 4 + (row % 2) * 0.5, bx = uu % 1, by = (v * 8) % 1;
   const n = N.fbm(u, v, 8, 8, 3);
-  if (bx < 0.05 || by < 0.11) { const c = 0.56 + (n - 0.5) * 0.2; o[0] = c; o[1] = c * 0.97; o[2] = c * 0.92; o[3] = 0.02; return; }
+  o[5] = 0.85 + (n - 0.5) * 0.2;
+  if (bx < 0.05 || by < 0.11) { const c = 0.56 + (n - 0.5) * 0.2; o[0] = c; o[1] = c * 0.97; o[2] = c * 0.92; o[3] = 0.02; o[4] = 0; return; }   // Mörtel
   const t = N.at(5, (Math.floor(uu) % 4) + 0.5, row + 0.5, 4, 8), c = 0.72 + 0.5 * (t - 0.5) + (n - 0.5) * 0.25;
   o[0] = 0.58 * c; o[1] = 0.3 * c; o[2] = 0.23 * c; o[3] = 0.05;
+  o[4] = hgt(0.4 + (n - 0.5) * 2 * 0.2);                                    // Stein mit Rauschen
 });
 defMat('plaster', 3, 'concrete', (u, v, o, N) => {
   const n = N.fbm(u, v, 3, 3, 5), f = N.at(4, u * 64, v * 64, 64, 64);
-  let c = 0.8 + (n - 0.5) * 0.24 + (f - 0.5) * 0.05;
-  if (Math.abs(N.fbm(u, v, 5, 5, 3) - 0.5) < 0.0028) c *= 0.9;
+  let c = 0.8 + (n - 0.5) * 0.24 + (f - 0.5) * 0.05, h = (n - 0.5) * 2 * 0.3 + (f - 0.5) * 0.2;
+  const cr = Math.abs(N.fbm(u, v, 5, 5, 3) - 0.5);
+  if (cr < 0.0028) c *= 0.9;
+  h -= 0.6 * (1 - sstep(0.001, 0.006, cr)) * 0.5;                           // Riss (weich auslaufend, halbe Tiefe)
   o[0] = c; o[1] = c * 0.97; o[2] = c * 0.92; o[3] = 0.03;
+  o[4] = hgt(h); o[5] = 0.92 + (n - 0.5) * 0.2;
 });
 defMat('sand', 4, 'sand', (u, v, o, N) => {
-  const n = N.fbm(u, v, 4, 4, 4), f = N.at(4, u * 64, v * 64, 64, 64);
-  const c = 0.8 + (n - 0.5) * 0.22 + Math.sin(TAU * (v * 12 + N.fbm(u, v, 2, 2, 3) * 2)) * 0.022 + (f - 0.5) * 0.07;
+  const n = N.fbm(u, v, 4, 4, 4), f = N.at(4, u * 64, v * 64, 64, 64), rip = Math.sin(TAU * (v * 12 + N.fbm(u, v, 2, 2, 3) * 2));
+  const c = 0.8 + (n - 0.5) * 0.22 + rip * 0.022 + (f - 0.5) * 0.07;
   o[0] = c; o[1] = c * 0.86; o[2] = c * 0.63; o[3] = 0.02;
+  o[4] = hgt(rip * 0.5 + (n - 0.5) * 0.6 + (f - 0.5) * 0.3); o[5] = 0.95 + (n - 0.5) * 0.2;   // Rippel und Rauschen
 });
 defMat('tile', 2.4, 'concrete', (u, v, o, N) => {
   const tu = (u * 4) % 1, tv = (v * 4) % 1, n = N.fbm(u, v, 8, 8, 3);
-  let c = ((Math.floor(u * 4) + Math.floor(v * 4)) % 2 ? 0.56 : 0.47) + (n - 0.5) * 0.12;
-  if (tu < 0.03 || tv < 0.03) c = 0.27;
+  let c = ((Math.floor(u * 4) + Math.floor(v * 4)) % 2 ? 0.56 : 0.47) + (n - 0.5) * 0.12, h = (n - 0.5) * 0.1;
+  if (tu < 0.03 || tv < 0.03) { c = 0.27; h = -1; }                         // Fugen
   gray(o, c, 0.35);
+  o[4] = hgt(h); o[5] = 0.25 + (n - 0.5) * 0.2;
 });
 defMat('roof', 4, 'concrete', (u, v, o, N) => {
-  let c = 0.2 + (N.fbm(u, v, 6, 6, 4) - 0.5) * 0.12;
-  if (((v * 4) % 1) < 0.02) c *= 0.6;
+  const n = N.fbm(u, v, 6, 6, 4);
+  let c = 0.2 + (n - 0.5) * 0.12, h = (n - 0.5) * 2 * 0.2;
+  if (((v * 4) % 1) < 0.02) { c *= 0.6; h = -1; }                           // Nähte
   o[0] = c; o[1] = c; o[2] = c * 1.06; o[3] = 0.15;
+  o[4] = hgt(h); o[5] = 0.7 + (n - 0.5) * 0.2;
 });
 defMat('hazard', 1, 'metal', (u, v, o, N) => {
   const wear = N.fbm(u, v, 6, 6, 4), y = ((u + v) * 4) % 1 < 0.5;
   const k = wear > 0.62 ? 0.75 : 1;
   o[0] = (y ? 0.95 : 0.09) * k; o[1] = (y ? 0.74 : 0.09) * k; o[2] = (y ? 0.1 : 0.09) * k; o[3] = 0.2;
+  o[4] = hgt(wear > 0.62 ? -0.4 : 0); o[5] = 0.5 + (wear - 0.5) * 0.2;      // Abplatzer
 });
-defMat('cloth', 1.5, 'cloth', (u, v, o, N) => gray(o, (((u * 4) % 1) < 0.5 ? 1 : 0.7) * (0.9 + 0.1 * N.at(4, u * 64, v * 64, 64, 64)), 0.02));
+defMat('cloth', 1.5, 'cloth', (u, v, o, N) => {
+  const f = N.at(4, u * 64, v * 64, 64, 64), band = ((u * 4) % 1) < 0.5;
+  gray(o, (band ? 1 : 0.7) * (0.9 + 0.1 * f), 0.02);
+  o[4] = hgt((band ? 0.2 : -0.2) + 0.5 * Math.sin(TAU * u * 32) * Math.sin(TAU * v * 32)); o[5] = 0.95 + (f - 0.5) * 0.2;   // Gewebestreifen
+});
 defMat('gravel', 3, 'sand', (u, v, o, N) => {
   const n = N.fbm(u, v, 8, 8, 4), p = N.at(4, u * 48, v * 48, 48, 48), w = N.white();
   const c = 0.42 + (n - 0.5) * 0.26 + (p - 0.5) * 0.16 + (w - 0.5) * 0.12 + (w > 0.97 ? 0.12 : 0);
   o[0] = c * 1.02; o[1] = c * 0.97; o[2] = c * 0.9; o[3] = 0.04;
+  o[4] = hgt((p - 0.5) * 2.2); o[5] = 0.9 + (n - 0.5) * 0.2;                // Kiesel
 });
 defMat('planks', 2, 'wood', (u, v, o, N) => {
   const row = Math.floor(v * 6), g = N.fbm(u, v, 2, 48, 3), t = N.at(5, 0.5, row + 0.5, 1, 6);
-  let c = (0.72 + 0.5 * (g - 0.5)) * (0.85 + 0.3 * t);
-  if (((v * 6) % 1) < 0.04 || ((u * 2 + row * 0.37) % 1) < 0.008) c *= 0.5;
+  let c = (0.72 + 0.5 * (g - 0.5)) * (0.85 + 0.3 * t), h = (g - 0.5) * 2 * 0.25;   // Maserung
+  if (((v * 6) % 1) < 0.04 || ((u * 2 + row * 0.37) % 1) < 0.008) { c *= 0.5; h = -1; }   // Fugen
   o[0] = 0.52 * c; o[1] = 0.37 * c; o[2] = 0.23 * c; o[3] = 0.06;
+  o[4] = hgt(h); o[5] = 0.78 + (g - 0.5) * 0.2;
 });
 
+/**
+ * Malt alle Lagen in der Kantenlänge size. Jede Malfunktion läuft je Texel genau einmal (sie zieht fortlaufende Zufallszahlen):
+ * Farbe (nur wenn color) und zugleich Höhe und Rauheit in Float32Array.
+ */
+function paintLayers(size, color) {
+  const N = noiseSet(20261), o = [0, 0, 0, 0, 0.5, 0.9];
+  const out = { color: [], height: [], rough: [] };
+  for (const def of MAT_DEF) {
+    const px = color ? new Uint8Array(size * size * 4) : null, hh = new Float32Array(size * size), rr = new Float32Array(size * size);
+    for (let y = 0, i = 0, j = 0; y < size; y++) {
+      for (let x = 0; x < size; x++, i += 4, j++) {
+        o[4] = 0.5; o[5] = 0.9;
+        def.paint((x + 0.5) / size, (y + 0.5) / size, o, N);
+        if (px) { px[i] = clamp(o[0], 0, 1) * 255; px[i + 1] = clamp(o[1], 0, 1) * 255; px[i + 2] = clamp(o[2], 0, 1) * 255; px[i + 3] = clamp(o[3], 0, 1) * 255; }
+        hh[j] = clamp(o[4], 0, 1); rr[j] = clamp(o[5], 0, 1);
+      }
+    }
+    out.color.push(px); out.height.push(hh); out.rough.push(rr);
+  }
+  return out;
+}
 let texCache = null;
-/** Berechnet alle Oberflächen (einmal je Sitzung). */
+const detailCache = {};
+/** Berechnet alle Oberflächen (einmal je Sitzung): { color: RGBA je Lage, height, rough } in 256². */
 function paintTextures() {
-  if (texCache) return texCache;
-  const N = noiseSet(20261), o = [0, 0, 0, 0];
-  texCache = MAT_DEF.map((def) => {
-    const px = new Uint8Array(TEX * TEX * 4);
-    for (let y = 0, i = 0; y < TEX; y++) {
-      for (let x = 0; x < TEX; x++, i += 4) {
-        def.paint((x + 0.5) / TEX, (y + 0.5) / TEX, o, N);
-        px[i] = clamp(o[0], 0, 1) * 255; px[i + 1] = clamp(o[1], 0, 1) * 255; px[i + 2] = clamp(o[2], 0, 1) * 255; px[i + 3] = clamp(o[3], 0, 1) * 255;
+  if (!texCache) texCache = paintLayers(TEX, true);
+  return texCache;
+}
+/**
+ * Detail-Array (RGBA8 ohne sRGB) je Lage: R, G = Normale x, y (·0,5 + 0,5), B = Rauheit, A = Vertiefung (0,5 + (h − h_weich)·4,
+ * h_weich = Mittel über 5×5). Die Normale entsteht aus zentralen Differenzen der Höhe mit Umlauf an den Rändern (die Kachel bleibt nahtlos).
+ * size 256 nutzt die Höhen aus dem Farbdurchlauf; 512 malt die Lagen noch einmal (eigene Zufallsfolge, die Farbe bleibt unberührt).
+ */
+function detailTextures(size) {
+  if (detailCache[size]) return detailCache[size];
+  const src = size === TEX ? paintTextures() : paintLayers(size, false);
+  const k0 = (size / 256) * 4, S = size, m = S - 1;
+  detailCache[size] = MAT_DEF.map((def, l) => {
+    const H = src.height[l], R = src.rough[l], k = k0 * MAT_BUMP[def.name], px = new Uint8Array(S * S * 4);
+    const row = new Float32Array(S * S), soft = new Float32Array(S * S), G = new Float32Array(S * S);
+    for (let y = 0; y < S; y++) for (let x = 0; x < S; x++) {             // 5×5-Mittel, getrennt nach Zeilen und Spalten
+      let a = 0; for (let d = -2; d <= 2; d++) a += H[y * S + ((x + d) & m)]; row[y * S + x] = a / 5;
+    }
+    for (let y = 0; y < S; y++) for (let x = 0; x < S; x++) {
+      let a = 0; for (let d = -2; d <= 2; d++) a += row[((y + d) & m) * S + x]; soft[y * S + x] = a / 5;
+    }
+    // Für die Normale die Höhe mit einem 3×3-Zelt glätten: Kanten von einem Texel würden sonst als Lichtpunkte flimmern
+    for (let y = 0; y < S; y++) for (let x = 0; x < S; x++) row[y * S + x] = (H[y * S + ((x - 1) & m)] + 2 * H[y * S + x] + H[y * S + ((x + 1) & m)]) / 4;
+    for (let y = 0; y < S; y++) for (let x = 0; x < S; x++) G[y * S + x] = (row[((y - 1) & m) * S + x] + 2 * row[y * S + x] + row[((y + 1) & m) * S + x]) / 4;
+    for (let y = 0, i = 0, j = 0; y < S; y++) {
+      for (let x = 0; x < S; x++, i += 4, j++) {
+        const dx = (G[y * S + ((x + 1) & m)] - G[y * S + ((x - 1) & m)]) * 0.5 * k, dy = (G[((y + 1) & m) * S + x] - G[((y - 1) & m) * S + x]) * 0.5 * k;
+        const il = 1 / Math.hypot(dx, dy, 1);
+        px[i] = (-dx * il * 0.5 + 0.5) * 255; px[i + 1] = (-dy * il * 0.5 + 0.5) * 255;
+        px[i + 2] = R[j] * 255; px[i + 3] = clamp(0.5 + (H[j] - soft[j]) * 4, 0, 1) * 255;
       }
     }
     return px;
   });
-  return texCache;
+  return detailCache[size];
 }
 
 // ==========================================================================
@@ -352,56 +442,152 @@ function unitCube() {
 
 // ==========================================================================
 // 4 · Renderer (WebGL2): Schattenkarte der Sonne, Welt, bewegliche Quader, Himmel, Effekte, Waffe in der Hand
+//     Bildkette (Vertrag V4): Schatten → Szene (HDR, Tiefe; auf „Hoch“ 4-fach abgetastet) → Auflösen → Durchsichtiges (fboFx,
+//     Tiefentest im Shader) → Belichtung → SSAO → Sonnenstrahlen → Glühen → Schluss (SSAO, Strahlen, ACES, Farbstimmung, Vignette,
+//     Korn; sonst FXAA danach).
 // ==========================================================================
 const MAX_LIGHTS = 8;
 const ISTRIDE = 20;      // je Quader: Matrix 16 · Farbe 3 · Art 1
-const QSTRIDE = 10;      // je Effekt-Ecke: Position 3 · UV 2 · Farbe 4 · Art 1
-const MAX_INST = 1400, MAX_QUADS = 1600;
+// je Effekt-Ecke: Position 3 · UV 2 · Farbe 4 · Art 1 · Zusatz 2 (Saat + Alter 0 … 1; Größe in m, bei flachen Arten die Fläche 0 … 5 = −x, +x, −y, +y, −z, +z)
+const QSTRIDE = 12;
+const MAX_INST = 1400, MAX_QUADS = 2600;   // Index mit 16 Bit: vier Ecken je Viereck, also nie über 16.384 Vierecke
 const K_MATTE = 0, K_CAMO = 1, K_METAL = 2, K_GLOW = 3;
+// Arten der Effekt-Vierecke. Leuchtend (additiv): Glühen, Leuchtspur, Mündungsfeuer, Funken, Feuer, Lichtkegel.
+// Beleuchtet (Sonne mit Schatten, Himmel, Punktlichter, Nebel): Rauch, Loch, Staub, Druckring, Blut, Risse und Dellen.
 const Q_GLOW = 0, Q_SMOKE = 1, Q_BEAM = 2, Q_DECAL = 3, Q_FLASH = 4, Q_DUST = 5;
+const Q_SPARK = 6, Q_FIRE = 7, Q_RING = 8, Q_CONE = 9, Q_BLOOD = 10, Q_CRACK = 11;
+/** Obergrenzen der Effekte (Partikel mal TIERS.particles) */
+const FX_MAX = { parts: 900, decals: 300, chunks: 60, blood: 24 };
+/**
+ * Qualitätsstufen (Vertrag V4). scale = Auflösung, msaa = 4-fach abgetastet (sonst FXAA), glow = Stufen des Glühens,
+ * ssao = Proben (0 = aus), shadowTaps = Schatten-Abtastungen, rays = Sonnenstrahlen, detail = Kantenlänge der Detail-Texturen,
+ * particles = Anteil der Partikel-Obergrenze, dust = Schwebstaub. „Auto“ beginnt wie „Mittel“ mit voller Auflösung (siehe draw in der App).
+ */
+const TIERS = {
+  low: { scale: 0.6, msaa: false, glow: 3, ssao: 0, shadowTaps: 4, rays: false, detail: 256, particles: 0.6, dust: false },
+  medium: { scale: 0.8, msaa: false, glow: 5, ssao: 6, shadowTaps: 9, rays: true, detail: 256, particles: 1, dust: true },
+  high: { scale: 1, msaa: true, glow: 5, ssao: 10, shadowTaps: 16, rays: true, detail: 512, particles: 1, dust: true },
+};
+/**
+ * Belichtungsanpassung: Zielwert des Mittels, Grenzen um env.exposure, Zeiten in s (Bild wird heller → hell, dunkler → dunkel);
+ * blitz = Anstiegszeit des gedämpften Mittels (kurze Blitze wie Mündungsfeuer verschieben die Belichtung kaum).
+ */
+const BEL = { key: 0.18, lo: 0.66, hi: 1.5, hell: 0.35, dunkel: 1.2, blitz: 0.15 };
+const GRADE_NEUTRAL = { shadow: [1, 1, 1], light: [1, 1, 1], sat: 1, contrast: 1, rays: 0 };
+/** Radius der Schatten-Abtastung in Texeln je Zahl der Abtastungen (Niedrig, Mittel, Hoch) */
+const SHADOW_RAD = { 4: 1.2, 9: 1.6, 16: 2.2 };
+const Q_FLAT = 0.25;     // zur Art addiert: flach auf einer Fläche (Zeichen am Boden) – harter Tiefentest wie Einschusslöcher statt weicher Kante
 
+// Bildkette: die Szene entsteht als linearer HDR-Wert in einem Zwischenbild; Belichtung, Tonwertkurve (ACES) und Gamma
+// kommen erst im Schlussschritt. Nur im Rückfall ohne Float-Ziele (uLdr = 1) wenden shade() und der Himmel die Kurve selbst an.
+const GLSL_ACES = `
+vec3 aces(vec3 c) { return (c * (2.51 * c + .03)) / (c * (2.43 * c + .59) + .14); }`;
+// Himmel ohne Wolken: Verlauf vom Dunst am Horizont zum Zenit und Sonnenhof. Gemeinsam für FS_SKY und die Spiegelung in shade();
+// braucht die Uniforms uSunDir, uSunCol, uFogCol, uZenith.
+const GLSL_HIMMEL = `
+// Dunst: zur Sonne hin um bis zu 25 % in Richtung Sonnenfarbe getönt (bei gleicher Helligkeit)
+vec3 nebel(vec3 d) {
+  const vec3 L = vec3(.2126, .7152, .0722);
+  return mix(uFogCol, uSunCol * (dot(uFogCol, L) / max(dot(uSunCol, L), 1e-3)), .25 * pow(max(dot(d, uSunDir), 0.), 4.));
+}
+vec3 himmel(vec3 d) {
+  float up = max(d.y, 0.), sd = max(dot(d, uSunDir), 0.);
+  return mix(nebel(d), uZenith, 1. - pow(1. - up, 3.5)) + uSunCol * (pow(sd, 420.) * 2.2 + pow(sd, 14.) * .14 + pow(sd, 3.) * .03);
+}`;
+// Tangentenraum aus den Ableitungen von Ort und Texturkoordinate (kein eigenes Attribut nötig)
+const GLSL_TBN = `
+mat3 tbn(vec3 N, vec3 p, vec2 uv) {
+  vec3 dp1 = dFdx(p), dp2 = dFdy(p); vec2 d1 = dFdx(uv), d2 = dFdy(uv);
+  vec3 a = cross(dp2, N), b = cross(N, dp1), T = a * d1.x + b * d2.x, B = a * d1.y + b * d2.y;
+  float s = inversesqrt(max(max(dot(T, T), dot(B, B)), 1e-20));
+  return mat3(T * s, B * s, N);
+}`;
 const GLSL_LIGHT = `
-uniform vec3 uCam, uSunDir, uSunCol, uSkyCol, uGndCol, uFogCol;
-uniform float uFogDen, uExposure, uShadowTexel, uShadowOn;
+uniform vec3 uCam, uSunDir, uSunCol, uSkyCol, uGndCol, uFogCol, uZenith;
+uniform float uFogDen, uExposure, uShadowTexel, uShadowOn, uLdr;
+uniform float uShadowTaps, uShadowRad, uShadowShift;     // Abtastungen (4, 9, 16), Radius in Texeln, Versatz zur Sonne (Waffe in der Hand)
+uniform float uWolken;                                   // mittlere Wolkendecke für die Spiegelung (env.cloud · 0,7)
 uniform mat4 uShadowMat;
 uniform highp sampler2DShadow uShadow;
 uniform vec4 uLights[${MAX_LIGHTS}];
 uniform vec3 uLightCol[${MAX_LIGHTS}];
 
+// Poisson-Scheibe, schrittweise gefüllt: die ersten 4 und die ersten 9 Punkte sind für sich gleichmäßig verteilt
+const vec2 PD[16] = vec2[16](vec2(.910, -.387), vec2(-.897, .388), vec2(-.355, -.933), vec2(.412, .858), vec2(-.002, -.036), vec2(-.888, -.392),
+  vec2(-.372, .928), vec2(.320, -.761), vec2(.884, .359), vec2(-.344, .395), vec2(.504, -.010), vec2(-.353, -.401), vec2(-.629, -.007),
+  vec2(.241, .428), vec2(.274, -.345), vec2(-.003, .754));
+// Schatten der Sonne: Poisson-Scheibe, je Pixel gedreht (verschachteltes Gradientenrauschen). uShadowShift schiebt den Prüfpunkt zur Sonne hin:
+// die Waffe in der Hand liegt sonst im Schatten der eigenen Figur, die nur für die Schattenkarte gezeichnet wird.
 float sunShadow(vec3 wp, vec3 n, float ndl) {
   if (uShadowOn < .5) return 1.;
-  vec4 sp = uShadowMat * vec4(wp + n * (.05 + .12 * (1. - ndl)), 1.);
+  vec4 sp = uShadowMat * vec4(wp + n * (.05 + .12 * (1. - ndl)) + uSunDir * uShadowShift, 1.);
   vec3 c = sp.xyz;
   if (c.x < 0. || c.x > 1. || c.y < 0. || c.y > 1. || c.z > 1.) return 1.;
   c.z -= .0009;
-  float t = uShadowTexel * .8;
-  return (texture(uShadow, c + vec3(-t, -t, 0.)) + texture(uShadow, c + vec3(t, -t, 0.))
-        + texture(uShadow, c + vec3(-t, t, 0.)) + texture(uShadow, c + vec3(t, t, 0.))) * .25;
+  float a = 6.2831853 * fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(.06711056, .00583715))));
+  vec2 cs = vec2(cos(a), sin(a)) * uShadowTexel * uShadowRad;
+  mat2 rot = mat2(cs.x, cs.y, -cs.y, cs.x);
+  int nt = int(uShadowTaps);
+  float s = 0.;
+  for (int i = 0; i < 16; i++) { if (i >= nt) break; s += texture(uShadow, vec3(c.xy + rot * PD[i], c.z)); }
+  return s / float(nt);
 }
-vec3 tonemap(vec3 c) {
-  c *= uExposure;
-  c = (c * (2.51 * c + .03)) / (c * (2.43 * c + .59) + .14);
-  return pow(clamp(c, 0., 1.), vec3(1. / 2.2));
+// Eine Abtastung: liegt der Punkt im Sonnenlicht? (Maß dafür, ob der Weg zum Himmel offen ist)
+float sunLit(vec3 p) {
+  if (uShadowOn < .5) return 1.;
+  vec3 c = (uShadowMat * vec4(p, 1.)).xyz;
+  if (c.x < 0. || c.x > 1. || c.y < 0. || c.y > 1. || c.z > 1.) return 1.;
+  return texture(uShadow, c - vec3(0., 0., .002));
 }
-vec3 shade(vec3 albedo, vec3 n, vec3 wp, float spec, float ao, float emis) {
-  float ndl = max(dot(n, uSunDir), 0.);
-  float sh = ndl > 0. ? sunShadow(wp, n, ndl) : 0.;
-  vec3 light = mix(uGndCol, uSkyCol, n.y * .5 + .5) * ao + uSunCol * ndl * sh;
+${GLSL_ACES}
+${GLSL_HIMMEL}
+vec3 tonemap(vec3 c) { return pow(clamp(aces(c * uExposure), 0., 1.), vec3(1. / 2.2)); }
+/**
+ * Oberfläche: Grundfarbe, Normale n (mit Details), Flächennormale ng (Schatten), Glanzstärke spec (F0 = mix(0,04, 0,6, spec)), Rauheit,
+ * occ = Verdeckung für Glanz und Umgebungslicht aus der Vertiefung (1 = frei), ao = Verdeckung am Boden, emis = Leuchten.
+ * Sonne als GGX-Glanz (Trowbridge-Reitz, Smith nach Schlick, Fresnel nach Schlick); Himmel gespiegelt mal Fresnel, occ und (1 − Rauheit)²,
+ * gedämpft, wo der Weg zum Himmel im Schatten liegt (drinnen); Punktlichter mit Blinn-Glanz, Exponent aus der Rauheit.
+ */
+vec3 shadeS(vec3 albedo, vec3 n, vec3 ng, vec3 wp, float spec, float rough, float occ, float ao, float emis) {
+  vec3 view = uCam - wp;
+  float dist = length(view);
+  vec3 V = view / dist;
+  float ndg = dot(ng, uSunDir), ndl = ndg > 0. ? max(dot(n, uSunDir), 0.) : 0.;
+  float sh = ndg > 0. ? sunShadow(wp, ng, ndg) : 0.;
+  float F0 = mix(.04, .6, spec), ndv = max(dot(n, V), 1e-3);
+  vec3 light = mix(uGndCol, uSkyCol, n.y * .5 + .5) * ao * mix(.8, 1., occ) + uSunCol * ndl * sh, gl = vec3(0.);
+  float e = clamp(2. / max(rough * rough * rough * rough, 1e-4) - 2., 1., 24.);
+  vec3 nb = normalize(n + ng);                     // Punktlichter glänzen auf halb geglätteter Normale (feine Kanten flimmern sonst)
+  // Waffe in der Hand (uShadowShift > 0): Licht von hinten verdeckt der eigene Körper. Ohne das spiegeln Flächen, die zum Auge zeigen
+  // (Rückseite des Gehäuses), Sonne und Lampen im Rücken in voller Stärke – die Waffe liegt fest zur Kamera, also als gleichmäßig helle Fläche.
+  float vm = uShadowShift > 0. ? .95 : 0.;
   for (int i = 0; i < ${MAX_LIGHTS}; i++) {
     float r = uLights[i].w;
     if (r <= 0.) continue;
-    vec3 d = uLights[i].xyz - wp;
-    float a = max(0., 1. - dot(d, d) / (r * r));
-    light += uLightCol[i] * a * a * (.3 + .7 * max(dot(n, normalize(d)), 0.));
+    vec3 d = uLights[i].xyz - wp, l = normalize(d);
+    float a = max(0., 1. - dot(d, d) / (r * r)), nl = max(dot(n, l), 0.);
+    light += uLightCol[i] * a * a * (.3 + .7 * nl);
+    gl += uLightCol[i] * a * a * nl * pow(max(dot(nb, normalize(l + V)), 0.), e) * F0 * (e + 2.) * .125 * (1. - vm * smoothstep(0., .5, dot(l, V)));
   }
-  vec3 col = albedo * light;
-  vec3 view = uCam - wp;
-  float dist = length(view);
-  col += uSunCol * spec * sh * pow(max(dot(n, normalize(uSunDir + view / dist)), 0.), 48.);
-  col = mix(col, albedo * 2.4, emis);
-  col = mix(col, uFogCol, clamp(1. - exp(-dist * uFogDen), 0., 1.));
-  return tonemap(col);
-}`;
+  vec3 col = albedo * light + gl * occ;
+  if (ndl > 0. && sh > 0.) {
+    vec3 hv = normalize(uSunDir + V);
+    float r = max(rough, .3), a2 = r * r * r * r, nh = max(dot(n, hv), 0.), dd = nh * nh * (a2 - 1.) + 1., k = (r + 1.) * (r + 1.) * .125;
+    float F = F0 + (1. - F0) * pow(1. - max(dot(hv, V), 0.), 5.);
+    col += uSunCol * sh * occ * min(a2 / (3.14159 * dd * dd) * F * .25 * ndl / ((ndv * (1. - k) + k) * (ndl * (1. - k) + k)), 8.)
+      * (1. - vm * smoothstep(0., .5, dot(uSunDir, V)));
+  }
+  vec3 R = reflect(-V, n);
+  float Fv = F0 + (1. - F0) * pow(1. - ndv, 5.);
+  float offen = (sunLit(wp + ng * .1 + R * 1.2) + sunLit(wp + ng * .1 + R * 2.4) + sunLit(wp + ng * .1 + R * 3.6)) / 3.;
+  vec3 sp = mix(himmel(R), vec3(1.05) + uSunCol * .1, uWolken * smoothstep(.005, .16, R.y));   // Wolken nur als mittlere Helligkeit
+  col += sp * Fv * occ * (1. - rough) * (1. - rough) * mix(.1, 1., offen) * (1. - vm * smoothstep(0., .5, dot(R, V)));
+  col = mix(col, albedo * EMIS_K, emis);
+  col = mix(col, nebel(-V), clamp(1. - exp(-dist * uFogDen), 0., 1.));
+  return uLdr > .5 ? tonemap(col) : col;
+}
+// Ohne Detail-Texturen (Figuren, Waffen): Rauheit aus der Glanzstärke
+vec3 shade(vec3 albedo, vec3 n, vec3 wp, float spec, float ao, float emis) { return shadeS(albedo, n, n, wp, spec, mix(.85, .3, spec), 1., ao, emis); }`;
 
 const VS_WORLD = `#version 300 es
 layout(location=0) in vec3 aPos; layout(location=1) in vec3 aNor; layout(location=2) in vec3 aUV;
@@ -409,16 +595,36 @@ layout(location=3) in vec4 aTint; layout(location=4) in float aH;
 uniform mat4 uVP;
 out vec3 vPos, vNor, vUV; out vec4 vTint; out float vH;
 void main() { vPos = aPos; vNor = aNor; vUV = aUV; vTint = aTint; vH = aH; gl_Position = uVP * vec4(aPos, 1.); }`;
+// Welt: Detail-Texturen, Großvariation der Farbe, Schmutz an Wandfüßen; Nässe (env.wet) nur auf Asphalt als Pfützen.
 const FS_WORLD = `#version 300 es
 precision highp float; precision highp sampler2DArray;
-uniform sampler2DArray uTex;
+#define EMIS_K 2.4
+#define ASPHALT ${MAT.asphalt}.
+uniform sampler2DArray uTex, uDetail;
+uniform float uWet;
 ${GLSL_LIGHT}
+${GLSL_TBN}
 in vec3 vPos, vNor, vUV; in vec4 vTint; in float vH;
 out vec4 o;
+float h2(vec2 p) { vec3 q = fract(vec3(p.xyx) * .1031); q += dot(q, q.yzx + 33.33); return fract((q.x + q.y) * q.z); }
+float vn(vec2 p) { vec2 i = floor(p), f = fract(p); f = f * f * (3. - 2. * f);
+  return mix(mix(h2(i), h2(i + vec2(1, 0)), f.x), mix(h2(i + vec2(0, 1)), h2(i + vec2(1, 1)), f.x), f.y); }
 void main() {
-  vec4 t = texture(uTex, vUV);
-  float ao = mix(.62, 1., smoothstep(0., .75, vH));
-  o = vec4(shade(t.rgb * vTint.rgb, normalize(vNor), vPos, t.a, ao, vTint.a), 1.);
+  vec4 t = texture(uTex, vUV), d = texture(uDetail, vUV);         // d: Normale x, y · Rauheit · Vertiefung
+  vec3 ng = normalize(vNor);
+  vec2 q = d.rg * 2. - 1.;
+  vec3 n = normalize(tbn(ng, vPos, vUV.xy) * vec3(q, sqrt(max(0., 1. - dot(q, q)))));
+  float ao = mix(.62, 1., smoothstep(0., .75, vH)), spec = t.a, rough = d.b, occ = clamp(d.a * 2., 0., 1.);
+  vec3 alb = t.rgb * vTint.rgb * (.9 + .2 * vn(vPos.xz * .07)) * mix(.78, 1., smoothstep(0., .6, vH));   // Großvariation, Schmutz am Wandfuß
+  if (uWet > 0. && abs(vUV.z - ASPHALT) < .5) {                   // Pfützen: glatt, eben, dunkel; ringsum feuchter Rand
+    float r = vn(vPos.xz * .12) * .65 + vn(vPos.xz * .324 + 5.3) * .35 + (vn(vPos.xz * 2.1) - .5) * .05;
+    float w = fwidth(r), m = smoothstep(.6 - w, .625 + w, r) * uWet, f = smoothstep(.5, .6, r) * uWet;   // scharfer Rand (in der Ferne weich), davor feucht
+    rough = mix(mix(rough, .45, f), .05, m); n = normalize(mix(n, ng, m)); occ = mix(occ, 1., m); spec *= 1. - m;
+    alb *= (1. - .3 * f) * (1. - .7 * m);                          // nasser Asphalt ist dunkler, unter Wasser fast nur Spiegelung
+  }
+  vec3 dn = fwidth(n);                                             // Glanz ohne Flimmern: wo die Normale je Pixel stark wechselt, rauer
+  rough = sqrt(min(rough * rough + min(2. * dot(dn, dn), .25), 1.));
+  o = vec4(shadeS(alb, n, ng, vPos, spec, rough, occ, ao, vTint.a), 1.);
 }`;
 const VS_INST = `#version 300 es
 layout(location=0) in vec3 aPos; layout(location=1) in vec3 aNor;
@@ -435,6 +641,7 @@ void main() {
 }`;
 const FS_INST = `#version 300 es
 precision highp float;
+#define EMIS_K 1.4
 ${GLSL_LIGHT}
 in vec3 vPos, vNor, vLocal; in vec4 vCol;
 out vec4 o;
@@ -444,7 +651,7 @@ void main() {
   if (k > .5 && k < 1.5) {                                   // Tarnstoff: grobe und feine Flecken
     float a = h3(floor(vLocal * 11.) + 3.), b = h3(floor(vLocal * 23.));
     c *= .8 + .3 * step(.5, a) + .12 * (b - .5);
-  } else if (k > 1.5 && k < 2.5) { spec = .55; c *= .9 + .2 * h3(floor(vLocal * 40.)); }
+  } else if (k > 1.5 && k < 2.5) { spec = .38; c *= .9 + .2 * h3(floor(vLocal * 40.)); }
   o = vec4(shade(c, normalize(vNor), vPos, spec, 1., k > 2.5 ? 1. : 0.), 1.);
 }`;
 const VS_SHADOW = `#version 300 es
@@ -466,56 +673,422 @@ void main() { vNdc = aPos; gl_Position = vec4(aPos, 1., 1.); }`;
 const FS_SKY = `#version 300 es
 precision highp float;
 uniform vec3 uF, uR, uU, uSunDir, uSunCol, uZenith, uFogCol;
-uniform float uTime, uCloud, uExposure;
+uniform float uTime, uCloud, uExposure, uLdr;
 in vec2 vNdc; out vec4 o;
+${GLSL_ACES}
+${GLSL_HIMMEL}
 float h2(vec2 p) { vec3 q = fract(vec3(p.xyx) * .1031); q += dot(q, q.yzx + 33.33); return fract((q.x + q.y) * q.z); }
 float vn(vec2 p) { vec2 i = floor(p), f = fract(p); f = f * f * (3. - 2. * f);
   return mix(mix(h2(i), h2(i + vec2(1, 0)), f.x), mix(h2(i + vec2(0, 1)), h2(i + vec2(1, 1)), f.x), f.y); }
 float fbm(vec2 p) { float s = 0., a = .5; for (int i = 0; i < 5; i++) { s += a * vn(p); p = p * 2.03 + 11.7; a *= .5; } return s; }
 void main() {
   vec3 d = normalize(uF + uR * vNdc.x + uU * vNdc.y);
-  float up = max(d.y, 0.);
-  vec3 col = mix(uFogCol, uZenith, 1. - pow(1. - up, 3.5));
+  vec3 col = himmel(d);
   float sd = max(dot(d, uSunDir), 0.);
-  col += uSunCol * (pow(sd, 420.) * 2.2 + pow(sd, 14.) * .14 + pow(sd, 3.) * .03);
   if (d.y > .005 && uCloud > 0.) {
     vec2 p = d.xz / (d.y + .14) * 1.3 + uTime * .004;
     float c = smoothstep(1. - uCloud, 1.22 - uCloud * .5, fbm(p) + .35 * fbm(p * 3.1 + 4.));
     vec3 cc = mix(uFogCol * 1.1, vec3(1.05) + uSunCol * .12 * (.4 + sd), .55 + .45 * fbm(p * 1.7 - 2.));
     col = mix(col, cc, c * smoothstep(.005, .16, d.y) * .9);
   }
-  col *= uExposure;
-  col = (col * (2.51 * col + .03)) / (col * (2.43 * col + .59) + .14);
-  o = vec4(pow(clamp(col, 0., 1.), vec3(1. / 2.2)), 1.);
+  o = vec4(uLdr > .5 ? pow(clamp(aces(col * uExposure), 0., 1.), vec3(1. / 2.2)) : col, 1.);
+}`;
+// Licht für beleuchtete Effekte je Ecke (VS_QUAD, VS_STAUB): eine Abtastung der Schattenkarte und Punktlichter ohne Normale.
+// Flache Arten (Q_FLAT) tragen ihre Fläche in e.y; dort wird der Schatten etwas vor der Fläche geprüft.
+const GLSL_QLICHT = `
+uniform mat4 uShadowMat;
+uniform highp sampler2DShadow uShadow;
+uniform float uShadowOn;
+uniform vec4 uLights[${MAX_LIGHTS}];
+uniform vec3 uLightCol[${MAX_LIGHTS}];
+out vec2 vUV, vE; out vec4 vCol; out float vKind, vSh; out vec3 vPos, vPt;
+const vec3 FACE[6] = vec3[6](vec3(-1., 0., 0.), vec3(1., 0., 0.), vec3(0., -1., 0.), vec3(0., 1., 0.), vec3(0., 0., -1.), vec3(0., 0., 1.));
+void qLicht(float kind, vec2 e, vec3 p) {
+  float k = floor(kind + .01);
+  vSh = 1.; vPt = vec3(0.);
+  if (!(k == 1. || k == 3. || k == 5. || k == 8. || k == 10. || k == 11.)) return;
+  bool flach = kind - k > .1;
+  vec3 n = FACE[clamp(int(e.y + .5), 0, 5)];
+  if (uShadowOn > .5) {
+    vec3 c = (uShadowMat * vec4(flach ? p + n * .06 : p, 1.)).xyz;
+    if (c.x > 0. && c.x < 1. && c.y > 0. && c.y < 1. && c.z < 1.) vSh = texture(uShadow, c - vec3(0., 0., .002));
+  }
+  for (int i = 0; i < ${MAX_LIGHTS}; i++) {
+    float r = uLights[i].w;
+    if (r <= 0.) continue;
+    vec3 d = uLights[i].xyz - p;
+    float a = max(0., 1. - dot(d, d) / (r * r));
+    vPt += uLightCol[i] * a * a * (flach ? .3 + .7 * max(dot(n, normalize(d)), 0.) : .65);
+  }
 }`;
 const VS_QUAD = `#version 300 es
 layout(location=0) in vec3 aPos; layout(location=1) in vec2 aUV; layout(location=2) in vec4 aCol; layout(location=3) in float aKind;
+layout(location=4) in vec2 aE;
 uniform mat4 uVP;
-out vec2 vUV; out vec4 vCol; out float vKind;
-void main() { vUV = aUV; vCol = aCol; vKind = aKind; gl_Position = uVP * vec4(aPos, 1.); }`;
+${GLSL_QLICHT}
+void main() { vUV = aUV; vCol = aCol; vKind = aKind; vE = aE; vPos = aPos; qLicht(aKind, aE, aPos); gl_Position = uVP * vec4(aPos, 1.); }`;
+// Tiefe aus der Tiefentextur linear machen (nah 0,07, fern 500). Die Welt liegt im Tiefenbereich 0,1…1, die Waffe in der Hand in 0…0,1
+// (liefert Werte unter 0,07, liegt also vor allem); Himmel = 1,0 → 500.
+const GLSL_LINZ = `
+float linZ(float d) { float z = (d - .1) / .9 * 2. - 1.; return 2. * .07 * 500. / (500.07 - z * 499.93); }`;
+/**
+ * Durchsichtiges zeichnet in fboFx (nur Farbe, keine Tiefe) und prüft die Tiefe selbst gegen uTiefe. Weiche Kante an Flächen je nach Größe.
+ * Beleuchtete Arten: Farbe = Albedo (Anzeigewert, linear gemacht) mal Himmel, Sonne (Schatten aus VS_QUAD) und Punktlichtern; Rauch mit
+ * Scheinnormale aus der Viereck-Koordinate. Leuchtende Arten als HDR (Faktor je Art; Farben über 1 leuchten stärker). Alles im Nebel.
+ * Saat (ganzzahliger Teil von vE.x) dreht und verschiebt das Rauschen – Vierecke sind nicht gedreht, damit die Scheinnormale stimmt.
+ */
 const FS_QUAD = `#version 300 es
 precision highp float;
-in vec2 vUV; in vec4 vCol; in float vKind;
+uniform highp sampler2D uTiefe;
+uniform float uExposure, uLdr, uTest, uFogDen;
+uniform vec3 uCam, uCamR, uCamU, uSunDir, uSunCol, uSkyCol, uGndCol, uFogCol, uZenith;
+in vec2 vUV, vE; in vec4 vCol; in float vKind, vSh; in vec3 vPos, vPt;
 out vec4 o;
 float h2(vec2 p) { vec3 q = fract(vec3(p.xyx) * .1031); q += dot(q, q.yzx + 33.33); return fract((q.x + q.y) * q.z); }
 float vn(vec2 p) { vec2 i = floor(p), f = fract(p); f = f * f * (3. - 2. * f);
   return mix(mix(h2(i), h2(i + vec2(1, 0)), f.x), mix(h2(i + vec2(0, 1)), h2(i + vec2(1, 1)), f.x), f.y); }
+float fbm(vec2 p) { return vn(p) * .55 + vn(p * 2.3 + 7.1) * .3 + vn(p * 5.1 + 3.7) * .15; }
+${GLSL_ACES}
+${GLSL_HIMMEL}
+${GLSL_LINZ}
+const vec3 FACE[6] = vec3[6](vec3(-1., 0., 0.), vec3(1., 0., 0.), vec3(0., -1., 0.), vec3(0., 1., 0.), vec3(0., 0., -1.), vec3(0., 0., 1.));
+// Feiner Riss von der Mitte nach außen in Richtung w
+float riss(vec2 p, float w, float s) {
+  vec2 r = vec2(cos(w), sin(w));
+  float l = dot(p, r), q = abs(dot(p, vec2(-r.y, r.x)) + .05 * sin(l * 13. + s) * l);
+  return step(.05, l) * smoothstep(.8, .25, l) * smoothstep(.035, .01, q);
+}
 void main() {
+  float k = floor(vKind + .01), szene = 1e9, ich = 0., saat = floor(vE.x), alter = fract(vE.x);
+  bool flach = vKind - k > .1;
+  if (uTest > .5) {                                                                        // Tiefentest gegen die Szene
+    szene = linZ(texelFetch(uTiefe, ivec2(gl_FragCoord.xy), 0).r); ich = linZ(gl_FragCoord.z);
+    if (flach || k == 3. || k == 11.) { if (ich >= szene + .02 + .0005 * ich) discard; }   // Löcher, Flecken, Zeichen am Boden
+    else if (k == 2. || k == 4. || k == 6.) { if (ich > szene) discard; }                  // Leuchtspur, fremdes Mündungsfeuer, Funken
+  }
   vec2 p = vUV * 2. - 1.;
-  float d = length(p), a = 0., add = 1.;
-  if (vKind < .5) a = pow(max(0., 1. - d), 2.);                                           // Glühen
-  else if (vKind < 1.5) { a = smoothstep(1., .25, d) * (.55 + .45 * vn(vUV * 5. + vCol.a * 7.)); add = 0.; }   // Rauch
-  else if (vKind < 2.5) a = (1. - abs(p.y)) * smoothstep(0., .15, vUV.x) * smoothstep(1., .6, vUV.x);      // Leuchtspur
-  else if (vKind < 3.5) { a = smoothstep(1., .35, d + .25 * vn(vUV * 9.)); add = 0.; }      // Einschussloch
-  else if (vKind < 4.5) { float ang = atan(p.y, p.x); a = pow(max(0., 1. - d * (1.25 - .45 * cos(ang * 4.))), 1.6); }   // Mündungsfeuer
-  else { a = smoothstep(1., .1, d) * .8; add = 0.; }                                       // Staub
+  float d = length(p), a = 0., wrap = -1., hdr = 3., dreh = saat * 2.39996;
+  vec2 q = mat2(cos(dreh), sin(dreh), -sin(dreh), cos(dreh)) * p;                          // gedrehte Koordinate für das Rauschen
+  vec3 c = vCol.rgb;
+  if (k < .5) a = pow(max(0., 1. - d), 2.);                                                // Glühen
+  else if (k < 1.5) {                                                                      // Rauch: Rand mit Rauschen ausgefranst, innen Dichte
+    float n = fbm(q * 1.35 + saat * .37 + vec2(0., alter * .9));
+    a = smoothstep(1., .15, d + (n - .5) * .85) * (.55 + .55 * n); wrap = .35;
+  }
+  else if (k < 2.5) { a = pow(1. - abs(p.y), 1.5) * vUV.x * vUV.x * smoothstep(1., .9, vUV.x); hdr = 6.; }        // Leuchtspur: heller Kopf
+  else if (k < 3.5) { a = smoothstep(1., .35, d + .25 * vn(vUV * 9. + saat)); c *= .5 + .5 * vn(p * 4. + saat); wrap = 0.; }   // Brandfleck
+  else if (k < 4.5) {                                                                      // Mündungsfeuer: Kern und ungleich lange, spitze Zacken
+    vec2 u = p / max(d, 1e-4);
+    float z = pow(vn(u * 3.1 + saat * 1.37), 3.) * 1.6 + pow(vn(u * 7.3 - saat * .71), 4.) * .9, r = .2 + .8 * min(z, 1.);
+    a = pow(max(0., 1. - d / r), 2.) * (.7 + .6 * vn(q * 9. + saat)) + pow(max(0., 1. - d * 3.2), 1.5);
+    c = mix(c, vec3(1., .93, .82), pow(max(0., 1. - d * 2.2), 1.5)); hdr = 3.;
+  }
+  else if (k < 5.5) { a = smoothstep(1., .15, d + (vn(q * 2.5 + saat) - .5) * .55) * .8; wrap = .6; }                 // Staub
+  else if (k < 6.5) {                                                                      // Funke: in Flugrichtung gestreckt, heller Kopf
+    a = pow(max(0., 1. - abs(p.y)), 2.) * smoothstep(0., .55, vUV.x) * smoothstep(1., .82, vUV.x);
+    c = mix(c, vec3(1., .92, .75), smoothstep(.55, 1., vUV.x)); hdr = 5.;
+  }
+  else if (k < 7.5) {                                                                      // Feuerball: Rauschen frisst ihn mit dem Alter auf
+    float n = fbm(q * 1.6 + saat + vec2(0., -alter * 1.3)), s = (1. - d) * (.5 + .75 * n), e = mix(.04, .6, alter);
+    a = smoothstep(e, e + .22, s);
+    c = mix(vec3(.75, .16, .03), vec3(1., .78, .42), clamp((s - e) * 2.2, 0., 1.)) * c; hdr = 2.4 * (1. - .6 * alter);
+  }
+  else if (k < 8.5) { a = smoothstep(1., .93, d) * smoothstep(.62, .9, d) * (.45 + .55 * vn(q * 7. + saat)); wrap = .5; }   // Druckring
+  else if (k < 9.5) { float w = mix(1., .14, vUV.y); a = smoothstep(w, w * .2, abs(p.x)) * pow(vUV.y, 1.3) * smoothstep(1., .9, vUV.y); hdr = 1.; }   // Lichtkegel
+  else if (k < 10.5) {                                                                     // Blut: Fleck mit Spritzern (flach) oder Nebel
+    if (flach) {
+      float b = smoothstep(.6, .48, d + (vn(q * 3. + saat) - .5) * .5), t = step(.8, vn(q * 9. + saat * 3.)) * smoothstep(1., .65, d);
+      a = max(b, t) * .9; c *= .8 + .4 * vn(q * 14.);
+    } else { a = smoothstep(1., .2, d + (vn(q * 3. + saat) - .5) * .6) * .75; wrap = .5; }
+    wrap = max(wrap, 0.);
+  }
+  else {                                                                                   // Risse und Dellen je Material (Saat mod 8)
+    float v = mod(saat, 8.), r1 = h2(vec2(saat, 1.7)) * 6.2832, n = vn(q * 6. + saat);
+    vec3 hell = c * 1.3, dunkel = c * .1;
+    if (v < .5) {                                                                          // Beton: heller Ausbruch, dunkler Kern, zwei Risse
+      float kern = smoothstep(.22, .15, d + (n - .5) * .1), aus = smoothstep(.66, .3, d + (vn(q * 4. + saat) - .5) * .4);
+      float rs = max(riss(p, r1, saat), riss(p, r1 + 2.2 + h2(vec2(saat, 3.1)) * 1.8, saat + 4.)) * .85;
+      float dk = max(kern, rs); c = mix(hell, dunkel, dk); a = max(aus * .6, dk);
+    } else if (v < 1.5) {                                                                  // Metall: dunkle Delle mit hellem Rand
+      float de = smoothstep(.46, .36, d), rd = smoothstep(.38, .48, d) * smoothstep(.7, .5, d);
+      c = mix(c * 1.8 + .06, c * .22, de); a = max(de * .9, rd * .7);
+    } else if (v < 2.5) {                                                                  // Holz: ausgefranstes helles Loch
+      float w = atan(p.y, p.x), f = .3 + .28 * vn(vec2(w * 2.6 + saat, saat)), loch = smoothstep(.22, .15, d + (n - .5) * .12);
+      float sp = smoothstep(f + .3, f, d) * (.45 + .55 * vn(vec2(w * 9., saat * 1.3)));
+      c = mix(hell * 1.25, dunkel, loch); a = max(loch, sp * .85);
+    } else if (v < 3.5) { a = smoothstep(1., .15, d + (n - .5) * .35) * .5; c *= .55; }    // Sand: flache dunkle Mulde
+    else { a = smoothstep(.5, .3, d + (n - .5) * .12) * .95; c = dunkel; }                 // Stoff: kleines dunkles Loch
+    wrap = 0.;
+  }
   a *= vCol.a;
-  o = vec4(vCol.rgb * a, add > .5 ? 0. : a);
+  if (uTest > .5 && !flach && (k == 0. || k == 1. || k == 5. || k == 7. || k == 9. || k == 10.)) {   // weiche Kante an Flächen, nach Größe
+    a *= clamp((szene - ich) / (k == 9. ? .4 : clamp(vE.y * .8, .04, .6)), 0., 1.);
+    if (k == 1. || k == 5. || k == 10.) a *= smoothstep(.12, .6, ich);                     // dicht vor der Kamera ausblenden
+  }
+  if (a < .002) discard;
+  vec3 V = uCam - vPos;
+  float dist = length(V), fog = clamp(1. - exp(-dist * uFogDen), 0., 1.);
+  V /= max(dist, 1e-4);
+  if (wrap >= 0.) {                                                                        // beleuchtet, deckend
+    vec3 n = flach ? FACE[clamp(int(vE.y + .5), 0, 5)] : normalize(uCamR * p.x + uCamU * p.y + V * sqrt(max(0., 1. - d * d)));
+    vec3 L = mix(uGndCol, uSkyCol, n.y * .5 + .5) + uSunCol * vSh * (wrap + (1. - wrap) * max(dot(n, uSunDir), 0.)) + vPt;
+    vec3 col = mix(pow(c, vec3(2.2)) * L, nebel(-V), fog);
+    if (uLdr > .5) col = pow(clamp(aces(col * uExposure), 0., 1.), vec3(1. / 2.2));
+    o = vec4(col * a, a);
+  } else if (uLdr > .5) o = vec4(c * a, 0.);
+  else o = vec4(pow(c, vec3(2.2)) * a * hdr * (1. - .8 * fog), 0.);                         // leuchtend als HDR
+}`;
+// Bildschirmfüllendes Dreieck (Puffer des Himmels) für alle Schritte nach der Szene
+const VS_POST = `#version 300 es
+layout(location=0) in vec2 aPos;
+out vec2 vUV;
+void main() { vUV = aPos * .5 + .5; gl_Position = vec4(aPos, 0., 1.); }`;
+// Glühen: Vorfilter bei halber Auflösung (4 Proben über 4×4 Pixel, weiche Schwelle auf dem belichteten Wert), dann je Stufe halbieren
+// (13 Proben), mit 3×3-Zelt wieder hoch (additiv in die größere Stufe). Ergebnis in Stufe 0, schon belichtet.
+const FS_GLOW_PRE = `#version 300 es
+precision highp float;
+uniform sampler2D uQuelle, uBel;
+uniform vec2 uPx;
+uniform float uLdr, uSchwelle, uKnie;
+in vec2 vUV; out vec4 o;
+void main() {
+  vec3 c = (texture(uQuelle, vUV + vec2(-1., -1.) * uPx).rgb + texture(uQuelle, vUV + vec2(1., -1.) * uPx).rgb
+          + texture(uQuelle, vUV + vec2(-1., 1.) * uPx).rgb + texture(uQuelle, vUV + vec2(1., 1.) * uPx).rgb) * .25;
+  c = min(c * (uLdr > .5 ? 1. : texelFetch(uBel, ivec2(0), 0).r), vec3(64.));
+  float br = max(c.r, max(c.g, c.b)), q = clamp(br - uSchwelle + uKnie, 0., 2. * uKnie);
+  o = vec4(c * max(q * q / (4. * uKnie + 1e-5), br - uSchwelle) / max(br, 1e-4), 1.);
+}`;
+const FS_GLOW_DOWN = `#version 300 es
+precision highp float;
+uniform sampler2D uQuelle;
+uniform vec2 uPx;
+in vec2 vUV; out vec4 o;
+vec3 t(float x, float y) { return texture(uQuelle, vUV + vec2(x, y) * uPx).rgb; }
+void main() {
+  o = vec4((t(-1., -1.) + t(1., -1.) + t(-1., 1.) + t(1., 1.)) * .125 + (t(-2., -2.) + t(2., -2.) + t(-2., 2.) + t(2., 2.)) * .03125
+         + (t(0., -2.) + t(-2., 0.) + t(2., 0.) + t(0., 2.)) * .0625 + t(0., 0.) * .125, 1.);
+}`;
+const FS_GLOW_UP = `#version 300 es
+precision highp float;
+uniform sampler2D uQuelle;
+uniform vec2 uPx;
+in vec2 vUV; out vec4 o;
+vec3 t(float x, float y) { return texture(uQuelle, vUV + vec2(x, y) * uPx).rgb; }
+void main() {
+  o = vec4((t(0., 0.) * 4. + (t(-1., 0.) + t(1., 0.) + t(0., -1.) + t(0., 1.)) * 2. + t(-1., -1.) + t(1., -1.) + t(-1., 1.) + t(1., 1.)) / 16., 1.);
+}`;
+// Belichtung: mittlere Leuchtdichte (geometrisches Mittel, ohne die Waffe in der Hand) in 64×64, Mip-Kette bis 1×1.
+// R = Logarithmus mal Gewicht, G = Gewicht; die oberste Stufe liefert das gewichtete Mittel. Keine Rücklesung auf die CPU.
+const FS_LUM = `#version 300 es
+precision highp float;
+uniform sampler2D uQuelle;
+uniform highp sampler2D uTiefe;
+in vec2 vUV; out vec4 o;
+void main() {
+  vec2 s = vec2(textureSize(uTiefe, 0));
+  float r = 0., w = 0.;
+  for (int i = 0; i < 4; i++) {
+    vec2 uv = vUV + (vec2(i & 1, i >> 1) - .5) * (.5 / 64.);
+    float k = texelFetch(uTiefe, ivec2(uv * s), 0).r < .1 ? 0. : 1.;              // Waffe in der Hand zählt nicht
+    r += log(dot(texture(uQuelle, uv).rgb, vec3(.2126, .7152, .0722)) + 1e-4) * k; w += k;
+  }
+  o = vec4(r * .25, w * .25, 0., 1.);
+}`;
+// Anpassung im Wechsel zweier 1×1-Bilder: ziel = clamp(0,18 / mittel, 0,66 … 1,5) · env.exposure, mittel gemessen am mit env.exposure
+// belichteten Bild – so bleibt ein gewöhnlicher Blick bei der Grundbelichtung der Karte, nur deutlich Helleres oder Dunkleres wird ausgeglichen.
+// Wird das Bild heller, folgt die Belichtung in 0,35 s, wird es dunkler, in 1,2 s (wie das Auge: Blenden geht schneller als Gewöhnen ans Dunkel).
+// Kurze Blitze zählen kaum: das Mittel geht über ein gedämpftes Mittel (B), das in BEL.blitz steigt und sofort fällt. Dauerfeuer (Mündungsblitz
+// und sein Licht, je 40 ms) dunkelt die Szene so nicht ab; eine Explosion bleibt länger hell, blendet erst und regelt dann nach.
+const FS_ADAPT = `#version 300 es
+precision highp float;
+uniform sampler2D uLum, uAlt;
+uniform float uDt, uKey, uBlitz;
+uniform vec4 uBelK;      // Zielwert, untere und obere Grenze, Zeit zum Abdunkeln (BEL)
+uniform float uBelDunkel;
+in vec2 vUV; out vec4 o;
+void main() {
+  vec2 m = textureLod(uLum, vec2(.5), 6.).rg;
+  vec4 a = texelFetch(uAlt, ivec2(0), 0);
+  float mittel = (m.g > 1e-3 ? exp(m.r / m.g) : uBelK.x / uKey) * uKey;
+  float ruhig = mittel < a.b ? mittel : a.b + (mittel - a.b) * (1. - exp(-uDt / uBlitz));
+  float ziel = clamp(uBelK.x / (ruhig + 1e-4), uBelK.y, uBelK.z) * uKey;
+  o = vec4(a.r + (ziel - a.r) * (1. - exp(-uDt / (ziel < a.r ? uBelK.w : uBelDunkel))), mittel, ruhig, 1.);
+}`;
+// SSAO in halber Auflösung: Ort aus texTiefe, Normale aus den Nachbarn (je Achse die kleinere Differenz), Halbkugel mit Radius 0,5 m,
+// 6 oder 10 Proben (uKern, je Pixel gedreht), mit Reichweitenprüfung; Ergebnis hoch 1,5. Waffe in der Hand und Himmel bleiben frei (1).
+const FS_SSAO = `#version 300 es
+precision highp float;
+uniform highp sampler2D uTiefe;
+uniform vec2 uProj;                 // tan(Sichtfeld/2) · Seitenverhältnis, tan(Sichtfeld/2)
+uniform vec3 uKern[10];
+uniform float uProben;
+out vec4 o;
+${GLSL_LINZ}
+ivec2 S;
+vec3 posAt(ivec2 p) { p = clamp(p, ivec2(0), S - 1); float z = linZ(texelFetch(uTiefe, p, 0).r); return vec3(((vec2(p) + .5) / vec2(S) * 2. - 1.) * uProj * z, -z); }
+void main() {
+  S = textureSize(uTiefe, 0);
+  ivec2 p = ivec2(gl_FragCoord.xy) * 2;
+  float d = texelFetch(uTiefe, p, 0).r;
+  if (d < .1 || d >= 1.) { o = vec4(1.); return; }
+  ivec2 c = clamp(p, ivec2(2), S - 3);                                      // Nachbarn am Bildrand: Normale des nächsten inneren Punkts
+  vec3 P = posAt(p), C = posAt(c), l = posAt(c - ivec2(2, 0)), r = posAt(c + ivec2(2, 0)), b = posAt(c - ivec2(0, 2)), t = posAt(c + ivec2(0, 2));
+  vec3 N = cross(abs(r.z - C.z) < abs(C.z - l.z) ? r - C : C - l, abs(t.z - C.z) < abs(C.z - b.z) ? t - C : C - b);
+  N = dot(N, N) > 1e-12 ? normalize(N) : vec3(0., 0., 1.);
+  float a = 6.2831853 * fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(.06711056, .00583715))));
+  vec3 rv = vec3(cos(a), sin(a), 0.), T = normalize(rv - N * dot(rv, N));
+  mat3 M = mat3(T, cross(N, T), N);
+  int n = int(uProben);
+  float occ = 0.;
+  for (int i = 0; i < 10; i++) {
+    if (i >= n) break;
+    vec3 q = P + M * uKern[i] * .5;
+    vec2 uv = q.xy / (-q.z * uProj) * .5 + .5;
+    if (q.z > -.07 || uv.x < 0. || uv.x > 1. || uv.y < 0. || uv.y > 1.) continue;
+    float sd = texelFetch(uTiefe, ivec2(uv * vec2(S)), 0).r;
+    if (sd < .1) continue;                                                   // die Waffe in der Hand verdeckt nichts
+    float sz = linZ(sd);
+    occ += step(sz, -q.z - .03) * (1. - smoothstep(.5, 1., -P.z - sz));      // Reichweite: was über 1 m davor liegt, verdeckt nicht
+  }
+  o = vec4(pow(1. - occ / float(n), 1.5), 0., 0., 1.);
+}`;
+// SSAO weichzeichnen: 5 Punkte in einer Richtung, Gewicht fällt mit dem Tiefensprung (keine Säume an Kanten)
+const FS_AO_BLUR = `#version 300 es
+precision highp float;
+uniform sampler2D uAo;
+uniform highp sampler2D uTiefe;
+uniform vec2 uDir;
+out vec4 o;
+${GLSL_LINZ}
+void main() {
+  ivec2 q = ivec2(gl_FragCoord.xy), A = textureSize(uAo, 0) - 1, S = textureSize(uTiefe, 0) - 1;
+  float z0 = linZ(texelFetch(uTiefe, min(q * 2, S), 0).r), s = 0., w = 0.;
+  for (int i = -2; i <= 2; i++) {
+    ivec2 k = clamp(q + ivec2(uDir) * i, ivec2(0), A);
+    float wi = (i == 0 ? 1. : abs(i) == 1 ? .7 : .4) * max(0., 1. - abs(linZ(texelFetch(uTiefe, min(k * 2, S), 0).r) - z0) / (.04 * z0 + .05));
+    s += texelFetch(uAo, k, 0).r * wi; w += wi;
+  }
+  o = vec4(s / max(w, 1e-4), 0., 0., 1.);
+}`;
+// Sonnenstrahlen in Viertelauflösung: Maske aus Himmelspixeln (Tiefe 1) mal Helligkeit, dann 24 Proben zur Sonne hin mit Abklingen 0,96
+const FS_STRAHL_MASKE = `#version 300 es
+precision highp float;
+uniform sampler2D uQuelle;
+uniform highp sampler2D uTiefe;
+uniform vec2 uKnie;
+in vec2 vUV; out vec4 o;
+void main() {
+  ivec2 S = textureSize(uTiefe, 0);
+  if (texelFetch(uTiefe, min(ivec2(gl_FragCoord.xy) * 4 + 2, S - 1), 0).r < 1.) { o = vec4(0., 0., 0., 1.); return; }
+  vec3 c = texture(uQuelle, vUV).rgb;
+  o = vec4(c * smoothstep(uKnie.x, uKnie.y, dot(c, vec3(.2126, .7152, .0722))), 1.);
+}`;
+const FS_STRAHLEN = `#version 300 es
+precision highp float;
+uniform sampler2D uMaske;
+uniform vec2 uSonne;                // Sonne im Bild (0 … 1)
+in vec2 vUV; out vec4 o;
+void main() {
+  vec2 st = (uSonne - vUV) * (.85 / 24.), uv = vUV;
+  vec3 s = vec3(0.);
+  float w = 1.;
+  for (int i = 0; i < 24; i++) { s += texture(uMaske, uv).rgb * w; w *= .96; uv += st; }
+  o = vec4(s / 24. * (1. - smoothstep(.1, .9, length(vUV - uSonne))), 1.);      // zum Bildrand hin schwächer
+}`;
+// Korn (bewegt, im Dunkeln stärker) und Rasterung ±0,5/255 – ganz am Ende, bei FXAA erst nach der Kantenglättung
+const GLSL_KORN = `
+uniform float uKorn, uZeit;
+float hk(vec2 p) { vec3 q = fract(vec3(p.xyx) * .1031); q += dot(q, q.yzx + 33.33); return fract((q.x + q.y) * q.z); }
+vec3 korn(vec3 c) {
+  vec2 p = gl_FragCoord.xy;
+  float l = clamp(dot(c, vec3(.2126, .7152, .0722)), 0., 1.);
+  c += (hk(p + uZeit) - .5) * 2. * uKorn * (1. - .7 * l);
+  return c + (hk(p * 1.31 + 57.3 + uZeit * .37) - .5) / 255.;
+}`;
+// Schlussschritt: HDR-Zwischenbild → Belichtung → Glühen → ACES → Gamma → Farbstimmung → Vignette → Korn → Bildfläche.
+// Plätze für spätere Phasen: Verzerrung (Bildwellen) vor dem Lesen von uFarbe, SSAO und Sonnenstrahlen vor der Belichtung,
+// Bildwirkungen aus f.post nach der Farbstimmung.
+const FS_FINAL = `#version 300 es
+precision highp float;
+uniform sampler2D uFarbe, uGlow, uBel, uAo, uStrahlen;
+uniform highp sampler2D uTiefe;
+uniform float uLdr, uGlowK, uSatt, uKontrast, uVig, uKornHier, uAoAn, uStrahlenK;
+uniform vec3 uTonS, uTonL;
+uniform vec4 uWelle[4];             // Bildwellen (f.post.ripples): Mitte und Radius in halben Bildhöhen, Stärke
+uniform float uWellen, uAsp, uSaum;  // Zahl der Wellen, Seitenverhältnis, Farbsaum (f.post.chroma)
+uniform float uRot, uWenig, uPuls, uRohr, uHoehe;   // Treffer (hurt), wenig Leben (lowHp), Herzschlag 0 … 1, Zielfernrohr (scope), Bildhöhe in Pixeln
+in vec2 vUV; out vec4 o;
+${GLSL_ACES}
+${GLSL_KORN}
+void main() {
+  vec2 uv = vUV;
+  for (int i = 0; i < 4; i++) {                                           // Bildwelle: Ring, der das Bild nach außen schiebt und dahinter zurückzieht
+    if (float(i) >= uWellen) break;
+    vec4 w = uWelle[i];
+    vec2 d = (uv - (.5 + .5 * w.xy * vec2(1. / uAsp, 1.))) * vec2(uAsp, 1.) * 2.;
+    float l = length(d), b = .03 + .05 * w.z, x = (l - w.z) / b;
+    uv -= d / max(l, 1e-4) * vec2(1. / uAsp, 1.) * x * exp(-x * x) * w.w * .014;
+  }
+  vec3 c = texture(uFarbe, uv).rgb, g = texture(uGlow, uv).rgb * uGlowK;
+  vec2 qr = (vUV - .5) * vec2(uAsp, 1.);                                  // Zielfernrohr: Abstand zur Mitte in Bildhöhen, Kreis mit Radius 0,42
+  float rr = length(qr), saum = max(uSaum, uRohr * smoothstep(.3, .42, rr) * .9);
+  if (saum > 0.) {                                                        // Farbsaum: Rot und Blau gegeneinander versetzt, zum Rand hin stärker
+    vec2 q = uv - .5, s = q / max(length(q), 1e-3) * vec2(1., uAsp) * (.002 + .004 * saum) * saum * (.35 + 1.3 * length(q));
+    c.r = texture(uFarbe, uv + s).r; c.b = texture(uFarbe, uv - s).b;
+    g.r = texture(uGlow, uv + s).r * uGlowK; g.b = texture(uGlow, uv - s).b * uGlowK;
+  }
+  float bel = uLdr < .5 ? texelFetch(uBel, ivec2(0), 0).r : 1.;
+  if (uAoAn > .5) {                                                       // SSAO: wirkt im Schatten, kaum im Sonnenlicht
+    float d = texelFetch(uTiefe, ivec2(gl_FragCoord.xy), 0).r;
+    if (d >= .1 && d < 1.) c *= mix(1., texture(uAo, vUV).r, .8 * (1. - smoothstep(.4, 1.5, dot(c * bel, vec3(.2126, .7152, .0722)))));
+  }
+  if (uStrahlenK > 0.) {                                                  // Sonnenstrahlen (env.grade.rays, ausgeblendet ohne Sonne vor der Kamera)
+    vec3 r = texture(uStrahlen, vUV).rgb * uStrahlenK;
+    c = uLdr > .5 ? 1. - (1. - min(c, 1.)) * (1. - min(r, 1.)) : c + r;  // im Rückfall (Anzeigewerte) weich überlagert statt addiert, sonst brennt der Himmel aus
+  }
+  if (uLdr < .5) c = pow(clamp(aces(c * bel + g), 0., 1.), vec3(1. / 2.2));
+  else c = min(c + g, 1.);
+  float l = dot(c, vec3(.2126, .7152, .0722));
+  c *= mix(uTonS, uTonL, smoothstep(.15, .85, l));                       // Farbstimmung: Schatten und Lichter getönt
+  c = clamp((mix(vec3(l), c, uSatt * (1. - .4 * uWenig)) - .5) * uKontrast + .5, 0., 1.);   // Sättigung (wenig Leben: bis 60 %), Kontrast
+  vec2 q = vUV - .5;
+  c *= 1. - (uVig + uWenig * (.2 + .35 * uPuls)) * pow(dot(q, q) * 2., 1.5);   // Vignette, bei wenig Leben im Takt des Herzschlags
+  float rand = smoothstep(.45, 1.25, length(q) * 2.) * uRot;              // Treffer: Rand rot gefärbt
+  c = mix(c, c * vec3(1., .25, .2) + vec3(.09, 0., 0.), rand);
+  if (uRohr > .5) {                                                       // Zielfernrohr: außen schwarz, Rand über 3 % weich, innen leicht abgedunkelt
+    float px = 1. / uHoehe, kreuz = max(1. - smoothstep(.75 * px, 1.25 * px, abs(qr.x)), 1. - smoothstep(.75 * px, 1.25 * px, abs(qr.y)));
+    c *= smoothstep(.42, .407, rr) * mix(1., .86, smoothstep(.3, .42, rr));   // Rand über 3 % des Radius weich
+    c *= 1. - .92 * kreuz;                                                 // Fadenkreuz 1,5 Pixel
+  }
+  o = vec4(uKornHier > .5 ? korn(c) : c, 1.);
+}`;
+// Kantenglättung ohne Mehrfachabtastung (FXAA nach Lottes, schlanke Fassung): liest das fertige RGBA8-Bild, schreibt auf die Bildfläche
+const FS_FXAA = `#version 300 es
+precision highp float;
+uniform sampler2D uBild;
+uniform vec2 uPx;
+in vec2 vUV; out vec4 o;
+${GLSL_KORN}
+void main() {
+  const vec3 L = vec3(.299, .587, .114);
+  vec3 m = texture(uBild, vUV).rgb;
+  float nw = dot(texture(uBild, vUV + vec2(-1., -1.) * uPx).rgb, L), ne = dot(texture(uBild, vUV + vec2(1., -1.) * uPx).rgb, L);
+  float sw = dot(texture(uBild, vUV + vec2(-1., 1.) * uPx).rgb, L), se = dot(texture(uBild, vUV + vec2(1., 1.) * uPx).rgb, L), lm = dot(m, L);
+  float lo = min(lm, min(min(nw, ne), min(sw, se))), hi = max(lm, max(max(nw, ne), max(sw, se)));
+  vec2 dir = vec2(-((nw + ne) - (sw + se)), (nw + sw) - (ne + se));
+  float red = max((nw + ne + sw + se) * .03125, 1. / 128.);
+  dir = clamp(dir / (min(abs(dir.x), abs(dir.y)) + red), -8., 8.) * uPx;
+  vec3 a = .5 * (texture(uBild, vUV - dir / 6.).rgb + texture(uBild, vUV + dir / 6.).rgb);
+  vec3 b = a * .5 + .25 * (texture(uBild, vUV - dir * .5).rgb + texture(uBild, vUV + dir * .5).rgb);
+  float lb = dot(b, L);
+  o = vec4(korn(lb < lo || lb > hi ? a : b), 1.);
 }`;
 
-function createRenderer(canvas, { shadowSize = 2048 } = {}) {
-  const gl = canvas.getContext('webgl2', { antialias: true, alpha: false, depth: true, stencil: false, powerPreference: 'high-performance' });
+function createRenderer(canvas, { shadowSize = 2048, ldr: forceLdr = false } = {}) {
+  // Gezeichnet wird in eigene Zwischenbilder; die Bildfläche bekommt nur den Schlussschritt (ohne Tiefe, ohne Kantenglättung).
+  const gl = canvas.getContext('webgl2', { antialias: false, alpha: false, depth: false, stencil: false, powerPreference: 'high-performance' });
   if (!gl) return null;
+  const floatOk = !!(gl.getExtension('EXT_color_buffer_float') || gl.getExtension('EXT_color_buffer_half_float'));
 
   const shader = (type, src) => {
     const s = gl.createShader(type);
@@ -541,12 +1114,17 @@ function createRenderer(canvas, { shadowSize = 2048 } = {}) {
     world: program(VS_WORLD, FS_WORLD), inst: program(VS_INST, FS_INST),
     shadow: program(VS_SHADOW, FS_EMPTY), shadowInst: program(VS_SHADOW_INST, FS_EMPTY),
     sky: program(VS_SKY, FS_SKY), quad: program(VS_QUAD, FS_QUAD),
+    final: program(VS_POST, FS_FINAL), fxaa: program(VS_POST, FS_FXAA),
+    lum: program(VS_POST, FS_LUM), adapt: program(VS_POST, FS_ADAPT),
+    glowPre: program(VS_POST, FS_GLOW_PRE), glowDown: program(VS_POST, FS_GLOW_DOWN), glowUp: program(VS_POST, FS_GLOW_UP),
+    ssao: program(VS_POST, FS_SSAO), aoBlur: program(VS_POST, FS_AO_BLUR),
+    strahlMaske: program(VS_POST, FS_STRAHL_MASKE), strahlen: program(VS_POST, FS_STRAHLEN),
   };
 
   // ---------- Texturen ----------
   const tex = gl.createTexture();
   {
-    const layers = paintTextures();
+    const layers = paintTextures().color;
     gl.bindTexture(gl.TEXTURE_2D_ARRAY, tex);
     gl.texStorage3D(gl.TEXTURE_2D_ARRAY, Math.log2(TEX) + 1, gl.SRGB8_ALPHA8, TEX, TEX, layers.length);
     layers.forEach((px, i) => gl.texSubImage3D(gl.TEXTURE_2D_ARRAY, 0, 0, 0, i, TEX, TEX, 1, gl.RGBA, gl.UNSIGNED_BYTE, px));
@@ -556,6 +1134,23 @@ function createRenderer(canvas, { shadowSize = 2048 } = {}) {
     const aniso = gl.getExtension('EXT_texture_filter_anisotropic');
     if (aniso) gl.texParameterf(gl.TEXTURE_2D_ARRAY, aniso.TEXTURE_MAX_ANISOTROPY_EXT, Math.min(8, gl.getParameter(aniso.MAX_TEXTURE_MAX_ANISOTROPY_EXT)));
   }
+  // Detail-Array (Normale, Rauheit, Vertiefung) auf Einheit 7; Kantenlänge nach Qualitätsstufe (TIERS.detail), bei Wechsel neu angelegt
+  let detailTex = null, detailSize = 0;
+  function loadDetail(size) {
+    if (detailTex && size === detailSize) return;
+    const layers = detailTextures(size);
+    if (detailTex) gl.deleteTexture(detailTex);
+    detailTex = gl.createTexture(); detailSize = size;
+    gl.bindTexture(gl.TEXTURE_2D_ARRAY, detailTex);
+    gl.texStorage3D(gl.TEXTURE_2D_ARRAY, Math.log2(size) + 1, gl.RGBA8, size, size, layers.length);
+    layers.forEach((px, i) => gl.texSubImage3D(gl.TEXTURE_2D_ARRAY, 0, 0, 0, i, size, size, 1, gl.RGBA, gl.UNSIGNED_BYTE, px));
+    gl.generateMipmap(gl.TEXTURE_2D_ARRAY);
+    gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    const aniso = gl.getExtension('EXT_texture_filter_anisotropic');
+    if (aniso) gl.texParameterf(gl.TEXTURE_2D_ARRAY, aniso.TEXTURE_MAX_ANISOTROPY_EXT, Math.min(8, gl.getParameter(aniso.MAX_TEXTURE_MAX_ANISOTROPY_EXT)));
+  }
+  loadDetail(TEX);
 
   // ---------- Schattenkarte ----------
   let shadowRes = shadowSize, shadowOk = true;
@@ -618,6 +1213,7 @@ function createRenderer(canvas, { shadowSize = 2048 } = {}) {
     gl.enableVertexAttribArray(1); gl.vertexAttribPointer(1, 2, gl.FLOAT, false, st, 12);
     gl.enableVertexAttribArray(2); gl.vertexAttribPointer(2, 4, gl.FLOAT, false, st, 20);
     gl.enableVertexAttribArray(3); gl.vertexAttribPointer(3, 1, gl.FLOAT, false, st, 36);
+    gl.enableVertexAttribArray(4); gl.vertexAttribPointer(4, 2, gl.FLOAT, false, st, 40);
     const qi = new Uint16Array(MAX_QUADS * 6);
     for (let i = 0; i < MAX_QUADS; i++) qi.set([i * 4, i * 4 + 1, i * 4 + 2, i * 4, i * 4 + 2, i * 4 + 3], i * 6);
     gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, quadIbo);
@@ -635,6 +1231,135 @@ function createRenderer(canvas, { shadowSize = 2048 } = {}) {
     gl.bindVertexArray(null);
   }
 
+  // ---------- Zwischenbilder (bei jeder Größenänderung neu) ----------
+  // Einheiten 0, 1 und 7 gehören der Szene (Textur-Array, Schattenkarte, Detail-Array); die Schritte danach lesen nur aus Einheit 2 bis 6.
+  // So hängt nie eine Textur, die gerade gelesen wird, zugleich am gezeichneten Framebuffer.
+  let ldr = !floatOk || forceLdr, tW = 0, tH = 0, msaa = 0;
+  let tier = { msaa: true };                     // gewünschte Merkmale der Qualitätsstufe (setTier)
+  // szene: Ziel der Szene (bei Mehrfachabtastung: ms, danach Auflösen in auf); fx: nur farbe; ldr/ldrF: fertiges Bild vor FXAA
+  // glow/glowF: Stufen des Glühens (Textur und Framebuffer je Stufe, Größe in glowW/glowH)
+  // ao/aoF, ao2/ao2F: SSAO in halber Auflösung (R8) und Zwischenbild des Weichzeichners; str/strF (Maske), str2/str2F: Sonnenstrahlen (Viertel)
+  const T = { farbe: null, tiefe: null, szene: null, fx: null, msFarbe: null, msTiefe: null, ms: null, ldr: null, ldrF: null, glow: [], glowF: [],
+    lum: null, lumF: null, bel: [], belF: [], ao: null, aoF: null, ao2: null, ao2F: null, str: null, strF: null, str2: null, str2F: null };
+  let belCur = 0, belReset = true, lastT = 0, frameNo = 0;
+  const lastCam = [0, -1e9, 0];
+  const glowW = [], glowH = [];
+  let aoW = 0, aoH = 0, strW = 0, strH = 0;
+  const sonne = [0, 0, 0];
+  // Halbkugel für SSAO: 10 Richtungen (z > 0), zur Mitte hin dichter; die ersten 6 decken die Halbkugel schon ab (Stufe „Mittel“)
+  const aoKern = new Float32Array(30);
+  for (let i = 0, sd = 9; i < 10; i++) {
+    const rn = () => ((sd = (Math.imul(sd, 1664525) + 1013904223) >>> 0) / 4294967296);
+    const a = (i * 2.399963) % TAU, cz = 0.15 + 0.85 * rn(), r = Math.sqrt(1 - cz * cz), k = 0.15 + 0.85 * ((i + rn()) / 10) ** 2;
+    aoKern.set([Math.cos(a) * r * k, Math.sin(a) * r * k, cz * k], i * 3);
+  }
+  const samplesOf = (fmt) => { try { return [...(gl.getInternalformatParameter(gl.RENDERBUFFER, fmt, gl.SAMPLES) || [])]; } catch { return []; } };
+  function rbTarget(w, h, fmt) {
+    const r = gl.createRenderbuffer();
+    gl.bindRenderbuffer(gl.RENDERBUFFER, r);
+    gl.renderbufferStorageMultisample(gl.RENDERBUFFER, 4, fmt, w, h);
+    gl.bindRenderbuffer(gl.RENDERBUFFER, null);
+    return r;
+  }
+  function texTarget(w, h, fmt, filter = gl.LINEAR) {
+    const t = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, t);
+    gl.texStorage2D(gl.TEXTURE_2D, 1, fmt, w, h);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, filter);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, filter);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    return t;
+  }
+  /** Framebuffer aus Farbe (Textur) und Tiefe (Textur); prüft die Vollständigkeit. */
+  function fboOf(color, depth) {
+    const f = gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, f);
+    if (color) gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, color, 0);
+    if (depth) gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.TEXTURE_2D, depth, 0);
+    f.ok = gl.isContextLost() || gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE;
+    return f;
+  }
+  function freeTargets() {
+    const del = (o) => {
+      if (o instanceof WebGLTexture) gl.deleteTexture(o);
+      else if (o instanceof WebGLFramebuffer) gl.deleteFramebuffer(o);
+      else if (o instanceof WebGLRenderbuffer) gl.deleteRenderbuffer(o);
+    };
+    for (const k of Object.keys(T)) {
+      if (Array.isArray(T[k])) { T[k].forEach(del); T[k] = []; } else { del(T[k]); T[k] = null; }
+    }
+  }
+  function allocTargets(w, h) {
+    freeTargets();
+    tW = w; tH = h;
+    const fmt = ldr ? gl.RGBA8 : gl.RGBA16F;
+    T.farbe = texTarget(w, h, fmt);
+    T.tiefe = texTarget(w, h, gl.DEPTH_COMPONENT24, gl.NEAREST);
+    T.szene = fboOf(T.farbe, T.tiefe);
+    T.fx = fboOf(T.farbe, null);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    if (!T.szene.ok && !ldr) { ldr = true; allocTargets(w, h); return; }      // Float-Ziel abgelehnt: Rückfall auf RGBA8
+    // Mehrfachabtastung nur, wenn Farbe und Tiefe 4 Abtastungen anbieten und der Framebuffer vollständig ist; sonst FXAA
+    msaa = 0;
+    if (tier.msaa && samplesOf(fmt).includes(4) && samplesOf(gl.DEPTH_COMPONENT24).includes(4)) {
+      T.msFarbe = rbTarget(w, h, fmt);
+      T.msTiefe = rbTarget(w, h, gl.DEPTH_COMPONENT24);
+      T.ms = gl.createFramebuffer();
+      gl.bindFramebuffer(gl.FRAMEBUFFER, T.ms);
+      gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.RENDERBUFFER, T.msFarbe);
+      gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, T.msTiefe);
+      if (gl.isContextLost() || gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE) msaa = 4;
+      else { gl.deleteFramebuffer(T.ms); gl.deleteRenderbuffer(T.msFarbe); gl.deleteRenderbuffer(T.msTiefe); T.ms = T.msFarbe = T.msTiefe = null; }
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    }
+    if (!msaa) {
+      T.ldr = texTarget(w, h, gl.RGBA8);
+      T.ldrF = fboOf(T.ldr, null);
+    }
+    // Glühen: Stufe 0 in halber Auflösung, jede weitere halb so groß
+    glowW.length = glowH.length = 0;
+    for (let i = 0, gw = w, gh = h; i < (tier.glow || 5); i++) {
+      gw = Math.max(1, Math.ceil(gw / 2)); gh = Math.max(1, Math.ceil(gh / 2));
+      glowW.push(gw); glowH.push(gh);
+      T.glow.push(texTarget(gw, gh, fmt));
+      T.glowF.push(fboOf(T.glow[i], null));
+    }
+    // SSAO: halbe Auflösung, R8 (nur wenn die Stufe sie will)
+    if (tier.ssao) {
+      aoW = Math.ceil(w / 2); aoH = Math.ceil(h / 2);
+      T.ao = texTarget(aoW, aoH, gl.R8); T.aoF = fboOf(T.ao, null);
+      T.ao2 = texTarget(aoW, aoH, gl.R8); T.ao2F = fboOf(T.ao2, null);
+    }
+    // Sonnenstrahlen: Viertelauflösung (nur wenn die Stufe sie will)
+    if (tier.rays) {
+      strW = Math.ceil(w / 4); strH = Math.ceil(h / 4);
+      T.str = texTarget(strW, strH, fmt); T.strF = fboOf(T.str, null);
+      T.str2 = texTarget(strW, strH, fmt); T.str2F = fboOf(T.str2, null);
+    }
+    // Belichtung (nur mit Float-Zielen): 64×64 mit Mip-Kette, zwei 1×1 im Wechsel
+    if (!ldr) {
+      T.lum = gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_2D, T.lum);
+      gl.texStorage2D(gl.TEXTURE_2D, 7, gl.RGBA16F, 64, 64);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+      T.lumF = fboOf(T.lum, null);
+      for (let i = 0; i < 2; i++) { T.bel.push(texTarget(1, 1, gl.RGBA16F, gl.NEAREST)); T.belF.push(fboOf(T.bel[i], null)); }
+      belReset = true;
+    }
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  }
+  /** Ein Schritt nach der Szene: bildschirmfüllendes Dreieck in fbo (null = Bildfläche). */
+  function post(pr, fbo, w, h) {
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+    gl.viewport(0, 0, w, h);
+    gl.useProgram(pr.p);
+    gl.bindVertexArray(skyVao);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+  }
+  function bindTex(unit, t) { gl.activeTexture(gl.TEXTURE0 + unit); gl.bindTexture(gl.TEXTURE_2D, t); }
+
   let worldVao = null, worldVbo = null, worldIbo = null, worldCount = 0;
   const lightVP = mat4(), shadowMat = mat4();
   let env = null;
@@ -643,6 +1368,7 @@ function createRenderer(canvas, { shadowSize = 2048 } = {}) {
   function setWorld(world) {
     if (worldVao) { gl.deleteVertexArray(worldVao); gl.deleteBuffer(worldVbo); gl.deleteBuffer(worldIbo); }
     env = world.env;
+    belReset = true;
     worldVao = gl.createVertexArray(); worldVbo = gl.createBuffer(); worldIbo = gl.createBuffer();
     gl.bindVertexArray(worldVao);
     gl.bindBuffer(gl.ARRAY_BUFFER, worldVbo);
@@ -676,7 +1402,7 @@ function createRenderer(canvas, { shadowSize = 2048 } = {}) {
 
   const proj = mat4(), view = mat4(), vp = mat4(), vmProj = mat4(), vmVP = mat4();
   const lightPos = new Float32Array(MAX_LIGHTS * 4), lightCol = new Float32Array(MAX_LIGHTS * 3);
-  let shadowsOn = true, tanHalf = 1, aspect = 1;
+  let shadowsOn = true, tanHalf = 1, aspect = 1, drawMs = 0;
 
   function useLit(pr, cam) {
     const u = pr.u;
@@ -687,9 +1413,40 @@ function createRenderer(canvas, { shadowSize = 2048 } = {}) {
     gl.uniform3fv(u.uSkyCol, env.skyCol);
     gl.uniform3fv(u.uGndCol, env.gndCol);
     gl.uniform3fv(u.uFogCol, env.fogCol);
+    gl.uniform3fv(u.uZenith, env.zenith);
     gl.uniform1f(u.uFogDen, env.fogDen);
     gl.uniform1f(u.uExposure, env.exposure);
+    gl.uniform1f(u.uLdr, ldr ? 1 : 0);
     gl.uniform1f(u.uShadowTexel, 1 / shadowRes);
+    gl.uniform1f(u.uShadowOn, shadowsOn ? 1 : 0);
+    gl.uniform1f(u.uShadowTaps, tier.shadowTaps || 4);
+    gl.uniform1f(u.uShadowRad, SHADOW_RAD[tier.shadowTaps] || 1.2);
+    gl.uniform1f(u.uShadowShift, 0);
+    gl.uniform1f(u.uWolken, (env.cloud || 0) * 0.7);
+    gl.uniformMatrix4fv(u.uShadowMat, false, shadowMat);
+    gl.uniform1i(u.uShadow, 1);
+    gl.uniform4fv(u.uLights, lightPos);
+    gl.uniform3fv(u.uLightCol, lightCol);
+  }
+
+  /** Uniforms der Effekt-Vierecke (FS_QUAD mit VS_QUAD oder VS_STAUB): Tiefe auf Einheit 2, Schattenkarte auf 1, Licht wie die Welt. */
+  function useQuad(pr, cam) {
+    const u = pr.u;
+    gl.useProgram(pr.p);
+    gl.uniform1i(u.uTiefe, 2);
+    gl.uniform1f(u.uExposure, env.exposure);
+    gl.uniform1f(u.uLdr, ldr ? 1 : 0);
+    gl.uniform1f(u.uFogDen, env.fogDen);
+    gl.uniform3f(u.uCam, cam.x, cam.y, cam.z);
+    basis(cam.yaw, cam.pitch, cam.roll || 0);
+    gl.uniform3f(u.uCamR, B[0], B[1], B[2]);
+    gl.uniform3f(u.uCamU, B[3], B[4], B[5]);
+    gl.uniform3fv(u.uSunDir, env.sunDir);
+    gl.uniform3fv(u.uSunCol, env.sunCol);
+    gl.uniform3fv(u.uSkyCol, env.skyCol);
+    gl.uniform3fv(u.uGndCol, env.gndCol);
+    gl.uniform3fv(u.uFogCol, env.fogCol);
+    gl.uniform3fv(u.uZenith, env.zenith);
     gl.uniform1f(u.uShadowOn, shadowsOn ? 1 : 0);
     gl.uniformMatrix4fv(u.uShadowMat, false, shadowMat);
     gl.uniform1i(u.uShadow, 1);
@@ -698,12 +1455,30 @@ function createRenderer(canvas, { shadowSize = 2048 } = {}) {
   }
 
   /**
-   * Zeichnet ein Bild. f: { cam: {x, y, z, yaw, pitch, roll, fov}, inst, instCount, vm, vmCount, vmFov,
-   *   quads, quadCount (Welt), vmQuadCount (danach im Puffer, mit der Waffe gezeichnet), lights: [[x, y, z, r, cr, cg, cb]], time }
+   * Zeichnet ein Bild. f: { cam: {x, y, z, yaw, pitch, roll, fov}, inst, instCount, instShadowCount (≥ instCount: dahinter Quader nur
+   *   für die Schattenkarte), vm, vmCount, vmFov, quads, quadCount (Welt), vmQuadCount (danach im Puffer, mit der Waffe gezeichnet),
+   *   lights: [[x, y, z, r, cr, cg, cb]], time, shadows, post: { …, dt } (Bildwirkungen ab Phase 5; dt ersetzt die eigene Bildzeit) }
    */
+  const tq = gl.getExtension('EXT_disjoint_timer_query_webgl2'), queries = [];
+  const welle = new Float32Array(16);
+  let gpuMs = null;
   function render(f) {
     if (!worldVao || gl.isContextLost()) return;
+    const t0 = performance.now();
+    const q = tq && queries.length < 4 ? gl.createQuery() : null;      // Zeit auf der Grafikkarte, sofern der Browser sie misst
+    if (q) gl.beginQuery(tq.TIME_ELAPSED_EXT, q);
+    draw(f);
+    if (q) { gl.endQuery(tq.TIME_ELAPSED_EXT); queries.push(q); }
+    while (queries.length && gl.getQueryParameter(queries[0], gl.QUERY_RESULT_AVAILABLE)) {
+      const done = queries.shift();
+      if (!gl.getParameter(tq.GPU_DISJOINT_EXT)) { const ms = gl.getQueryParameter(done, gl.QUERY_RESULT) / 1e6; gpuMs = gpuMs === null ? ms : gpuMs + (ms - gpuMs) * 0.1; }
+      gl.deleteQuery(done);
+    }
+    drawMs += (performance.now() - t0 - drawMs) * 0.1;      // Zeit auf der CPU, geglättet (für _sz.bild.stats)
+  }
+  function draw(f) {
     const cam = f.cam, W = canvas.width, H = canvas.height;
+    if (W !== tW || H !== tH) allocTargets(W, H);
     aspect = W / H;
     tanHalf = Math.tan((cam.fov * DEG) / 2);
     mPerspective(proj, cam.fov * DEG, aspect, 0.07, 500);
@@ -714,8 +1489,9 @@ function createRenderer(canvas, { shadowSize = 2048 } = {}) {
     const L = f.lights || [];
     for (let i = 0; i < Math.min(MAX_LIGHTS, L.length); i++) { lightPos.set(L[i].slice(0, 4), i * 4); lightCol.set(L[i].slice(4, 7), i * 3); }
 
+    const nShadow = Math.max(f.instCount || 0, f.instShadowCount || 0);     // dahinter: Quader nur für die Schattenkarte
     gl.bindBuffer(gl.ARRAY_BUFFER, instWorld.buf);
-    if (f.instCount) gl.bufferSubData(gl.ARRAY_BUFFER, 0, f.inst, 0, f.instCount * ISTRIDE);
+    if (nShadow) gl.bufferSubData(gl.ARRAY_BUFFER, 0, f.inst, 0, nShadow * ISTRIDE);
     gl.bindBuffer(gl.ARRAY_BUFFER, instView.buf);
     if (f.vmCount) gl.bufferSubData(gl.ARRAY_BUFFER, 0, f.vm, 0, f.vmCount * ISTRIDE);
     const nQuads = (f.quadCount || 0) + (f.vmQuadCount || 0);
@@ -732,6 +1508,7 @@ function createRenderer(canvas, { shadowSize = 2048 } = {}) {
     if (shadowsOn) {
       gl.bindFramebuffer(gl.FRAMEBUFFER, shadowFbo);
       gl.viewport(0, 0, shadowRes, shadowRes);
+      gl.depthRange(0, 1);
       gl.clear(gl.DEPTH_BUFFER_BIT);
       gl.enable(gl.POLYGON_OFFSET_FILL);
       gl.polygonOffset(1.5, 3);
@@ -739,26 +1516,32 @@ function createRenderer(canvas, { shadowSize = 2048 } = {}) {
       gl.uniformMatrix4fv(P.shadow.u.uVP, false, lightVP);
       gl.bindVertexArray(worldVao);
       gl.drawElements(gl.TRIANGLES, worldCount, gl.UNSIGNED_INT, 0);
-      if (f.instCount) {
+      if (nShadow) {
         gl.useProgram(P.shadowInst.p);
         gl.uniformMatrix4fv(P.shadowInst.u.uVP, false, lightVP);
         gl.bindVertexArray(instWorld.vao);
-        gl.drawElementsInstanced(gl.TRIANGLES, 36, gl.UNSIGNED_SHORT, 0, f.instCount);
+        gl.drawElementsInstanced(gl.TRIANGLES, 36, gl.UNSIGNED_SHORT, 0, nShadow);
       }
       gl.disable(gl.POLYGON_OFFSET_FILL);
       gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     }
 
-    // --- Welt ---
+    // --- Welt (ins HDR-Zwischenbild): Welt, Figuren und Himmel im Tiefenbereich 0,1…1 ---
+    gl.bindFramebuffer(gl.FRAMEBUFFER, msaa ? T.ms : T.szene);
     gl.viewport(0, 0, W, H);
     gl.clear(gl.DEPTH_BUFFER_BIT | gl.COLOR_BUFFER_BIT);
+    gl.depthRange(0.1, 1);
     gl.activeTexture(gl.TEXTURE1);
     gl.bindTexture(gl.TEXTURE_2D, shadowTex);
+    gl.activeTexture(gl.TEXTURE7);
+    gl.bindTexture(gl.TEXTURE_2D_ARRAY, detailTex);
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D_ARRAY, tex);
     useLit(P.world, cam);
     gl.uniformMatrix4fv(P.world.u.uVP, false, vp);
     gl.uniform1i(P.world.u.uTex, 0);
+    gl.uniform1i(P.world.u.uDetail, 7);
+    gl.uniform1f(P.world.u.uWet, env.wet || 0);
     gl.bindVertexArray(worldVao);
     gl.drawElements(gl.TRIANGLES, worldCount, gl.UNSIGNED_INT, 0);
 
@@ -782,44 +1565,212 @@ function createRenderer(canvas, { shadowSize = 2048 } = {}) {
     gl.uniform1f(P.sky.u.uTime, f.time || 0);
     gl.uniform1f(P.sky.u.uCloud, env.cloud);
     gl.uniform1f(P.sky.u.uExposure, env.exposure);
+    gl.uniform1f(P.sky.u.uLdr, ldr ? 1 : 0);
     gl.depthMask(false);
     gl.bindVertexArray(skyVao);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
 
-    // --- Effekte ---
+    // --- Waffe in der Hand: eigene Brennweite, vorderster Tiefenbereich, im selben Durchgang ---
+    mPerspective(vmProj, (f.vmFov || 55) * DEG, aspect, 0.02, 20);
+    mMul(vmVP, vmProj, view);
+    if (f.vmCount) {
+      gl.depthRange(0, 0.1);
+      gl.depthMask(true);
+      gl.useProgram(P.inst.p);
+      gl.uniformMatrix4fv(P.inst.u.uVP, false, vmVP);
+      gl.uniform1f(P.inst.u.uShadowShift, 1.2);
+      gl.bindVertexArray(instView.vao);
+      gl.drawElementsInstanced(gl.TRIANGLES, 36, gl.UNSIGNED_SHORT, 0, f.vmCount);
+      gl.depthRange(0.1, 1);
+    }
+
+    // --- Auflösen: mehrfach abgetastete Farbe und Tiefe → texFarbe, texTiefe ---
+    if (msaa) {
+      gl.bindFramebuffer(gl.READ_FRAMEBUFFER, T.ms);
+      gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, T.szene);
+      gl.blitFramebuffer(0, 0, W, H, 0, 0, W, H, gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT, gl.NEAREST);
+      gl.bindFramebuffer(gl.READ_FRAMEBUFFER, null);
+      gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, null);
+    }
+
+    // --- Durchsichtiges: fboFx (nur Farbe), Tiefentest und weiche Kanten im Shader gegen texTiefe ---
+    gl.bindFramebuffer(gl.FRAMEBUFFER, T.fx);
+    gl.disable(gl.DEPTH_TEST);
+    gl.depthMask(false);
     gl.enable(gl.BLEND);
     gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
     gl.disable(gl.CULL_FACE);
-    gl.useProgram(P.quad.p);
+    bindTex(2, T.tiefe);
+    useQuad(P.quad, cam);
     gl.bindVertexArray(quadVao);
     if (f.quadCount) {
+      gl.uniform1f(P.quad.u.uTest, 1);
       gl.uniformMatrix4fv(P.quad.u.uVP, false, vp);
       gl.drawElements(gl.TRIANGLES, f.quadCount * 6, gl.UNSIGNED_SHORT, 0);
     }
-
-    // --- Waffe in der Hand: eigene Brennweite, eigene Tiefe ---
-    if (f.vmCount) {
-      gl.disable(gl.BLEND);
-      gl.enable(gl.CULL_FACE);
-      gl.depthMask(true);
-      gl.clear(gl.DEPTH_BUFFER_BIT);
-      mPerspective(vmProj, (f.vmFov || 55) * DEG, aspect, 0.02, 20);
-      mMul(vmVP, vmProj, view);
-      gl.useProgram(P.inst.p);
-      gl.uniformMatrix4fv(P.inst.u.uVP, false, vmVP);
-      gl.bindVertexArray(instView.vao);
-      gl.drawElementsInstanced(gl.TRIANGLES, 36, gl.UNSIGNED_SHORT, 0, f.vmCount);
-      if (f.vmQuadCount) {
-        gl.enable(gl.BLEND);
-        gl.disable(gl.CULL_FACE);
-        gl.depthMask(false);
-        gl.useProgram(P.quad.p);
-        gl.uniformMatrix4fv(P.quad.u.uVP, false, vmVP);
-        gl.bindVertexArray(quadVao);
-        gl.drawElements(gl.TRIANGLES, f.vmQuadCount * 6, gl.UNSIGNED_SHORT, (f.quadCount || 0) * 12);
-      }
+    if (f.vmQuadCount) {                       // Mündungsfeuer der eigenen Waffe: ohne Tiefentest
+      gl.uniform1f(P.quad.u.uTest, 0);
+      gl.uniformMatrix4fv(P.quad.u.uVP, false, vmVP);
+      gl.drawElements(gl.TRIANGLES, f.vmQuadCount * 6, gl.UNSIGNED_SHORT, (f.quadCount || 0) * 12);
     }
+    gl.depthRange(0, 1);
     gl.depthMask(true);
+    gl.disable(gl.BLEND);
+
+    // --- Belichtung: Leuchtdichte → 64×64 → Mip-Kette → Anpassung im Wechsel (springt bei Kameraschnitt oder neuer Karte sofort) ---
+    const now = performance.now(), dt = f.post?.dt ?? Math.min(0.25, lastT ? (now - lastT) / 1000 : 0);
+    lastT = now;
+    frameNo++;
+    if (Math.hypot(cam.x - lastCam[0], cam.y - lastCam[1], cam.z - lastCam[2]) > 3) belReset = true;
+    lastCam[0] = cam.x; lastCam[1] = cam.y; lastCam[2] = cam.z;
+    if (!ldr) {
+      bindTex(2, T.farbe);
+      bindTex(3, T.tiefe);
+      gl.useProgram(P.lum.p);
+      gl.uniform1i(P.lum.u.uQuelle, 2);
+      gl.uniform1i(P.lum.u.uTiefe, 3);
+      post(P.lum, T.lumF, 64, 64);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      bindTex(5, T.lum);
+      gl.generateMipmap(gl.TEXTURE_2D);
+      bindTex(6, T.bel[belCur]);
+      belCur ^= 1;
+      gl.useProgram(P.adapt.p);
+      gl.uniform1i(P.adapt.u.uLum, 5);
+      gl.uniform1i(P.adapt.u.uAlt, 6);
+      gl.uniform1f(P.adapt.u.uDt, belReset ? 1e6 : dt);
+      gl.uniform1f(P.adapt.u.uKey, env.exposure);
+      gl.uniform4f(P.adapt.u.uBelK, BEL.key, BEL.lo, BEL.hi, BEL.hell);
+      gl.uniform1f(P.adapt.u.uBelDunkel, BEL.dunkel);
+      gl.uniform1f(P.adapt.u.uBlitz, BEL.blitz);
+      post(P.adapt, T.belF[belCur], 1, 1);
+      bindTex(4, T.bel[belCur]);
+      belReset = false;
+    }
+
+    // --- SSAO: halbe Auflösung aus texTiefe, danach in zwei Richtungen weichzeichnen (ao → ao2 → ao) ---
+    const aoOn = !!(tier.ssao && T.ao);
+    if (aoOn) {
+      bindTex(3, T.tiefe);
+      gl.useProgram(P.ssao.p);
+      gl.uniform1i(P.ssao.u.uTiefe, 3);
+      gl.uniform2f(P.ssao.u.uProj, tanHalf * aspect, tanHalf);
+      gl.uniform3fv(P.ssao.u.uKern, aoKern);
+      gl.uniform1f(P.ssao.u.uProben, tier.ssao);
+      post(P.ssao, T.aoF, aoW, aoH);
+      gl.useProgram(P.aoBlur.p);
+      gl.uniform1i(P.aoBlur.u.uTiefe, 3);
+      gl.uniform1i(P.aoBlur.u.uAo, 2);
+      bindTex(2, T.ao);
+      gl.uniform2f(P.aoBlur.u.uDir, 1, 0);
+      post(P.aoBlur, T.ao2F, aoW, aoH);
+      bindTex(2, T.ao2);
+      gl.uniform2f(P.aoBlur.u.uDir, 0, 1);
+      post(P.aoBlur, T.aoF, aoW, aoH);
+    }
+
+    // --- Sonnenstrahlen: nur wenn die Sonne vor der Kamera steht (Blick · Sonne ≥ 0,1, darüber weich eingeblendet) ---
+    let strK = 0;
+    if (tier.rays && T.str && env.grade?.rays) {
+      basis(cam.yaw, cam.pitch, cam.roll || 0);
+      const sd = env.sunDir, vor = B[6] * sd[0] + B[7] * sd[1] + B[8] * sd[2];
+      if (vor > 0.1 && project(cam.x + sd[0] * 400, cam.y + sd[1] * 400, cam.z + sd[2] * 400, sonne)) strK = env.grade.rays * sstep(0.1, 0.4, vor) * (ldr ? 0.5 : 1);
+    }
+    if (strK > 0) {
+      bindTex(2, T.farbe);
+      bindTex(3, T.tiefe);
+      gl.useProgram(P.strahlMaske.p);
+      gl.uniform1i(P.strahlMaske.u.uQuelle, 2);
+      gl.uniform1i(P.strahlMaske.u.uTiefe, 3);
+      gl.uniform2f(P.strahlMaske.u.uKnie, ldr ? 0.6 : 0.4, ldr ? 1 : 1.6);
+      post(P.strahlMaske, T.strF, strW, strH);
+      bindTex(2, T.str);
+      gl.useProgram(P.strahlen.p);
+      gl.uniform1i(P.strahlen.u.uMaske, 2);
+      gl.uniform2f(P.strahlen.u.uSonne, sonne[0], 1 - sonne[1]);
+      post(P.strahlen, T.str2F, strW, strH);
+    }
+
+    // --- Glühen: Vorfilter, Stufen hinab, mit Zelt wieder hinauf ---
+    const nG = T.glow.length;
+    bindTex(2, T.farbe);
+    gl.useProgram(P.glowPre.p);
+    gl.uniform1i(P.glowPre.u.uQuelle, 2);
+    gl.uniform1i(P.glowPre.u.uBel, 4);
+    gl.uniform2f(P.glowPre.u.uPx, 1 / W, 1 / H);
+    gl.uniform1f(P.glowPre.u.uLdr, ldr ? 1 : 0);
+    gl.uniform1f(P.glowPre.u.uSchwelle, ldr ? 0.8 : 1);         // im Rückfall liegen die Werte schon im Anzeigeraum
+    gl.uniform1f(P.glowPre.u.uKnie, ldr ? 0.1 : 0.5);
+    post(P.glowPre, T.glowF[0], glowW[0], glowH[0]);
+    gl.useProgram(P.glowDown.p);
+    gl.uniform1i(P.glowDown.u.uQuelle, 2);
+    for (let i = 1; i < nG; i++) {
+      bindTex(2, T.glow[i - 1]);
+      gl.uniform2f(P.glowDown.u.uPx, 1 / glowW[i - 1], 1 / glowH[i - 1]);
+      post(P.glowDown, T.glowF[i], glowW[i], glowH[i]);
+    }
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.ONE, gl.ONE);
+    gl.useProgram(P.glowUp.p);
+    gl.uniform1i(P.glowUp.u.uQuelle, 2);
+    for (let i = nG - 1; i > 0; i--) {
+      bindTex(2, T.glow[i]);
+      gl.uniform2f(P.glowUp.u.uPx, 1 / glowW[i], 1 / glowH[i]);
+      post(P.glowUp, T.glowF[i - 1], glowW[i - 1], glowH[i - 1]);
+    }
+    gl.disable(gl.BLEND);
+
+    // --- Schluss: Belichtung, Glühen, Tonwertkurve, Gamma → Bildfläche ---
+    gl.disable(gl.DEPTH_TEST);
+    gl.disable(gl.CULL_FACE);
+    bindTex(2, T.farbe);
+    bindTex(3, T.glow[0]);
+    gl.useProgram(P.final.p);
+    gl.uniform1i(P.final.u.uFarbe, 2);
+    gl.uniform1i(P.final.u.uGlow, 3);
+    const pf = f.post || {};
+    gl.uniform1f(P.final.u.uGlowK, 0.1 * (1 + (pf.flash || 0)));      // nahe Explosion: Glühen 0,3 s lang bis doppelt
+    const rp = pf.ripples || [], nW = Math.min(4, rp.length);
+    for (let i = 0; i < nW; i++) welle.set(rp[i], i * 4);
+    gl.uniform4fv(P.final.u.uWelle, welle);
+    gl.uniform1f(P.final.u.uWellen, nW);
+    gl.uniform1f(P.final.u.uAsp, aspect);
+    gl.uniform1f(P.final.u.uSaum, clamp(pf.chroma || 0, 0, 1));
+    gl.uniform1f(P.final.u.uRot, clamp(pf.hurt || 0, 0, 1));
+    gl.uniform1f(P.final.u.uWenig, clamp(pf.lowHp || 0, 0, 1));
+    const hb = ((f.time || 0) * 1.2) % 1;                                // Herzschlag: zwei Schläge je Takt, 72 je Minute
+    gl.uniform1f(P.final.u.uPuls, Math.exp(-hb * 14) + 0.6 * (hb > 0.2 ? Math.exp(-(hb - 0.2) * 14) : 0));
+    gl.uniform1f(P.final.u.uRohr, pf.scope ? 1 : 0);
+    gl.uniform1f(P.final.u.uHoehe, H);
+    gl.uniform1i(P.final.u.uBel, 4);
+    gl.uniform1f(P.final.u.uLdr, ldr ? 1 : 0);
+    if (aoOn) { bindTex(5, T.ao); bindTex(6, T.tiefe); }
+    gl.uniform1i(P.final.u.uAo, 5);
+    gl.uniform1i(P.final.u.uTiefe, 6);
+    gl.uniform1f(P.final.u.uAoAn, aoOn ? 1 : 0);
+    if (strK > 0) bindTex(8, T.str2);
+    gl.uniform1i(P.final.u.uStrahlen, 8);
+    gl.uniform1f(P.final.u.uStrahlenK, strK);
+    const gr = env.grade || GRADE_NEUTRAL;
+    gl.uniform3fv(P.final.u.uTonS, gr.shadow);
+    gl.uniform3fv(P.final.u.uTonL, gr.light);
+    gl.uniform1f(P.final.u.uSatt, gr.sat);
+    gl.uniform1f(P.final.u.uKontrast, gr.contrast);
+    gl.uniform1f(P.final.u.uVig, 0.22);
+    gl.uniform1f(P.final.u.uKorn, 0.018);
+    gl.uniform1f(P.final.u.uZeit, (frameNo % 997) * 7.31);
+    gl.uniform1f(P.final.u.uKornHier, msaa ? 1 : 0);
+    post(P.final, msaa ? null : T.ldrF, W, H);
+    if (!msaa) {                                 // ohne Mehrfachabtastung: FXAA auf dem fertigen Bild
+      bindTex(2, T.ldr);
+      gl.useProgram(P.fxaa.p);
+      gl.uniform1i(P.fxaa.u.uBild, 2);
+      gl.uniform2f(P.fxaa.u.uPx, 1 / W, 1 / H);
+      gl.uniform1f(P.fxaa.u.uKorn, 0.018);
+      gl.uniform1f(P.fxaa.u.uZeit, (frameNo % 997) * 7.31);
+      post(P.fxaa, null, W, H);
+    }
+    gl.activeTexture(gl.TEXTURE0);
     gl.bindVertexArray(null);
   }
 
@@ -841,6 +1792,22 @@ function createRenderer(canvas, { shadowSize = 2048 } = {}) {
   return {
     gl, render, setWorld, project, resize,
     setShadowSize(size) { if (Math.min(size, maxShadow) !== shadowRes) allocShadow(size); },
+    /** Merkmale der Qualitätsstufe (siehe TIERS); Zwischenbilder entstehen beim nächsten Bild neu, wenn sich etwas ändert. */
+    setTier(t) { if (!!t.msaa !== !!tier.msaa || t.glow !== tier.glow || !!t.ssao !== !!tier.ssao || !!t.rays !== !!tier.rays) tW = 0; tier = { ...t }; loadDetail(t.detail || TEX); },
+    /** Rückfall ohne Float-Ziele erzwingen (Prüfhaken); ohne Float-Unterstützung bleibt er immer an. */
+    setLdr(on) { const v = !!on || !floatOk; if (v !== ldr) { ldr = v; tW = 0; } },
+    stats() {
+      let exposure = null, mean = null;
+      if (!ldr && T.belF.length && !gl.isContextLost()) {             // nur für Prüfungen: einmal zurücklesen
+        const px = new Float32Array(4);
+        gl.bindFramebuffer(gl.FRAMEBUFFER, T.belF[belCur]);
+        gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.FLOAT, px);
+        gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+        exposure = Math.round(px[0] * 1000) / 1000; mean = Math.round(px[1] * 1000) / 1000;
+      }
+      return { hdr: !ldr, msaa, fxaa: !msaa, glow: T.glow.length, floatOk, exposure, mean, drawMs: Math.round(drawMs * 100) / 100,
+        gpuMs: gpuMs === null ? null : Math.round(gpuMs * 100) / 100, w: tW, h: tH, features: { ...tier } };
+    },
     dispose() { gl.getExtension('WEBGL_lose_context')?.loseContext(); },
   };
 }
@@ -859,6 +1826,7 @@ function worldBuilder() {
     flip: false,             // true: alles wird an der Mittellinie gespiegelt (z → −z)
     name: '', env: null, bounds: null, ground: 'concrete',
     spawns: [[], []], pois: [], flags: [], lamps: [],
+    barrels: [],             // explosive Fässer (Phase 8): { x, y, z, col = Index der Kollisionsbox }
 
     /** Quader ab der Ecke (x, y, z). o: tint, emis, ghost (nur sichtbar), clip (nur Hindernis), yaw/tilt (nur Optik), noAO */
     box(x, y, z, sx, sy, sz, m = 'concrete', o = {}) {
@@ -877,6 +1845,14 @@ function worldBuilder() {
       if (W.flip) cz = -cz;
       mesh.cyl(cx, y, cz, r, hgt, MAT[m], o.tint || WHITE, o.emis || 0, o.seg || 10);
       if (!o.ghost) cols.push([cx - r * 0.82, y, cz - r * 0.82, cx + r * 0.82, y + hgt, cz + r * 0.82, MAT[m]]);
+      return W;
+    },
+    /** Explosives Fass: dieselbe Kollisionsbox wie ein Fass aus W.cyl (Radius 0,31, Höhe 0,92), aber ohne feste Geometrie – die Partie zeichnet es. */
+    fass(cx, cz, y = 0) {
+      if (W.flip) cz = -cz;
+      const r = 0.31;
+      W.barrels.push({ x: cx, y, z: cz, col: cols.length });
+      cols.push([cx - r * 0.82, y, cz - r * 0.82, cx + r * 0.82, y + 0.92, cz + r * 0.82, MAT.plate]);
       return W;
     },
     /** Mauer entlang einer Achse mit Öffnungen [von, bis, Brüstung, Sturz]. axis 'x': bei z = fixed, 'z': bei x = fixed. */
@@ -909,15 +1885,20 @@ function worldBuilder() {
     spawn(team, x, z, yaw) { W.spawns[team].push({ x, z, yaw }); return W; },
     poi(x, z) { W.pois.push({ x, z: W.flip ? -z : z }); return W; },
     flag(name, x, z) { W.flags.push({ name, x, z }); return W; },
-    /** Lichtquelle: leuchtet in der Nähe der Kamera wirklich (die nächsten gewinnen). */
-    lamp(x, y, z, r, col) { W.lamps.push([x, y, W.flip ? -z : z, r, col[0], col[1], col[2]]); return W; },
+    /**
+     * Lichtquelle: leuchtet in der Nähe der Kamera wirklich (die nächsten gewinnen). Eintrag [x, y, z, r, R, G, B, flackert, Fleckhöhe]:
+     * o.flicker = flackert (je Karte eine), o.spot = Höhe des leuchtenden Flecks unter der Leuchte (Vorgabe y).
+     */
+    lamp(x, y, z, r, col, o = {}) { W.lamps.push([x, y, W.flip ? -z : z, r, col[0], col[1], col[2], o.flicker ? 1 : 0, o.spot ?? y]); return W; },
     /** Beide Hälften bauen: einmal wie beschrieben, einmal gespiegelt. */
     mirror(fn) { fn(); W.flip = true; fn(); W.flip = false; return W; },
 
     finish() {
       const n = cols.length, c = new Float32Array(n * 6), cm = new Uint8Array(n);
       cols.forEach((b, i) => { c.set(b.slice(0, 6), i * 6); cm[i] = b[6]; });
-      return { name: W.name, env: W.env, bounds: W.bounds, groundHit: W.ground, mesh: mesh.finish(), cols: c, colMat: cm, colCount: n, spawns: W.spawns, pois: W.pois, flags: W.flags, lamps: W.lamps };
+      const barrelOf = new Int16Array(n).fill(-1);          // Kollisionsbox → Fass (−1: kein Fass)
+      W.barrels.forEach((b, i) => { barrelOf[b.col] = i; });
+      return { name: W.name, env: W.env, bounds: W.bounds, groundHit: W.ground, mesh: mesh.finish(), cols: c, colMat: cm, colCount: n, spawns: W.spawns, pois: W.pois, flags: W.flags, lamps: W.lamps, barrels: W.barrels, barrelOf };
     },
   };
   return W;
@@ -965,6 +1946,11 @@ function truck(W, x, z, tint, trailerTint) {
   W.box(x + 2.8, 0, z, 9.2, 1.2, 2.6, 'plain', { clip: true });
   for (const wx of [0.6, 8.6, 10.0]) for (const wz of [0.02, 2.2]) W.box(x + wx, 0, z + wz, 1.0, 1.0, 0.38, 'plain', { tint: [0.05, 0.05, 0.055], ghost: true });
 }
+/** Helligkeit einer flackernden Lampe zur Zeit t: meist voll, in unregelmäßigen Stößen auf 60 % (stufiges Werte-Rauschen). */
+function lampFlicker(t) {
+  const u = t * 9, i = Math.floor(u), f = u - i, hs = (n) => { const x = Math.sin(n * 127.1 + 311.7) * 43758.5453; return x - Math.floor(x); };
+  return 0.6 + 0.4 * (hs(i) + (hs(i + 1) - hs(i)) * f * f * (3 - 2 * f) > 0.32 ? 1 : 0);
+}
 /** Mast mit Leuchtkopf */
 function lampPost(W, x, z, hgt, arm = 1) {
   W.cyl(x, 0, z, 0.09, hgt, 'plate', { tint: C_DARK, seg: 6 });
@@ -978,7 +1964,8 @@ function mapFrachthof(W) {
   W.bounds = { x0: -37, x1: 37, z0: -31, z1: 31, y1: 12 };
   W.env = {
     sunDir: norm3(-0.5, 0.6, 0.62), sunCol: [2.9, 2.25, 1.55], skyCol: [0.42, 0.52, 0.7], gndCol: [0.3, 0.26, 0.22],
-    fogCol: [0.74, 0.64, 0.53], fogDen: 0.004, zenith: [0.15, 0.31, 0.6], cloud: 0.5, exposure: 0.8,
+    fogCol: [0.74, 0.64, 0.53], fogDen: 0.004, zenith: [0.15, 0.31, 0.6], cloud: 0.5, exposure: 0.8, wet: 0.8,      // wet: Pfützen auf Asphalt
+    grade: { shadow: [0.96, 1.0, 1.06], light: [1.06, 1.0, 0.94], sat: 1.05, contrast: 1.06, rays: 0.5 },     // Farbstimmung im Schlussschritt
   };
   const BRICK = { tint: [0.92, 0.9, 0.88] }, CRANE = { tint: [0.9, 0.6, 0.08] };
 
@@ -995,7 +1982,7 @@ function mapFrachthof(W) {
   W.wall('z', -16.3, 16.3, -17.3, 0, 7, 0.3, 'brick', BRICK, [[-9.4, -7.9, 0, 2.3], [-5.6, -3.6, 1.1, 2.4], [-2.4, 2.4, 0, 3.6], [3.6, 5.6, 1.1, 2.4], [7.9, 9.4, 0, 2.3]]);
   W.box(-36, 7, -1.5, 9, 0.3, 3, 'roof', { noAO: true });
   W.box(-23, 7, -1.5, 6, 0.3, 3, 'roof', { noAO: true });
-  W.lamp(-26.5, 5.6, 0, 12, [1.5, 1.2, 0.8]);
+  W.lamp(-26.5, 5.6, 0, 12, [1.5, 1.2, 0.8], { spot: 6.24 });
   W.box(-26.9, 6.3, -0.2, 0.8, 0.12, 0.4, 'plain', { tint: [1, 0.9, 0.7], emis: 1, ghost: true, noAO: true });
   // Gabelstapler
   W.box(-31.2, 0.25, 3.2, 1.2, 0.9, 2.0, 'plate', { tint: C_YEL, noAO: true });
@@ -1021,7 +2008,8 @@ function mapFrachthof(W) {
   W.wall('z', -4, 4, 32.4, 1.1, 2.7, 0.2, 'plaster', {}, [[-3.2, -1.7, 1, 2], [-0.6, 0.6, 0, 2.1], [1.7, 3.2, 1, 2]]);
   W.box(32.2, 3.8, -4.2, 3.9, 0.2, 8.4, 'roof', { noAO: true });
   W.box(34.6, 1.1, -0.9, 1.0, 0.8, 1.8, 'planks', { noAO: true });
-  W.lamp(34, 3.2, 0, 6, [1.2, 1.1, 0.9]);
+  W.lamp(34, 3.2, 0, 6, [1.2, 1.1, 0.9], { flicker: true, spot: 3.62 });           // flackert
+  W.box(33.75, 3.68, -0.2, 0.5, 0.12, 0.4, 'plain', { tint: [1, 0.95, 0.85], emis: 1, ghost: true, noAO: true });
 
   W.mirror(() => {
     W.box(-36.6, 0, -30.6, 73.2, 5, 0.6, 'concrete');
@@ -1033,7 +2021,8 @@ function mapFrachthof(W) {
     W.box(-26, 7, -11, 9, 0.3, 3, 'roof', { noAO: true });
     W.box(-36, 7, -8, 19, 0.3, 6.5, 'roof', { noAO: true });
     for (const z of [-12, -6]) W.box(-36, 6.5, z, 18.7, 0.3, 0.2, 'plate', { tint: C_DARK, ghost: true, noAO: true });
-    W.lamp(-26.5, 5.6, -10, 12, [1.5, 1.2, 0.8]);
+    W.lamp(-26.5, 5.6, -10, 12, [1.5, 1.2, 0.8], { spot: 6.24 });
+    W.box(-26.9, 6.3, -10.2, 0.8, 0.12, 0.4, 'plain', { tint: [1, 0.9, 0.7], emis: 1, ghost: true, noAO: true });
     W.box(-36, 3, -16, 7.5, 0.25, 8, 'planks', { noAO: true });
     W.box(-28.8, 0, -8.3, 0.3, 3, 0.3, 'plate', { tint: C_DARK });
     W.box(-28.8, 0, -16, 0.3, 3, 0.3, 'plate', { tint: C_DARK });
@@ -1048,7 +2037,7 @@ function mapFrachthof(W) {
     crate(W, -24.1, 0, -9.6, 1.3);
     crate(W, -24.2, 0, -6.6, 1.5); crate(W, -24.05, 1.5, -6.5, 1.2);
     crate(W, -19.2, 0, -13.6, 1.4);
-    barrel(W, -18.2, -11.5, C_BLUE); barrel(W, -18.9, -11.0, C_RED);
+    W.fass(-18.2, -11.5); W.fass(-18.9, -11.0);              // explosive Fässer (Phase 8)
 
     // Deckung vor dem Startbereich
     container(W, -10.1, -21.6, CONT_40, 'x', C_RED);
@@ -1062,7 +2051,7 @@ function mapFrachthof(W) {
     container(W, 3.6, -13.6, CONT_20, 'z', C_GREEN);
     container(W, 3.6, -13.6, CONT_20, 'z', C_YEL, CONT_H);
     crate(W, -5.2, 0, -11.8, 1.3); crate(W, -3.8, 0, -11.2, 1.1); crate(W, -5.05, 1.3, -11.65, 0.9);
-    barrel(W, -2.2, -10.4, C_RED); barrel(W, -1.5, -10.9, C_BLUE);
+    W.fass(-2.2, -10.4); W.fass(-1.5, -10.9);
     barrier(W, -2, -6.4, 4, 'x');
     W.box(-15.6, 0, -3.6, 0.9, 9.4, 0.9, 'plate', CRANE);
     W.box(10.6, 0, -3.6, 0.9, 9.4, 0.9, 'plate', CRANE);
@@ -1187,9 +2176,9 @@ function oaseKarren(W, x, z, along) {
 }
 const oaseKrug = (W, x, z, r = 0.24, hh = 0.52) => W.cyl(x, 0, z, r, hh, 'plain', { tint: [0.72, 0.36, 0.2], ghost: true, seg: 8 });
 /** Wandleuchte im Haus: kleines Leuchtkästchen unter der Decke und das Licht dazu. */
-function oaseLicht(W, x, y, z, r) {
+function oaseLicht(W, x, y, z, r, flicker = false) {
   W.box(x - 0.18, y + 0.2, z - 0.18, 0.36, 0.12, 0.36, 'plain', { tint: [1, 0.82, 0.55], emis: 1, ghost: true, noAO: true });
-  W.lamp(x, y, z, r, [1.35, 1.0, 0.58]);
+  W.lamp(x, y, z, r, [1.35, 1.0, 0.58], { flicker, spot: y + 0.14 });
 }
 
 function mapOase(W) {
@@ -1197,7 +2186,8 @@ function mapOase(W) {
   W.bounds = { x0: -33, x1: 33, z0: -33, z1: 33, y1: 11 };
   W.env = {
     sunDir: norm3(0.42, 0.95, 0.36), sunCol: [3.0, 2.8, 2.4], skyCol: [0.46, 0.58, 0.8], gndCol: [0.44, 0.37, 0.27],
-    fogCol: [0.83, 0.82, 0.76], fogDen: 0.003, zenith: [0.1, 0.29, 0.68], cloud: 0.25, exposure: 0.62,
+    fogCol: [0.83, 0.82, 0.76], fogDen: 0.003, zenith: [0.1, 0.29, 0.68], cloud: 0.25, exposure: 0.62, wet: 0,
+    grade: { shadow: [1.0, 0.98, 1.04], light: [1.08, 1.02, 0.92], sat: 1.10, contrast: 1.04, rays: 0.8 },
   };
   const OCK = { tint: OASE_OCKER }, HEL = { tint: OASE_HELL }, TER = { tint: OASE_TERRA }, KAL = { tint: OASE_KALK }, STEIN = { tint: OASE_STEIN };
   const rand = oaseDeko(shadeOf(OASE_OCKER, 0.82));
@@ -1248,7 +2238,7 @@ function mapOase(W) {
     crate(W, -24.4, 0, -20.7, 1.2);
     W.box(-19.1, 0, -20.6, 2.6, 0.85, 1, 'planks', { tint: OASE_HOLZ });
     W.box(-10.2, 0, -24.5, 1.6, 1.9, 0.6, 'planks', { tint: OASE_DUNKEL });
-    crate(W, -14.6, 0, -20.5, 1); barrel(W, -9.1, -19.9, OASE_TERRA);
+    crate(W, -14.6, 0, -20.5, 1); W.fass(-9.1, -19.9);              // explosive Fässer (Phase 8)
     W.box(-23.6, 0.02, -24.2, 3, 0.02, 2, 'cloth', oaseDeko([0.6, 0.16, 0.12]));
     oaseLicht(W, -17, 2.6, -22, 8);
 
@@ -1260,7 +2250,7 @@ function mapOase(W) {
     W.box(8.6, 0, -24.5, 2.2, 1.9, 0.6, 'planks', { tint: OASE_DUNKEL });
     barrel(W, 13.9, -24.1, OASE_BLAU); barrel(W, 13.2, -24.2, OASE_TERRA);
     W.box(17, 0.02, -24, 3.2, 0.02, 2.2, 'cloth', oaseDeko([0.2, 0.3, 0.5]));
-    oaseLicht(W, 17, 2.6, -22, 8);
+    oaseLicht(W, 17, 2.6, -22, 8, !W.flip);          // flackert (nur auf der ungespiegelten Seite)
 
     W.box(-4.5, 0, -25, 9, 4.4, 6, 'plaster', OCK);
     oaseKranz(W, -4.5, -25, 4.5, -19, 4.4, OASE_OCKER, 0.4);
@@ -1329,14 +2319,14 @@ function mapOase(W) {
     crate(W, -8.4, 0, -11, 0.8); crate(W, 6.1, 0, -9.4, 0.8);
     W.box(-3.4, 0, -4.6, 2.8, 1.05, 0.5, 'plaster', OCK);
     W.box(1.6, 0, -7, 0.5, 1.05, 2.6, 'plaster', OCK);
-    crate(W, -1.6, 0, -13.2, 1.1); barrel(W, -3.1, -13.4, OASE_TERRA); barrel(W, 2.9, -13.3, OASE_BLAU);
+    crate(W, -1.6, 0, -13.2, 1.1); W.fass(-3.1, -13.4); barrel(W, 2.9, -13.3, OASE_BLAU);
     oaseKarren(W, 6.4, -13.6, 'x');
     W.box(-4.2, 0.02, -8.2, 2.4, 0.02, 1.6, 'cloth', oaseDeko([0.62, 0.18, 0.14]));
     oaseKrug(W, -9.6, -13.3); oaseKrug(W, -9.1, -13.5, 0.2, 0.42); oaseKrug(W, 9.6, -5.2);
 
     // ---------- Querstraße vor dem Markt, Seitengassen ----------
     crate(W, 2.7, 0, -18.9, 1.2); crate(W, 3.95, 0, -18.7, 0.9);
-    barrel(W, -3.4, -18.5, OASE_TERRA); barrel(W, -2.7, -18.2, OASE_HOLZ);
+    W.fass(-3.4, -18.5); barrel(W, -2.7, -18.2, OASE_HOLZ);
     oaseKarren(W, -19.2, -17.2, 'x');
     W.box(16.5, 0, -16.6, 2.8, 1.05, 0.5, 'plaster', TER);
     oasePalme(W, 22.8, -16.4, 6.4, 0.9);
@@ -1345,7 +2335,7 @@ function mapOase(W) {
     oasePalme(W, -30.2, -24.4, 6.2, 1);
     oaseKarren(W, 28.4, -23.6, 'z');
     oasePalme(W, 30.3, -25.2, 5.6, 2.6);
-    barrel(W, -30.8, -9.8, OASE_TERRA); barrel(W, -30.9, -9, OASE_BLAU); crate(W, -31.3, 0, -11.6, 1.1);
+    W.fass(-30.8, -9.8); barrel(W, -30.9, -9, OASE_BLAU); crate(W, -31.3, 0, -11.6, 1.1);
     W.box(28.5, 0, -10.2, 0.5, 1.1, 2.6, 'plaster', HEL);
     crate(W, 30.2, 0, -7.6, 1.1);
     oaseKrug(W, -13.6, -8); oaseKrug(W, -13.5, -7.4, 0.19, 0.4); oaseKrug(W, 13.6, -12.6); oaseKrug(W, -24.4, -5.9); oaseKrug(W, 24.3, -18.4, 0.28, 0.6);
@@ -1494,6 +2484,17 @@ function createPhysics(world) {
     }
     return f;
   }
+  /** Trefferart (MAT_DEF[…].hit) der höchsten Standfläche unter dem Fußabdruck – auf dem Boden world.groundHit (für Schritte, Hülsen, Landung). */
+  function surface(x, y, z, r) {
+    let f = 0, m = -1;
+    for (let o = 0, i = 0; o < END; o += 6, i++) {
+      if (x + r > C[o] + E && x - r < C[o + 3] - E && z + r > C[o + 2] + E && z - r < C[o + 5] - E) {
+        const top = C[o + 4];
+        if (top <= y + E && top > f) { f = top; m = M[i]; }
+      }
+    }
+    return m >= 0 && MAT_DEF[m] ? MAT_DEF[m].hit : world.groundHit;
+  }
 
   function slide(e, axis, d) {
     if (!d) return;
@@ -1546,7 +2547,7 @@ function createPhysics(world) {
     e.y = ny;
   }
 
-  return { raycast, los, blocked, bodyBlocked, floorBelow, moveBody };
+  return { raycast, los, blocked, bodyBlocked, floorBelow, surface, moveBody };
 }
 
 /** Wegenetz für die Bots: ein Raster im Meterabstand, je Zelle alle Ebenen, auf denen man stehen kann. */
@@ -1794,9 +2795,18 @@ const WEAPONS = {
   },
 };
 const PRIMARIES = ['falke', 'wespe', 'rammbock', 'luchs', 'habicht', 'amboss'];
+/** Waffenmeister: die Leiter. Stufe = Index; wer mit der letzten Waffe einen Abschuss schafft (Stufe 7), gewinnt. */
+const GG = ['wespe', 'falke', 'amboss', 'rammbock', 'luchs', 'habicht', 'marder'];
 const KNIFE = [[0, 0.02, -0.16, 0.006, 0.034, 0.19, 's'], [0, 0.02, -0.05, 0.03, 0.012, 0.012, 'd'], [0, 0.02, 0.01, 0.024, 0.03, 0.11, 'd']];
 const NADE = { fuse: 2.7, radius: 6.8, dmg: 165, speed: 16.5, count: 2 };
+// Explosive Fässer: Lebenspunkte, Explosion (Radius, Schaden), Zischen von/bis (s), Wiederkehr (s), Rauch danach (s), Schaden durch eine Explosion daneben
+const FASS = { hp: 60, radius: 5.5, dmg: 130, fuse: [0.12, 0.22], back: 45, smoke: 10, chain: 100 };
+// Luftschlag: Serie, Reichweite des Zielstrahls (beim Gastgeber geprüft: netRange), Überflug ab (s), erste Bombe ab (s), Abstand (s), Zahl, Abstand (m),
+// Abwurfhöhe (m), Explosion (Radius, Schaden; cover 0 = ein Dach schützt ganz)
+const LUFT = { streak: 5, range: 120, netRange: 130, jet: 1.2, drop: 3.0, gap: 0.18, n: 5, step: 5, height: 40, radius: 7.5, dmg: 180, cover: 0 };
 const MELEE = { range: 2.3, dmg: 100, time: 0.62 };
+// Rutschen: Dauer, Tempo von/bis (mal w.move), Abbruch darunter, Sperre danach, Tempo nach Sprung, Streuung aus der Hüfte, Kamera, Bots je Sekunde
+const SLIDE = { dur: 0.75, v0: 8.0, v1: 4.0, min: 3.2, cd: 0.6, keep: 0.85, spread: 1.3, roll: 0.06, fov: 3, dust: 0.08, botRate: 0.25 };
 
 const RANKS = ['Rekrut', 'Gefreiter', 'Obergefreiter', 'Stabsgefreiter', 'Unteroffizier', 'Stabsunteroffizier', 'Feldwebel', 'Oberfeldwebel', 'Hauptfeldwebel',
   'Stabsfeldwebel', 'Leutnant', 'Oberleutnant', 'Hauptmann', 'Stabshauptmann', 'Major', 'Oberstleutnant', 'Oberst', 'Brigadegeneral', 'Generalmajor', 'General'];
@@ -1817,176 +2827,2229 @@ const MODES = {
   tdm: { name: 'Team-Deathmatch', about: 'Zwei Teams. Jeder Abschuss zählt für dein Team.', limits: [50, 75, 100, 150], teams: true },
   ffa: { name: 'Frei für alle', about: 'Jeder gegen jeden. Wer zuerst die Abschüsse hat, gewinnt.', limits: [20, 30, 50], teams: false },
   dom: { name: 'Herrschaft', about: 'Erobert die Stellungen A, B und C und haltet sie.', limits: [100, 150, 200], teams: true },
+  gg: { name: 'Waffenmeister', about: 'Jeder Abschuss bringt die nächste Waffe. Wer mit der letzten trifft, gewinnt.', limits: [7], teams: false },
 };
 
 // ==========================================================================
-// 8 · Klang: alles wird im Augenblick erzeugt (Rauschen, Filter, ein paar Schwinger)
+// 8 · Klang: die Klangschmiede berechnet jeden Klang einmal (Rezepte mit Varianten), das Mischpult spielt sie ab
 // ==========================================================================
-const SHOT_SND = {
-  rifle: { cut: 5200, dur: 0.2, noise: 0.85, f: 170, body: 0.6, rate: 1 },
-  smg: { cut: 6500, dur: 0.13, noise: 0.7, f: 230, body: 0.4, rate: 1.3 },
-  shotgun: { cut: 3000, dur: 0.4, noise: 1.1, f: 105, body: 1, rate: 0.75 },
-  dmr: { cut: 4600, dur: 0.28, noise: 1, f: 150, body: 0.8, rate: 0.88 },
-  sniper: { cut: 4000, dur: 0.55, noise: 1.2, f: 92, body: 1.1, rate: 0.7 },
-  lmg: { cut: 4200, dur: 0.24, noise: 0.95, f: 135, body: 0.8, rate: 0.9 },
-  pistol: { cut: 5600, dur: 0.15, noise: 0.7, f: 250, body: 0.45, rate: 1.2 },
-};
 
-function createSound(getVolume) {
-  let out = null, noiseBuf = null, ctx = null, shots = 0, shotsAt = 0, gone = false;
-  const ok = () => !gone && sfx.enabled && audioReady() && getVolume() > 0;
-  function chain(pan = 0, vol = 1) {
+// --------------------------------------------------------------------------
+// 8a · Klangschmiede: Rechenkern. Reines JS auf Float32Array, mono, 48 kHz (der Browser rechnet beim Abspielen um).
+// Braucht keinen AudioContext – das Berechnen läuft also schon vor der ersten Nutzergeste.
+// Alle Funktionen arbeiten an Ort und Stelle und geben das Feld zurück. Zeiten in Sekunden; nur die Abklingzeit
+// der Resonanzen in K.modal steht in Millisekunden, so wie sie in den Tabellen des Plans geschrieben ist.
+// --------------------------------------------------------------------------
+const KSR = 48000;
+/** Grundwellen wie im OscillatorNode: Fourier-Reihe bis unter Nyquist, Spitze auf 1 normiert (Gibbs-Überschwinger eingerechnet). */
+const WAVE_K = { square: 4 / Math.PI / 1.1789, sawtooth: 2 / Math.PI / 1.1789, triangle: 8 / (Math.PI * Math.PI) };
+
+function forge(sr = KSR) {
+  const K = { SR: sr };
+  const at0 = (a, t) => Math.max(0, Math.min(a.length, Math.round((t || 0) * sr)));
+  /** Zufallszahlen 0 … 1 – dieselbe Formel wie noiseSet. */
+  K.rng = (seed) => { let s = seed >>> 0; return () => ((s = (Math.imul(s, 1664525) + 1013904223) >>> 0) / 4294967296); };
+  K.buf = (sec) => new Float32Array(Math.max(1, Math.round(sec * sr)));
+
+  /** Füllt mit Rauschen: 'white' | 'pink' (Kellet) | 'brown' (geführte Summe). */
+  K.noise = (a, rnd, color = 'white') => {
+    if (color === 'pink') {
+      let b0 = 0, b1 = 0, b2 = 0, b3 = 0, b4 = 0, b5 = 0, b6 = 0;
+      for (let i = 0; i < a.length; i++) {
+        const w = rnd() * 2 - 1;
+        b0 = 0.99886 * b0 + w * 0.0555179; b1 = 0.99332 * b1 + w * 0.0750759; b2 = 0.969 * b2 + w * 0.153852;
+        b3 = 0.8665 * b3 + w * 0.3104856; b4 = 0.55 * b4 + w * 0.5329522; b5 = -0.7616 * b5 - w * 0.016898;
+        a[i] = (b0 + b1 + b2 + b3 + b4 + b5 + b6 + w * 0.5362) * 0.11; b6 = w * 0.115926;
+      }
+    } else if (color === 'brown') {
+      let l = 0;
+      for (let i = 0; i < a.length; i++) { l = (l + 0.02 * (rnd() * 2 - 1)) / 1.02; a[i] = l * 3.5; }
+    } else for (let i = 0; i < a.length; i++) a[i] = rnd() * 2 - 1;
+    return a;
+  };
+
+  /** Frequenz zur Zeit t (ab Beginn) bei exponentiellem Gleiten von f nach f2 über dur. */
+  const glide = (f, f2, dur) => (f2 && f2 !== f && dur > 0 ? (t) => f * (f2 / f) ** Math.min(1, t / dur) : () => f);
+  /** Hüllkurve wie die alten Klänge: 0,0001 → gain in attack, dann exponentiell auf 0,0001 bei dur, danach still. */
+  function envOld(t, attack, dur, gain) {
+    if (t >= dur) return 0;
+    if (t < attack) return 0.0001 * (gain / 0.0001) ** (t / attack);
+    return gain * (0.0001 / gain) ** ((t - attack) / Math.max(1e-6, dur - attack));
+  }
+  /** Eine Periode der Grundwelle bei Phase ph (Bogenmaß), bandbegrenzt bis kmax. */
+  function wave(type, ph, kmax) {
+    if (type === 'sine' || kmax < 2) return Math.sin(ph);
+    const c2 = 2 * Math.cos(ph);
+    let s0 = 0, s1 = Math.sin(ph), sum = 0;
+    for (let k = 1; k <= kmax; k++) {
+      if (type === 'square') { if (k & 1) sum += s1 / k; }
+      else if (type === 'sawtooth') sum += (k & 1 ? s1 : -s1) / k;
+      else if (k & 1) sum += ((k & 2) ? -s1 : s1) / (k * k);         // Dreieck: (−1)^((k−1)/2) / k²
+      const s2 = c2 * s1 - s0; s0 = s1; s1 = s2;
+    }
+    return sum * WAVE_K[type];
+  }
+
+  /** Addiert einen Sinus; Frequenz gleitet exponentiell von f nach f2 (über dur). */
+  K.sine = (a, { f = 440, f2 = 0, at = 0, dur = 0, gain = 1, phase = 0 } = {}) => {
+    const i0 = at0(a, at), n = dur ? Math.min(a.length - i0, Math.round(dur * sr)) : a.length - i0, fr = glide(f, f2, dur || n / sr);
+    let ph = phase;
+    for (let i = 0; i < n; i++) { a[i0 + i] += gain * Math.sin(ph); ph += (2 * Math.PI * fr(i / sr)) / sr; }
+    return a;
+  };
+  /** Addiert Sinus/Dreieck/Rechteck/Sägezahn mit Hüllkurve wie das alte osc(). */
+  K.tone = (a, { type = 'sine', f = 440, f2 = 0, at = 0, dur = 0.1, gain = 0.3, attack = 0.003 } = {}) => {
+    const i0 = at0(a, at), n = Math.min(a.length - i0, Math.round(dur * sr)), fr = glide(f, f2, dur);
+    let ph = 0;
+    for (let i = 0; i < n; i++) {
+      const t = i / sr, fq = fr(t), e = envOld(t, attack, dur, gain);
+      a[i0 + i] += e * wave(type, ph, type === 'triangle' ? Math.min(31, Math.floor(sr * 0.45 / fq)) : Math.min(63, Math.floor(sr * 0.45 / fq)));
+      ph += (2 * Math.PI * fq) / sr;
+      if (ph > 2 * Math.PI) ph -= 2 * Math.PI;
+    }
+    return a;
+  };
+
+  /**
+   * Biquad nach RBJ (Formeln wie BiquadFilterNode) über a[i0 … i0+n), Eckfrequenz gleitet exponentiell f → f2.
+   * qlin ist die lineare Güte. Die Beiwerte werden alle 16 Abtastwerte neu berechnet.
+   */
+  function biquad(a, type, i0, n, f, f2, qlin) {
+    const fr = glide(f, f2, n / sr);
+    let x1 = 0, x2 = 0, y1 = 0, y2 = 0, b0 = 0, b1 = 0, b2 = 0, a1 = 0, a2 = 0;
+    for (let i = 0; i < n; i++) {
+      if ((i & 15) === 0) {
+        const w0 = (2 * Math.PI * Math.min(fr(i / sr), sr * 0.49)) / sr, cw = Math.cos(w0), al = Math.sin(w0) / (2 * qlin), a0 = 1 + al;
+        if (type === 'lowpass') { b0 = (1 - cw) / 2 / a0; b1 = (1 - cw) / a0; b2 = b0; }
+        else if (type === 'highpass') { b0 = (1 + cw) / 2 / a0; b1 = -(1 + cw) / a0; b2 = b0; }
+        else { b0 = al / a0; b1 = 0; b2 = -al / a0; }
+        a1 = (-2 * cw) / a0; a2 = (1 - al) / a0;
+      }
+      const x = a[i0 + i], y = b0 * x + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2;
+      x2 = x1; x1 = x; y2 = y1; y1 = y;
+      a[i0 + i] = y;
+    }
+    return a;
+  }
+  const filt = (type) => (a, { f = 1000, f2 = 0, q = Math.SQRT1_2 } = {}) => biquad(a, type, 0, a.length, f, f2, q);
+  K.lp = filt('lowpass');
+  K.hp = filt('highpass');
+  K.bp = filt('bandpass');
+
+  /**
+   * Addiert einen gefilterten Rauschstoß wie das alte burst(): Rauschen (rate < 1 macht es dunkler, wie die Abspielrate),
+   * Filter mit gleitender Eckfrequenz, dann die alte Hüllkurve. q wie im BiquadFilterNode: bei Tief- und Hochpass in dB, beim Bandpass linear.
+   */
+  K.burst = (a, rnd, { type = 'lowpass', f = 2000, f2 = 0, q = 0.7, at = 0, dur = 0.1, gain = 0.5, attack = 0.001, rate = 1 } = {}) => {
+    const i0 = at0(a, at), n = Math.min(a.length - i0, Math.round(dur * sr));
+    if (n <= 0) return a;
+    const seg = new Float32Array(n);
+    let p = 0, v0 = rnd() * 2 - 1, v1 = rnd() * 2 - 1;
+    for (let i = 0; i < n; i++) {
+      seg[i] = v0 + (v1 - v0) * p;
+      p += rate;
+      while (p >= 1) { p -= 1; v0 = v1; v1 = rnd() * 2 - 1; }
+    }
+    biquad(seg, type, 0, n, f, f2, type === 'bandpass' ? q : 10 ** (q / 20));
+    for (let i = 0; i < n; i++) a[i0 + i] += seg[i] * envOld(i / sr, attack, dur, gain);
+    return a;
+  };
+
+  /** Multipliziert mit einer Hüllkurve aus Punkten [[t, pegel], …], exponentiell dazwischen. */
+  K.env = (a, pts) => {
+    const P = pts.map(([t, v]) => [t, Math.max(1e-5, v)]);
+    let j = 0;
+    for (let i = 0; i < a.length; i++) {
+      const t = i / sr;
+      while (j < P.length - 1 && t >= P[j + 1][0]) j++;
+      let v;
+      if (t <= P[0][0]) v = P[0][1];
+      else if (j >= P.length - 1) v = P[P.length - 1][1];
+      else { const [ta, va] = P[j], [tb, vb] = P[j + 1]; v = va * (vb / va) ** ((t - ta) / Math.max(1e-9, tb - ta)); }
+      a[i] *= v;
+    }
+    return a;
+  };
+  /** Multipliziert mit exp(−t/tau) ab at (davor still), linear eingeblendet über attack. */
+  K.decay = (a, { at = 0, attack = 0, tau = 0.1 } = {}) => {
+    const i0 = at0(a, at);
+    for (let i = 0; i < i0; i++) a[i] = 0;
+    for (let i = i0; i < a.length; i++) {
+      const t = (i - i0) / sr;
+      a[i] *= (attack > 0 && t < attack ? t / attack : 1) * Math.exp(-Math.max(0, t - attack) / tau);
+    }
+    return a;
+  };
+  /** Druckstoß nach Friedlander: gain·(1 − t/T)·exp(−b·t/T) für 0 ≤ t ≤ 4T. */
+  K.friedlander = (a, { at = 0, T = 0.004, b = 1.2, gain = 1 } = {}) => {
+    const i0 = at0(a, at), n = Math.min(a.length - i0, Math.round(4 * T * sr));
+    for (let i = 0; i < n; i++) { const x = i / sr / T; a[i0 + i] += gain * (1 - x) * Math.exp(-b * x); }
+    return a;
+  };
+  /** Klick: differenzierter Rauschstoß, quadratisch abfallend. */
+  K.click = (a, rnd, { at = 0, dur = 0.002, gain = 1 } = {}) => {
+    const i0 = at0(a, at), n = Math.min(a.length - i0, Math.max(2, Math.round(dur * sr)));
+    let last = 0;
+    for (let i = 0; i < n; i++) { const w = rnd() * 2 - 1, k = 1 - i / n; a[i0 + i] += gain * 0.5 * (w - last) * k * k; last = w; }
+    return a;
+  };
+  /** Sättigung: a = tanh(a·k) / tanh(k). */
+  K.drive = (a, k = 1) => {
+    const d = Math.tanh(k);
+    for (let i = 0; i < a.length; i++) a[i] = Math.tanh(a[i] * k) / d;
+    return a;
+  };
+  /** Addiert abklingende Sinustöne: modes = [[Hz, tau in ms, Pegel], …]. */
+  K.modal = (a, { at = 0, modes = [] } = {}) => {
+    const i0 = at0(a, at);
+    for (const [f, tauMs, g] of modes) {
+      const tau = tauMs / 1000, n = Math.min(a.length - i0, Math.round(tau * 7 * sr)), w = (2 * Math.PI * f) / sr, k = Math.exp(-1 / (tau * sr));
+      let e = g;
+      for (let i = 0; i < n; i++) { a[i0 + i] += e * Math.sin(w * i); e *= k; }
+    }
+    return a;
+  };
+  /** Gezupfte Saite (Karplus-Strong): klingt mit tau (s) ab; bright 0 … 1 macht den Anschlag heller. */
+  K.pluck = (a, rnd, { at = 0, f = 220, tau = 0.5, bright = 0.5, gain = 1 } = {}) => {
+    const i0 = at0(a, at), N = Math.max(2, Math.round(sr / f)), line = new Float32Array(N), g = Math.exp(-1 / (f * tau));
+    let lp = 0;
+    for (let i = 0; i < N; i++) { lp += (rnd() * 2 - 1 - lp) * (0.15 + 0.85 * bright); line[i] = lp; }
+    for (let i = 0, p = 0; i0 + i < a.length; i++) {
+      const q = (p + 1) % N, y = line[p];
+      a[i0 + i] += gain * y;
+      line[p] = g * 0.5 * (y + line[q]);
+      p = q;
+    }
+    return a;
+  };
+  /** Kammfilter mit Rückkopplung; damp 0 … 1 macht die Wiederholungen dunkler. */
+  K.comb = (a, { delay = 0.02, fb = 0.5, damp = 0 } = {}) => {
+    const D = Math.max(1, Math.round(delay * sr));
+    let s = 0;
+    for (let i = D; i < a.length; i++) { s = (1 - damp) * a[i - D] + damp * s; a[i] += fb * s; }
+    return a;
+  };
+  /** Mischt quelle ab at in ziel. */
+  K.mix = (dst, src, { at = 0, gain = 1 } = {}) => {
+    const i0 = at0(dst, at), n = Math.min(src.length, dst.length - i0);
+    for (let i = 0; i < n; i++) dst[i0 + i] += src[i] * gain;
+    return dst;
+  };
+  /** Ein- und Ausblenden (Kosinus) an den Rändern. */
+  K.fade = (a, { inT = 0, outT = 0 } = {}) => {
+    const ni = Math.min(a.length, Math.round(inT * sr)), no = Math.min(a.length, Math.round(outT * sr));
+    for (let i = 0; i < ni; i++) a[i] *= 0.5 - 0.5 * Math.cos((Math.PI * i) / ni);
+    for (let i = 0; i < no; i++) a[a.length - 1 - i] *= 0.5 - 0.5 * Math.cos((Math.PI * i) / no);
+    return a;
+  };
+  K.peak = (a) => { let p = 0; for (let i = 0; i < a.length; i++) { const v = Math.abs(a[i]); if (v > p) p = v; } return p; };
+  K.rms = (a) => { let s = 0; for (let i = 0; i < a.length; i++) s += a[i] * a[i]; return Math.sqrt(s / (a.length || 1)); };
+  K.norm = (a, peak = 1) => { const p = K.peak(a); if (p > 0) { const k = peak / p; for (let i = 0; i < a.length; i++) a[i] *= k; } return a; };
+  /** Gleichanteil entfernen: zieht den Mittelwert mit einer Hann-Glocke gewichtet ab (die Ränder bleiben unberührt). */
+  K.dc = (a) => {
+    const n = a.length;
+    let s = 0, w = 0;
+    for (let i = 0; i < n; i++) { s += a[i]; const h = Math.sin((Math.PI * i) / n); w += h * h; }
+    if (!w) return a;
+    const c = s / w;
+    for (let i = 0; i < n; i++) { const h = Math.sin((Math.PI * i) / n); a[i] -= c * h * h; }
+    return a;
+  };
+  return K;
+}
+
+// --------------------------------------------------------------------------
+// 8b · Klangschmiede: Rezepte. Jedes Rezept beschreibt einen Klang mit Varianten; make(K, rnd, v) berechnet Variante v
+// mit der Saat hash(name) + v (gleiche Saat ergibt gleiche Samples) und liefert ein Float32Array oder { ch: [links, rechts] }.
+// Die Klänge aus Phase 1 sind die alten, live gebauten Klänge mit denselben Zahlen (K.burst und K.tone statt Knoten).
+// --------------------------------------------------------------------------
+/** Busse des Mischpults und ihre Startpegel in dB. */
+const BUSSE = { waffe: 0, welt: -3, foley: -8, ui: -10, amb: -18, musik: -14 };
+/**
+ * Name → Rezept { n, bus, gain (dB vor dem Bus), prio 0…9, cap, reach (m, 0 = nicht ortsgebunden), send, sendD, loop, later, make }.
+ * later: gehört nicht zum Backen ab App-Start (Umgebung, Musik) – wird bei Bedarf im Hintergrund berechnet (klangLater).
+ */
+const KLANG = {};
+/** Rezept eintragen. sendD: zusätzlicher Hall-Anteil mal d/reach (ferne Schüsse hallen mehr). */
+const rezept = (name, r) => { KLANG[name] = { n: 3, bus: 'ui', gain: 0, prio: 5, cap: 4, reach: 0, send: 0, sendD: 0, loop: false, later: false, ...r }; };
+const klangHash = (s) => { let x = 2166136261; for (let i = 0; i < s.length; i++) x = Math.imul(x ^ s.charCodeAt(i), 16777619); return x >>> 0; };
+/** Pegel eines alten Klangs: Lautstärke der alten Kette abzüglich des Bus-Pegels – an der Summe bleibt alles so laut wie vorher. */
+const altDb = (v, bus) => 20 * Math.log10(v) - BUSSE[bus];
+/** Streuung der Tonhöhe je Variante: Variante 0 bleibt bei den alten Zahlen, 1 und 2 liegen um ±amt daneben. */
+const spread = (v, rnd, amt = 0.035) => 1 + amt * ([0, 1, -1][v % 3] + (rnd() - 0.5) * 0.4);
+/** Zufallswert aus lo … hi, je Variante aus einem eigenen Drittel (Varianten liegen nie zufällig aufeinander). */
+const pick = (v, rnd, lo, hi) => lo + ((hi - lo) * ((v % 3) + rnd())) / 3;
+
+/**
+ * Schüsse im Schichtmodell (Phase 2): Knall (Klick), Druckwelle (Friedlander), Körper (gleitender Sinus, gesättigt), Rauschfahne
+ * (tiefes rosa und hohes weißes Rauschen, die Höhen klingen schneller ab), Mechanik (Resonanzen), Sub. T Puls, crack Knall, f → f2 Körper,
+ * body Körper-Dauer, drive Sättigung, cut0 → cut1 Tiefpass des Rauschens, noise Rausch-Dauer, tauLo/tauHi Abklingzeiten, mech/mechAt Mechanik
+ * (s), sub Pegel des Subs, db Pegel des eigenen Schusses (dB vor dem Bus). Alle Zeiten in s.
+ */
+const SCHUSS = {
+  rifle: { T: 0.0035, crack: 0.0015, f: 170, f2: 58, body: 0.09, drive: 2.5, cut0: 7000, cut1: 600, noise: 0.18, tauLo: 0.055, tauHi: 0.014, mech: 'bolt', mechAt: [0.038, 0.078], sub: 0.5, db: -6, mix: { body: 0.35, sub: 0.6, lo: 1.5, hi: 3 } },
+  smg: { T: 0.0025, crack: 0.001, f: 230, f2: 90, body: 0.06, drive: 2, cut0: 8000, cut1: 900, noise: 0.11, tauLo: 0.035, tauHi: 0.01, mech: 'bolt', mechAt: [0.028, 0.058], sub: 0.3, db: -7, mix: { body: 0.35, sub: 1, lo: 1.5, hi: 3 } },
+  shotgun: { T: 0.006, crack: 0.0025, f: 110, f2: 42, body: 0.16, drive: 3.5, cut0: 4500, cut1: 300, noise: 0.38, tauLo: 0.11, tauHi: 0.022, mech: null, mechAt: [], sub: 0.9, db: -4.5, mix: { body: 0.3, sub: 0.5, lo: 4, hi: 8 } },
+  dmr: { T: 0.0045, crack: 0.0018, f: 150, f2: 52, body: 0.12, drive: 3, cut0: 6000, cut1: 450, noise: 0.26, tauLo: 0.075, tauHi: 0.016, mech: 'bolt', mechAt: [0.045, 0.095], sub: 0.7, db: -5, mix: { body: 0.35, sub: 0.6, lo: 3, hi: 6 } },
+  sniper: { T: 0.0055, crack: 0.002, f: 95, f2: 38, body: 0.18, drive: 3.5, cut0: 5000, cut1: 350, noise: 0.5, tauLo: 0.14, tauHi: 0.02, mech: null, mechAt: [], sub: 1, db: -4, mix: { body: 0.3, sub: 0.5, lo: 4, hi: 8 } },
+  lmg: { T: 0.0042, crack: 0.0016, f: 135, f2: 50, body: 0.11, drive: 3, cut0: 5500, cut1: 500, noise: 0.22, tauLo: 0.065, tauHi: 0.015, mech: 'heavy', mechAt: [0.04, 0.085], sub: 0.7, db: -5.5, mix: { body: 0.3, sub: 0.5, lo: 2.5, hi: 6 } },
+  pistol: { T: 0.0022, crack: 0.001, f: 250, f2: 95, body: 0.05, drive: 2, cut0: 7500, cut1: 1000, noise: 0.1, tauLo: 0.03, tauHi: 0.009, mech: 'slide', mechAt: [0.022, 0.048], sub: 0.2, db: -7.5, mix: { body: 0.6, sub: 1, lo: 1.2, hi: 2.5 } },
+};
+/**
+ * Pegel der Schichten im Schuss (Startwerte aus dem Plan); jede Art überschreibt einzelne in SCHUSS[art].mix. sub: Faktor auf P.sub,
+ * loF: Tiefpass der tiefen Rauschfahne beginnt bei cut0 · loF, loHp: Hochpass der tiefen Rauschfahne (0 = keiner).
+ * Abgestimmt auf die Tore (mindestens 18 % der Energie unter 150 Hz, Schwerpunkt 900–3500 Hz): Mit den Startwerten trugen Körper, Sub und
+ * Druckwelle 80–96 % der Energie (Schwerpunkt 75–990 Hz). Deshalb ist die Rauschfahne lauter und ohne Tiefen (Hochpass 150 Hz, Tiefpass
+ * ab cut0 wie in der Tabelle), Körper und Sub sind leiser.
+ */
+const SCHICHT = { click: 0.9, fried: 1, body: 0.9, lo: 0.8, hi: 0.6, sub: 1, loF: 1, loHp: 150 };
+/** Resonanzen der Mechanik: [Hz, tau ms, Pegel] */
+const MECH = {
+  bolt: [[1850, 9, 1], [3120, 6, 0.7], [4780, 4, 0.5], [640, 14, 0.6]],
+  heavy: [[1320, 12, 1], [2450, 8, 0.7], [3900, 5, 0.4], [420, 20, 0.8]],
+  slide: [[2300, 7, 1], [3650, 5, 0.6], [5400, 3, 0.4], [900, 10, 0.5]],
+};
+/** Resonanzen umrechnen: Pegel mal g, Frequenzen mal fk. */
+const modesOf = (modes, g = 1, fk = 1) => modes.map(([f, t, p]) => [f * fk, t, p * g]);
+/** Streuung je Variante: 1 ± amt, die Varianten über den Bereich verteilt (v von n), dazu etwas Zufall aus der Saat. */
+const vary = (v, n, rnd, amt) => 1 + amt * Math.max(-1, Math.min(1, (n > 1 ? ((2 * v) / (n - 1) - 1) * 0.8 : 0) + (rnd() - 0.5) * 0.4));
+/** Frühe Echos: Kopien mit Tiefpass f, [Zeit s, dB] (alles, was über das Feld hinausreicht, fällt weg). */
+function echoes(K, a, list, f) {
+  const src = K.lp(Float32Array.from(a), { f });
+  for (const [t, db] of list) K.mix(a, src, { at: t, gain: 10 ** (db / 20) });
+  return a;
+}
+/**
+ * Ein Schuss in einer Perspektive: 'ich' (alle Schichten), 'nah' (ohne Sub, Mechanik mal 0,4, Tiefpass 9 kHz, zwei frühe Echos),
+ * 'fern' (ohne Knall und Mechanik, dumpf, ein Echo nach 120–220 ms). Generator: gibt zwischen den Schichten ab.
+ */
+function* makeShot(K, rnd, v, P, persp) {
+  const fk = vary(v, 4, rnd, 0.04), tk = vary((v + 2) % 4, 4, rnd, 0.08), fern = persp === 'fern';
+  const noiseDur = P.noise * tk, bodyDur = P.body * tk, X = { ...SCHICHT, ...P.mix };
+  const a = K.buf(noiseDur + 0.06 + (fern ? 0.35 : 0));
+  if (!fern) K.click(a, rnd, { at: 0, dur: P.crack * tk, gain: X.click });
+  K.friedlander(a, { at: 0, T: P.T * tk, b: 1.2, gain: X.fried });
+  const body = K.buf(bodyDur);                                     // Körper getrennt sättigen
+  K.sine(body, { f: P.f * fk, f2: P.f2 * fk, dur: bodyDur, gain: 1 });
+  K.decay(body, { attack: 0.001, tau: bodyDur / 3 });
+  K.fade(body, { outT: 0.01 });
+  K.drive(body, P.drive);
+  K.dc(body);                                                      // Gleichanteil gleich hier (sonst zöge ihn K.dc später über den ganzen Puffer ab)
+  K.mix(a, body, { gain: X.body });
+  yield;
+  const lo = K.noise(K.buf(noiseDur), rnd, 'pink'), hi = K.noise(K.buf(noiseDur), rnd, 'white');
+  if (X.loHp) K.hp(lo, { f: X.loHp });
+  K.lp(lo, { f: P.cut0 * X.loF * fk, f2: P.cut1 * fk });
+  K.decay(lo, { tau: P.tauLo * tk });
+  K.fade(lo, { outT: noiseDur * 0.25 });
+  K.hp(hi, { f: 2500 });
+  K.lp(hi, { f: P.cut0 * fk, f2: P.cut0 * 0.5 * fk });
+  K.decay(hi, { tau: P.tauHi * tk });
+  K.mix(a, lo, { gain: X.lo });
+  K.mix(a, hi, { gain: X.hi });
+  yield;
+  if (P.mech && !fern) for (const t of P.mechAt) K.modal(a, { at: t * tk, modes: modesOf(MECH[P.mech], persp === 'ich' ? 0.35 : 0.35 * 0.4, fk) });
+  if (persp === 'ich') {
+    const sub = K.sine(K.buf(0.08), { f: 55 * fk, f2: 45 * fk, dur: 0.08, gain: 1 });
+    K.decay(sub, { attack: 0.003, tau: 0.035 });
+    K.fade(sub, { outT: 0.01 });
+    K.dc(sub);
+    K.mix(a, sub, { gain: P.sub * X.sub });
+  }
+  if (persp === 'nah') { K.lp(a, { f: 9000 }); echoes(K, a, [[rnd() * 0.008 + 0.011, -9], [rnd() * 0.014 + 0.023, -13]], 3000); }
+  if (fern) { K.lp(a, { f: 1800, f2: P.cut1 * 0.5 }); K.hp(a, { f: 60 }); echoes(K, a, [[rnd() * 0.1 + 0.12, -8]], 900); }
+  K.drive(a, 1.6);
+  K.fade(a, { outT: 0.02 });
+  return K.norm(a, 0.98);
+}
+for (const [kind, P] of Object.entries(SCHUSS)) {
+  rezept(`schuss.${kind}.ich`, { n: 4, bus: 'waffe', gain: P.db, prio: 9, cap: 10, send: 0.5, make: (K, rnd, v) => makeShot(K, rnd, v, P, 'ich') });
+  rezept(`schuss.${kind}.nah`, { n: 4, bus: 'welt', gain: P.db + 1.5, prio: 7, cap: 6, reach: 110, send: 0.4, sendD: 0.5, make: (K, rnd, v) => makeShot(K, rnd, v, P, 'nah') });
+  rezept(`schuss.${kind}.fern`, { n: 4, bus: 'welt', gain: P.db + 1.5, prio: 6, cap: 6, reach: 110, send: 0.4, sendD: 0.5, make: (K, rnd, v) => makeShot(K, rnd, v, P, 'fern') });
+}
+/**
+ * Pegel neuer Rezepte als Spitze an der Summe (dBFS, Lautstärke 1, ohne Entfernung): ihr make() liefert Spitze 1, gain ist dann die Spitze
+ * vor dem Bus – also Spitze minus Bus-Pegel.
+ */
+const spitze = (db, bus) => db - BUSSE[bus];
+/** Schabe-Rauschen: Bandpass f (q linear), Hüllkurve wie burst (Anstieg attack, dann exponentiell bis dur). */
+const scrape = (K, rnd, a, { at = 0, dur = 0.06, f = 1500, f2 = 0, q = 1.5, gain = 0.5, attack = 0.004 }) => K.burst(a, rnd, { type: 'bandpass', f, f2, q, at, dur, gain, attack });
+/** Kurzer Metall-Klick: Klick plus Resonanzen (Frequenzen mal fk). */
+const clank = (K, rnd, a, at, modes, g = 1, fk = 1) => { K.click(a, rnd, { at, dur: 0.0015, gain: 0.6 * g }); K.modal(a, { at, modes: modesOf(modes, g, fk) }); return a; };
+
+// ---------- Mechanik, Ausklang, Magazin-Hinweis (Schritt 2.2) ----------
+rezept('mech.pump', {
+  bus: 'foley', gain: spitze(-16, 'foley'), prio: 7, cap: 2, send: 0.15,
+  make(K, rnd, v) {
+    const fk = vary(v, 3, rnd, 0.05), tk = vary(v, 3, rnd, 0.08), a = K.buf(0.42);
+    for (const [at, g] of [[0, 0.8], [0.17 * tk, 1]]) {
+      scrape(K, rnd, a, { at, dur: 0.06, f: 1100 * fk, q: 1.5, gain: 0.35 * g });
+      clank(K, rnd, a, at + 0.012, [[780, 18, 1], [1650, 10, 0.6], [2900, 6, 0.4]], g, fk);
+      K.tone(a, { f: 190 * fk, f2: 120 * fk, at: at + 0.01, dur: 0.03, gain: 0.5 * g, attack: 0.001 });
+    }
+    return K.norm(K.fade(a, { outT: 0.02 }), 1);
+  },
+});
+rezept('mech.bolt', {
+  bus: 'foley', gain: spitze(-17, 'foley'), prio: 7, cap: 2, send: 0.15,
+  make(K, rnd, v) {
+    const fk = vary(v, 3, rnd, 0.05), tk = vary(v, 3, rnd, 0.08), a = K.buf(0.75);
+    [[0, 0.8], [0.16, 0.6], [0.42, 0.7], [0.55, 1]].forEach(([at, g]) => clank(K, rnd, a, at * tk, MECH.heavy, g, fk * (1 + (at > 0.3 ? 0.04 : 0))));
+    scrape(K, rnd, a, { at: 0.16 * tk, dur: 0.26 * tk, f: 2000 * fk, q: 1.2, gain: 10 ** (-18 / 20) * 2.5, attack: 0.05 });
+    return K.norm(K.fade(a, { outT: 0.03 }), 1);
+  },
+});
+for (const [kind, fk] of [['rifle', 1], ['smg', 1.12], ['lmg', 0.85]]) {
+  rezept(`ausklang.${kind}`, {
+    bus: 'waffe', gain: spitze(-24, 'waffe'), prio: 6, cap: 1, send: 1,
+    make(K, rnd, v) {
+      const a = K.noise(K.buf(0.9), rnd, 'pink'), k = fk * vary(v, 3, rnd, 0.06);
+      K.hp(a, { f: 500 * k }); K.lp(a, { f: 2200 * k, f2: 1400 * k });
+      K.decay(a, { attack: 0.03, tau: 0.28 });
+      echoes(K, a, [[0.14, -6], [0.26, -10]], 1600 * k);
+      return K.norm(K.fade(a, { outT: 0.08 }), 1);
+    },
+  });
+}
+// ---------- Untergrund: Schritte, Landung, Granaten-Aufprall, Hülsen (Schritt 2.3) ----------
+/** Trefferart → Untergrund der Klänge */
+const GRUND = { concrete: 'stein', metal: 'metall', wood: 'holz', sand: 'sand', cloth: 'sand' };
+const GRUENDE = ['stein', 'metall', 'holz', 'sand'];
+const STEP_LEN = { stein: 0.12, metall: 0.3, holz: 0.18, sand: 0.2 };
+/**
+ * Ein Schritt auf dem Untergrund, Spitze 1. Stein: dumpfer Tritt (Rauschen, Tiefpass 320 → 110 Hz, tau 28 ms) und nach 8 ms ein Schleifen
+ * (Bandpass 2200 Hz, tau 12 ms, −14 dB). Metall und Holz: dazu Resonanzen (Pegel 0,5 gegen den Tritt) bzw. Klopfen. Sand: sechs Körner.
+ */
+function stepLayer(K, rnd, v, grund, len = STEP_LEN[grund]) {
+  const fk = vary(v, 5, rnd, 0.08), a = K.buf(len);
+  if (grund === 'sand') {
+    const n = K.noise(K.buf(len), rnd, 'white');
+    K.bp(n, { f: 900 * fk, f2: 400 * fk, q: 0.9 });
+    const g = new Float32Array(n.length);
+    for (let i = 0; i < 6; i++) {                                    // sechs Körner von 4–9 ms über die ersten 120 ms
+      const at = 0.004 + i * 0.019 + rnd() * 0.01, d = 0.004 + rnd() * 0.005, i0 = Math.round(at * K.SR), m = Math.round(d * K.SR);
+      for (let j = 0; j < m && i0 + j < g.length; j++) g[i0 + j] += Math.sin((Math.PI * j) / m) * (0.6 + 0.4 * rnd());
+    }
+    for (let i = 0; i < n.length; i++) n[i] *= g[i] + 0.12;
+    K.decay(n, { attack: 0.012, tau: 0.06 });
+    K.mix(a, K.norm(n, 1));
+    return K.norm(K.fade(a, { outT: 0.01 }), 1);
+  }
+  const t = K.noise(K.buf(Math.min(len, 0.14)), rnd, 'white');
+  K.lp(t, { f: 320 * fk, f2: 110 * fk, q: 1 });
+  K.lp(t, { f: 600 * fk });
+  K.decay(t, { attack: 0.002, tau: 0.028 });
+  K.mix(a, K.norm(t, 1));
+  const sc = K.noise(K.buf(0.06), rnd, 'white');
+  K.bp(sc, { f: 2200 * fk, q: 1.2 });
+  K.decay(sc, { attack: 0.002, tau: 0.012 });
+  K.mix(a, K.norm(sc, 10 ** (-14 / 20)), { at: 0.008 });
+  if (grund === 'metall') K.modal(a, { at: 0.002, modes: modesOf([[210, 90, 1], [480, 60, 0.6], [1130, 40, 0.35], [2650, 20, 0.2]], 0.5, fk) });
+  if (grund === 'holz') {
+    K.modal(a, { at: 0.002, modes: modesOf([[160, 45, 1], [390, 30, 0.5]], 0.5, fk) });
+    const kn = K.noise(K.buf(0.05), rnd, 'white');
+    K.bp(kn, { f: 800 * fk, q: 2 });
+    K.decay(kn, { tau: 0.01 });
+    K.mix(a, K.norm(kn, 0.5), { at: 0.003 });
+  }
+  return K.norm(K.fade(a, { outT: len * 0.3 }), 1);
+}
+for (const grund of GRUENDE) {
+  rezept(`schritt.${grund}`, { n: 5, bus: 'welt', gain: spitze(-22, 'welt'), prio: 2, cap: 6, reach: 18, send: 0.15, make: (K, rnd, v) => stepLayer(K, rnd, v, grund) });
+  rezept(`landung.${grund}`, {
+    bus: 'foley', gain: spitze(-15, 'foley'), prio: 5, cap: 2, send: 0.1,
+    make(K, rnd, v) {
+      const len = STEP_LEN[grund] * 2, a = K.mix(K.buf(len), stepLayer(K, rnd, v, grund, len)), fk = vary(v, 3, rnd, 0.07);
+      const b = K.sine(K.buf(0.14), { f: 90 * fk, f2: 45 * fk, dur: 0.14, gain: 1 });
+      K.decay(b, { attack: 0.004, tau: 0.05 }); K.fade(b, { outT: 0.02 }); K.dc(b);
+      K.mix(a, b, { gain: 0.9 });
+      return K.norm(K.fade(a, { outT: 0.02 }), 1);
+    },
+  });
+  rezept(`granate.aufprall.${grund}`, {
+    bus: 'welt', gain: spitze(-14, 'welt'), prio: 4, cap: 3, reach: 30, send: 0.3,
+    make(K, rnd, v) {
+      const fk = vary(v, 3, rnd, 0.06), a = K.buf(0.12);
+      K.tone(a, { f: 220 * fk, f2: 140 * fk, dur: 0.03, gain: 0.8, attack: 0.001 });
+      clank(K, rnd, a, 0, [[1100, 14, 0.6], [1900, 9, 0.3]], 1, fk);
+      K.mix(a, stepLayer(K, rnd, v, grund, 0.12), { gain: 0.5 });
+      return K.norm(K.fade(a, { outT: 0.04 }), 1);
+    },
+  });
+}
+/** Hülse: drei Aufpraller bei 0, 90, 150 ms (Pegel 1, 0,5, 0,25) mit Resonanzen und Klick; Metall klingt nach, Holz ist dumpf, Sand nur ein Rauschen. */
+for (const [grund, n, len] of [['stein', 4, 0.3], ['metall', 4, 0.35], ['holz', 4, 0.25], ['sand', 3, 0.08]]) {
+  rezept(`huelse.${grund}`, {
+    n, bus: 'foley', gain: spitze(-24, 'foley'), prio: 1, cap: 4, send: 0.1,
+    make(K, rnd, v) {
+      const fk = vary(v, n, rnd, 0.07), tk = vary((v + 1) % n, n, rnd, 0.12), a = K.buf(len);
+      if (grund === 'sand') {
+        const x = K.noise(K.buf(len), rnd, 'white');
+        K.lp(x, { f: 2000 * fk }); K.decay(x, { attack: 0.002, tau: 0.02 });
+        return K.norm(K.fade(K.mix(a, x), { outT: 0.03 }), 1);
+      }
+      const g0 = grund === 'holz' ? 0.5 : 1, modes = [[4200, 30, 1], [6100, 22, 0.7], [8700, 14, 0.4], ...(grund === 'metall' ? [[1900, 60, 0.5]] : [])];
+      [[0, 1], [0.09, 0.5], [0.15, 0.25]].forEach(([at, g], i) => clank(K, rnd, a, at * tk, modes, g * g0, fk * (1 + 0.03 * i * (rnd() - 0.5))));
+      if (grund === 'holz') { const d = K.noise(K.buf(0.06), rnd, 'white'); K.bp(d, { f: 500 * fk, q: 1.5 }); K.decay(d, { tau: 0.015 }); K.mix(a, K.norm(d, 0.6)); }
+      return K.norm(K.fade(a, { outT: 0.02 }), 1);
+    },
+  });
+}
+// ---------- Einschläge, Querschläger, Überschallknall und Pfeifen (Schritt 2.4) ----------
+/** Körner: n kurze Bandpass-Rauschstöße (Mitte f0 … f1, Länge d0 … d1 s) zwischen t0 und t1, Pegel g. dens: Dichte fällt mit der Zeit (Exponent). */
+function grains(K, rnd, a, { n, t0, t1, f0, f1, d0, d1, g, dens = 1 }) {
+  for (let i = 0; i < n; i++) {
+    const at = t0 + (t1 - t0) * rnd() ** dens, d = d0 + (d1 - d0) * rnd(), x = K.noise(K.buf(d), rnd, 'white');
+    K.bp(x, { f: f0 * (f1 / f0) ** rnd(), q: 2.5 });
+    K.fade(x, { inT: d * 0.2, outT: d * 0.6 });
+    K.mix(a, K.norm(x, g * (0.5 + 0.5 * rnd()) * (1 - 0.7 * ((at - t0) / Math.max(1e-3, t1 - t0)))), { at });
+  }
+  return a;
+}
+/** Rauschen mit Filter und Abklingen als eigene Schicht, auf Spitze 1 gebracht. */
+function noiseHit(K, rnd, len, { lp, lp2 = 0, bp, q = 1, hp, attack = 0.001, tau, color = 'white' }) {
+  const x = K.noise(K.buf(len), rnd, color);
+  if (hp) K.hp(x, { f: hp });
+  if (bp) K.bp(x, { f: bp, q });
+  if (lp) K.lp(x, { f: lp, f2: lp2 });
+  K.decay(x, { attack, tau });
+  return K.norm(x, 1);
+}
+const EINSCHLAG = {
+  beton: [4, 0.2, (K, rnd, a, fk) => {
+    K.click(a, rnd, { dur: 0.0015, gain: 0.8 });
+    K.mix(a, noiseHit(K, rnd, 0.12, { bp: 1800 * fk, q: 1.2, tau: 0.018 }), { gain: 0.8 });
+    grains(K, rnd, a, { n: 5, t0: 0.02, t1: 0.14, f0: 3000, f1: 6000, d0: 0.003, d1: 0.003, g: 10 ** (-12 / 20) });
+  }],
+  metall: [4, 0.25, (K, rnd, a, fk, v) => {
+    const f = pick(v, rnd, 1500, 2600);
+    K.click(a, rnd, { dur: 0.0012, gain: 0.7 });
+    K.modal(a, { modes: [[f, 45, 1], [1.47 * f, 30, 0.6], [2.09 * f, 20, 0.4], [2.93 * f, 12, 0.25]] });
+  }],
+  holz: [4, 0.15, (K, rnd, a, fk) => {
+    K.modal(a, { modes: modesOf([[420, 30, 1], [760, 18, 0.6]], 0.7, fk) });
+    K.mix(a, noiseHit(K, rnd, 0.06, { bp: 1200 * fk, q: 1.5, tau: 0.01 }), { gain: 0.9 });
+    grains(K, rnd, a, { n: 4, t0: 0.01, t1: 0.09, f0: 1500, f1: 3500, d0: 0.002, d1: 0.005, g: 0.3 });
+  }],
+  sand: [4, 0.15, (K, rnd, a, fk) => K.mix(a, noiseHit(K, rnd, 0.15, { lp: 1500 * fk, lp2: 500 * fk, attack: 0.003, tau: 0.05 }))],
+  stoff: [3, 0.1, (K, rnd, a, fk) => K.mix(a, noiseHit(K, rnd, 0.1, { lp: 900 * fk, tau: 0.025 }))],          // 0,1 statt 0,08 s: sonst endet es über −50 dBFS
+  koerper: [4, 0.12, (K, rnd, a, fk) => {
+    K.mix(a, noiseHit(K, rnd, 0.12, { lp: 500 * fk, tau: 0.03 }), { gain: 0.8 });
+    const b = K.sine(K.buf(0.06), { f: 140 * fk, f2: 70 * fk, dur: 0.06, gain: 1 });
+    K.decay(b, { attack: 0.002, tau: 0.025 }); K.fade(b, { outT: 0.01 }); K.dc(b);
+    K.mix(a, b, { gain: 0.7 });
+  }],
+};
+for (const [name, [n, len, fn]] of Object.entries(EINSCHLAG)) {
+  rezept(`einschlag.${name}`, {
+    n, bus: 'welt', gain: spitze(-16, 'welt'), prio: 3, cap: 6, reach: 26, send: 0.3,
+    make(K, rnd, v) { const a = K.buf(len); fn(K, rnd, a, vary(v, n, rnd, 0.07), v); return K.norm(K.fade(a, { outT: len * 0.5 }), 1); },
+  });
+}
+rezept('querschlaeger', {
+  n: 4, bus: 'welt', gain: spitze(-18, 'welt'), prio: 3, cap: 2, reach: 40, send: 0.35,
+  make(K, rnd, v) {
+    const a = K.buf(0.4), f0 = pick(v % 3, rnd, 1800, 3200) * (v === 3 ? 0.93 : 1), n = Math.round(0.36 * K.SR), x = new Float32Array(n);
+    let ph = 0;
+    for (let i = 0; i < n; i++) { const t = i / K.SR, f = f0 * (900 / f0) ** Math.min(1, t / 0.34) * (1 + 0.06 * Math.sin(2 * Math.PI * 35 * t)); x[i] = Math.sin(ph); ph += (2 * Math.PI * f) / K.SR; }
+    K.decay(x, { attack: 0.004, tau: 0.12 });
+    K.click(a, rnd, { dur: 0.001, gain: 0.8 });
+    K.modal(a, { modes: modesOf([[2700, 8, 1], [4100, 5, 0.5]], 0.6, vary(v, 4, rnd, 0.05)) });
+    K.mix(a, x, { at: 0.012, gain: 0.7 });
+    return K.norm(K.fade(a, { outT: 0.03 }), 1);
+  },
+});
+rezept('knall', {
+  bus: 'welt', gain: spitze(-14, 'welt'), prio: 5, cap: 3, send: 0.15,
+  make(K, rnd, v) {
+    const a = K.buf(0.03), n = Math.round(0.00025 * K.SR * vary(v, 3, rnd, 0.2)), i0 = 24;
+    for (let i = 0; i <= n; i++) a[i0 + i] += 1 - (2 * i) / n;                       // N-Welle: +1 nach −1
+    K.mix(a, noiseHit(K, rnd, 0.018, { hp: 2000, tau: 0.004 }), { at: 0.0006, gain: 0.35 });
+    K.hp(a, { f: 800 });
+    return K.norm(K.fade(a, { outT: 0.015 }), 1);
+  },
+});
+// ---------- Treffer-Rückmeldung und eigener Schaden (Schritt 2.5) ----------
+rezept('treffer', {
+  n: 2, bus: 'ui', gain: spitze(-17, 'ui'), prio: 6, cap: 4,
+  make(K, rnd, v) { const a = K.buf(0.05); clank(K, rnd, a, 0, [[2500, 9, 1], [3900, 6, 0.5]], 1, v ? 1.06 : 0.96); return K.norm(K.fade(a, { outT: 0.015 }), 1); },
+});
+rezept('kopfschuss', {
+  n: 2, bus: 'ui', gain: spitze(-14, 'ui'), prio: 6, cap: 3,
+  make(K, rnd, v) { const a = K.buf(0.12); clank(K, rnd, a, 0, [[3600, 28, 1], [5450, 18, 0.6], [7900, 10, 0.35]], 1, v ? 1.05 : 0.96); return K.norm(K.fade(a, { outT: 0.035 }), 1); },
+});
+rezept('abschuss', {
+  n: 2, bus: 'ui', gain: spitze(-13, 'ui'), prio: 6, cap: 2,
+  make(K, rnd, v) {
+    const fk = v ? 1.06 : 0.95, a = K.buf(0.22), b = K.sine(K.buf(0.09), { f: 160 * fk, f2: 70 * fk, dur: 0.09, gain: 1 });
+    K.decay(b, { attack: 0.002, tau: 0.035 }); K.fade(b, { outT: 0.01 }); K.drive(b, 2); K.dc(b);
+    K.mix(a, b, { gain: 0.9 });
+    K.modal(a, { at: 0.004, modes: modesOf([[880, 60, 0.5], [1320, 80, 0.45]], 1, fk) });
+    return K.norm(K.fade(a, { outT: 0.02 }), 1);
+  },
+});
+rezept('schaden', {
+  bus: 'foley', gain: spitze(-11, 'foley'), prio: 7, cap: 2,
+  make(K, rnd, v) {
+    const fk = vary(v, 3, rnd, 0.1), a = K.mix(K.buf(0.16), noiseHit(K, rnd, 0.16, { lp: 420 * fk, lp2: 120 * fk, tau: 0.045 }), { gain: 0.8 });
+    const b = K.sine(K.buf(0.13), { f: 120 * fk, f2: 60 * fk, dur: 0.13, gain: 1 });
+    K.decay(b, { attack: 0.003, tau: 0.05 }); K.fade(b, { outT: 0.015 }); K.dc(b);
+    K.mix(a, b, { gain: 0.8 });
+    return K.norm(K.fade(a, { outT: 0.015 }), 1);
+  },
+});
+// ---------- Nachladen, Wechsel, Anlegen, Foley, Messer, fallender Körper, Munition (Schritt 2.6) ----------
+/** Stoff-Rauschen: Bandpass f (→ f2), Anstieg und Abfall in s. */
+function cloth(K, rnd, len, { f = 900, f2 = 0, q = 0.8, rise = 0.06, fall = 0.18 }) {
+  const x = K.noise(K.buf(len), rnd, 'white');
+  K.bp(x, { f, f2, q });
+  K.env(x, [[0, 0.02], [rise, 1], [Math.min(len, rise + fall), 0.03]]);
+  for (let i = 1; i < x.length; i++) x[i] *= 0.75 + 0.5 * Math.abs(Math.sin(i * 0.0021 + Math.sin(i * 0.00037) * 3));    // unruhiges Reiben
+  return K.norm(x, 1);
+}
+const NACHLADEN = {
+  raus: [0.18, (K, rnd, a, fk) => {
+    clank(K, rnd, a, 0, MECH.bolt, 0.8, fk);
+    scrape(K, rnd, a, { at: 0.004, dur: 0.08, f: 1500 * fk, q: 1.5, gain: 0.5, attack: 0.002 });
+    K.tone(a, { f: 300 * fk, f2: 180 * fk, dur: 0.025, gain: 0.5, attack: 0.001 });
+  }],
+  rein: [0.2, (K, rnd, a, fk) => {
+    const sc = K.mix(K.buf(0.06), cloth(K, rnd, 0.06, { f: 1600 * fk, q: 1.2, rise: 0.055, fall: 0.005 }));
+    K.mix(a, sc, { at: 0.01, gain: 0.35 });
+    clank(K, rnd, a, 0.07, [[950, 14, 1], [2100, 9, 0.7], [3400, 5, 0.4]], 1, fk);
+    K.tone(a, { at: 0.07, f: 220 * fk, f2: 140 * fk, dur: 0.035, gain: 0.6, attack: 0.001 });
+  }],
+  verschluss: [0.22, (K, rnd, a, fk) => {
+    clank(K, rnd, a, 0, MECH.bolt, 0.6, fk);
+    clank(K, rnd, a, 0.085, MECH.bolt, 1, fk * 0.97);
+    const b = K.sine(K.buf(0.05), { f: 160 * fk, dur: 0.05, gain: 1 });
+    K.decay(b, { attack: 0.001, tau: 0.015 }); K.fade(b, { outT: 0.01 }); K.dc(b);
+    K.mix(a, b, { at: 0.085, gain: 0.6 });
+  }],
+  patrone: [0.14, (K, rnd, a, fk) => {
+    scrape(K, rnd, a, { dur: 0.04, f: 2200 * fk, q: 1.8, gain: 0.4, attack: 0.02 });
+    clank(K, rnd, a, 0.045, [[1200, 10, 1], [2600, 6, 0.5]], 1, fk);
+  }],
+};
+for (const [name, [len, fn]] of Object.entries(NACHLADEN)) {
+  rezept(`nachladen.${name}`, {
+    bus: 'foley', gain: spitze(-18, 'foley'), prio: 6, cap: 2, send: 0.1,
+    make(K, rnd, v) { const a = K.buf(len); fn(K, rnd, a, vary(v, 3, rnd, 0.06)); return K.norm(K.fade(a, { outT: 0.01 }), 1); },
+  });
+}
+rezept('wechsel', {
+  bus: 'foley', gain: spitze(-21, 'foley'), prio: 5, cap: 2, send: 0.1,
+  make(K, rnd, v) {
+    const fk = vary(v, 3, rnd, 0.08), a = K.mix(K.buf(0.3), cloth(K, rnd, 0.26, { f: 900 * fk, q: 0.8, rise: 0.06, fall: 0.18 }));
+    clank(K, rnd, a, 0.12, [[2400 * fk, 8, 0.3]], 1);
+    clank(K, rnd, a, 0.19, [[2400 * fk * 1.08, 8, 0.3]], 0.8);
+    return K.norm(K.fade(a, { outT: 0.02 }), 1);
+  },
+});
+for (const [name, up] of [['anlegen', true], ['absetzen', false]]) {
+  rezept(name, {
+    n: 2, bus: 'foley', gain: spitze(-27, 'foley'), prio: 3, cap: 2,
+    make(K, rnd, v) {
+      const fk = v ? 1.07 : 0.94, a = K.mix(K.buf(0.16), cloth(K, rnd, 0.15, { f: (up ? 1400 : 700) * fk, f2: (up ? 700 : 1400) * fk, q: 1, rise: up ? 0.05 : 0.02, fall: up ? 0.1 : 0.12 }));
+      clank(K, rnd, a, up ? 0.13 : 0.003, [[2900 * fk, 4, 0.35]], 1);
+      return K.norm(K.fade(a, { outT: 0.01 }), 1);
+    },
+  });
+}
+rezept('stoff', {
+  bus: 'foley', gain: spitze(-26, 'foley'), prio: 2, cap: 2,
+  make(K, rnd, v) { const fk = vary(v, 3, rnd, 0.1); return K.norm(K.fade(K.mix(K.buf(0.26), cloth(K, rnd, 0.25, { f: 1100 * fk, q: 0.7, rise: 0.05, fall: 0.2 })), { outT: 0.02 }), 1); },
+});
+rezept('klappern', {
+  n: 4, bus: 'foley', gain: spitze(-28, 'foley'), prio: 2, cap: 2,
+  make(K, rnd, v) {
+    const a = K.mix(K.buf(0.08), cloth(K, rnd, 0.07, { f: 1300, q: 0.9, rise: 0.015, fall: 0.05 }), { gain: 0.6 });
+    for (const at of [0.004, 0.02 + rnd() * 0.03]) clank(K, rnd, a, at, [[pick(v % 3, rnd, 1700, 2600) * (v === 3 ? 1.04 : 1), 6, 1]], 10 ** (-20 / 20) * 6);
+    return K.norm(K.fade(a, { outT: 0.025 }), 1);
+  },
+});
+rezept('munition', {
+  n: 2, bus: 'foley', gain: spitze(-19, 'foley'), prio: 5, cap: 1,
+  make(K, rnd, v) {
+    const fk = v ? 1.06 : 0.95, a = K.buf(0.3);
+    [0, 0.06, 0.12].forEach((at, i) => clank(K, rnd, a, at, [[1500 * 1.12 ** i, 10, 1], [3300 * 1.12 ** i, 6, 0.5]], 1, fk));
+    K.mix(a, cloth(K, rnd, 0.08, { f: 1300, q: 0.9, rise: 0.015, fall: 0.05 }), { at: 0.17, gain: 0.3 });
+    clank(K, rnd, a, 0.18, [[2100 * fk, 6, 1]], 0.3);
+    return K.norm(K.fade(a, { outT: 0.02 }), 1);
+  },
+});
+rezept('messer.schwung', {
+  bus: 'foley', gain: spitze(-20, 'foley'), prio: 6, cap: 2, send: 0.1,
+  make(K, rnd, v) {
+    const fk = vary(v, 3, rnd, 0.08), x = K.noise(K.buf(0.16), rnd, 'white');
+    K.bp(x, { f: 1200 * fk, f2: 3200 * fk, q: 1.2 });
+    K.env(x, [[0, 0.02], [0.04, 1], [0.16, 0.003]]);
+    return K.norm(K.fade(x, { outT: 0.03 }), 1);
+  },
+});
+rezept('messer.treffer', {
+  bus: 'foley', gain: spitze(-15, 'foley'), prio: 6, cap: 2, send: 0.15,
+  make(K, rnd, v) {
+    const fk = vary(v, 3, rnd, 0.08), a = K.buf(0.15);
+    EINSCHLAG.koerper[2](K, rnd, a, fk);
+    K.mix(a, noiseHit(K, rnd, 0.15, { lp: 2000 * fk, tau: 0.04 }), { gain: 0.5 });
+    return K.norm(K.fade(a, { outT: 0.05 }), 1);
+  },
+});
+rezept('messer.wand', {
+  bus: 'foley', gain: spitze(-16, 'foley'), prio: 6, cap: 2, send: 0.2,
+  make(K, rnd, v) { const a = K.buf(0.2); clank(K, rnd, a, 0, [[2100, 40, 1], [3350, 25, 0.6], [5100, 14, 0.3]], 1, vary(v, 3, rnd, 0.06)); return K.norm(K.fade(a, { outT: 0.02 }), 1); },
+});
+rezept('koerper.fall', {
+  bus: 'welt', gain: spitze(-15, 'welt'), prio: 4, cap: 3, reach: 22, send: 0.2,
+  make(K, rnd, v) {
+    const fk = vary(v, 3, rnd, 0.08), a = K.mix(K.buf(0.5), noiseHit(K, rnd, 0.3, { lp: 200 * fk, attack: 0.003, tau: 0.06 }));
+    for (let i = 0; i < 3; i++) clank(K, rnd, a, 0.04 + i * 0.035 + rnd() * 0.02, [[1500 + rnd() * 1500, 6, 1]], 10 ** (-14 / 20));
+    K.mix(a, cloth(K, rnd, 0.35, { f: 800 * fk, q: 0.7, rise: 0.03, fall: 0.3 }), { at: 0.02, gain: 0.25 });
+    return K.norm(K.fade(a, { outT: 0.03 }), 1);
+  },
+});
+// ---------- Explosion in Schichten, nah und fern; Splint der Granate (Schritt 2.7) ----------
+/**
+ * Explosion. nah: Klick 3 ms, Druckwelle (Friedlander, T 12 ms, Drive 4), Körper 70 → 28 Hz über 600 ms, Rauschen Tiefpass 2500 → 90 Hz
+ * (tau 350 ms), Sub 38 Hz über 400 ms, Trümmerregen 0,3–1,4 s mit fallender Dichte. fern: ohne Klick und Trümmer, Tiefpass 600 Hz,
+ * tau 700 ms, Echo nach 250 ms. Generator: gibt zwischen den Schichten ab.
+ */
+function* makeBoom(K, rnd, v, fern) {
+  const fk = vary(v, 3, rnd, 0.06), a = K.buf(fern ? 2.4 : 1.8);
+  const p = K.friedlander(K.buf(0.06), { T: 0.012 * (2 - fk), b: 1.2, gain: 1 });
+  K.drive(p, 4); K.dc(p);
+  K.mix(a, p, { gain: 0.9 });
+  if (!fern) K.click(a, rnd, { dur: 0.003, gain: 0.8 });
+  const body = K.sine(K.buf(0.6), { f: 70 * fk, f2: 28 * fk, dur: 0.6, gain: 1 });
+  K.decay(body, { attack: 0.004, tau: 0.2 }); K.fade(body, { outT: 0.05 }); K.dc(body);
+  K.mix(a, body, { gain: 0.8 });
+  const sub = K.sine(K.buf(0.4), { f: 38 * fk, dur: 0.4, gain: 1 });
+  K.decay(sub, { attack: 0.01, tau: 0.14 }); K.fade(sub, { outT: 0.05 }); K.dc(sub);
+  K.mix(a, sub, { gain: 0.6 });
+  yield;
+  const n = K.noise(K.buf(fern ? 2.3 : 1.7), rnd, 'pink');
+  K.hp(n, { f: 40 });
+  K.lp(n, { f: (fern ? 600 : 2500) * fk, f2: 90 * fk });
+  K.decay(n, { attack: fern ? 0.03 : 0.004, tau: fern ? 0.7 : 0.35 });
+  K.mix(a, K.norm(n, 1), { gain: 0.9 });
+  yield;
+  if (!fern) {
+    grains(K, rnd, a, { n: 70, t0: 0.3, t1: 1.4, f0: 1500, f1: 5000, d0: 0.004, d1: 0.01, g: 0.12, dens: 2.2 });
+    yield;
+  } else {
+    K.lp(a, { f: 600 * fk });
+    echoes(K, a, [[0.25, -7]], 500);
+  }
+  return K.norm(K.fade(a, { outT: 0.1 }), 1);
+}
+rezept('explosion.nah', { bus: 'welt', gain: spitze(-1, 'welt'), prio: 8, cap: 4, reach: 140, send: 0.9, make: (K, rnd, v) => makeBoom(K, rnd, v, false) });
+rezept('explosion.fern', { bus: 'welt', gain: spitze(-1, 'welt'), prio: 8, cap: 4, reach: 140, send: 0.9, make: (K, rnd, v) => makeBoom(K, rnd, v, true) });
+rezept('leer', {
+  n: 2, bus: 'foley', gain: spitze(-22, 'foley'), prio: 6, cap: 2, send: 0.1,
+  make(K, rnd, v) { const a = K.buf(0.06); clank(K, rnd, a, 0, [[3300, 5, 1], [5200, 3, 0.5], [1400, 8, 0.4]], 1, v ? 1.07 : 0.95); return K.norm(K.fade(a, { outT: 0.005 }), 1); },
+});
+rezept('pfeifen', {
+  bus: 'welt', gain: spitze(-20, 'welt'), prio: 4, cap: 3, send: 0.2,
+  make(K, rnd, v) {
+    const x = K.noise(K.buf(0.11), rnd, 'white');
+    K.bp(x, { f: [3600, 2800, 2200][v % 3], f2: 900, q: 3 });
+    K.env(x, [[0, 0.02], [0.02, 1], [0.11, 0.003]]);
+    return K.norm(K.fade(x, { outT: 0.02 }), 1);
+  },
+});
+rezept('granate.splint', {
+  n: 2, bus: 'foley', gain: spitze(-20, 'foley'), prio: 6, cap: 2, send: 0.1,
+  make(K, rnd, v) {
+    const fk = v ? 1.05 : 0.95, a = K.buf(0.3);
+    clank(K, rnd, a, 0, [[2400, 12, 1], [4100, 7, 0.5]], 1, fk);
+    clank(K, rnd, a, 0.06, [[3100, 90, 0.8], [4650, 60, 0.4]], 1, fk);
+    return K.norm(K.fade(a, { outT: 0.08 }), 1);
+  },
+});
+// ---------- Funk-Signale (Schritt 7.3): alle Ereignistöne im selben Charakter ----------
+/**
+ * Funk: Bandpass 500 – 3000 Hz (Hoch- und Tiefpass, je 4. Ordnung), Drive 1,5, nach dem Signal (ab end s) 40 ms Rauschschwanz im selben Band.
+ * Das Feld muss mindestens end + 0,05 s lang sein. Spitze 1.
+ */
+function funk(K, rnd, a, end) {
+  K.hp(a, { f: 500 }); K.hp(a, { f: 500 }); K.lp(a, { f: 3000 }); K.lp(a, { f: 3000 });          // je zweimal: steile Flanken wie ein Funkgerät
+  K.norm(a, 1);
+  K.drive(a, 1.5);
+  const n = K.noise(K.buf(0.045), rnd, 'white');
+  K.hp(n, { f: 500 }); K.hp(n, { f: 500 }); K.lp(n, { f: 3000 }); K.lp(n, { f: 3000 });     // so steil wie das Signal
+  K.env(n, [[0, 0.02], [0.004, 1], [0.04, 0.05], [0.045, 0.001]]);
+  K.mix(a, K.norm(n, 0.35), { at: end });
+  return K.norm(K.fade(a, { outT: 0.004 }), 1);
+}
+/** Gleitender, abklingender Sinus (Resonanz, deren Tonhöhe von f nach f2 gleitet): ab at, Länge dur, Abklingzeit tau (s). */
+function chirp(K, a, { at = 0, f, f2 = f, dur, tau, gain = 1 }) {
+  const i0 = Math.round(at * K.SR), n = Math.min(a.length - i0, Math.round(dur * K.SR));
+  let ph = 0;
+  for (let i = 0; i < n; i++) { const t = i / K.SR; a[i0 + i] += gain * Math.sin(ph) * Math.exp(-t / tau); ph += (2 * Math.PI * f * (f2 / f) ** (t / dur)) / K.SR; }
+  return a;
+}
+/** Oberfläche: tick, ok, back als kurze Klicks mit Resonanz; beep und go als Funkton; fortschritt (Eroberung, je 10 % ein Klick). Spitze an der Summe in dBFS. */
+const FUNK_UI = {
+  tick: [-26, 0.03, (K, rnd, a, s) => { K.click(a, rnd, { dur: 0.0015, gain: 0.6 }); K.modal(a, { modes: [[1500 * s, 6, 1]] }); }],
+  ok: [-24, 0.06, (K, rnd, a, s) => { K.click(a, rnd, { dur: 0.0015, gain: 0.5 }); chirp(K, a, { f: 900 * s, f2: 1400 * s, dur: 0.05, tau: 0.018 }); }],
+  back: [-25, 0.06, (K, rnd, a, s) => { K.click(a, rnd, { dur: 0.0015, gain: 0.5 }); chirp(K, a, { f: 1400 * s, f2: 900 * s, dur: 0.05, tau: 0.018 }); }],
+  beep: [-22, 0.09, (K, rnd, a, s) => K.tone(a, { type: 'square', f: 880 * s, dur: 0.09, gain: 1, attack: 0.002 })],
+  go: [-21, 0.3, (K, rnd, a, s) => K.tone(a, { type: 'square', f: 1320 * s, dur: 0.3, gain: 1, attack: 0.002 })],
+  fortschritt: [-27, 0.03, (K, rnd, a, s) => { K.click(a, rnd, { dur: 0.001, gain: 0.3 }); K.modal(a, { modes: [[1900 * s, 5, 1], [2600 * s, 3, 0.3]] }); }],
+};
+for (const [name, [db, len, fn]] of Object.entries(FUNK_UI)) {
+  rezept(`ui.${name}`, {
+    n: name === 'fortschritt' ? 2 : 3, bus: 'ui', gain: spitze(db, 'ui'), prio: 5, cap: 3,
+    make(K, rnd, v) { const a = K.buf(len + 0.05); fn(K, rnd, a, spread(v, rnd)); return funk(K, rnd, a, len); },
+  });
+}
+/** Kurze Tonfolgen für Ereignisse: [Frequenz, Einsatz in s] – dieselben Folgen wie bisher, im Funk-Charakter. */
+const SIGNALE = {
+  win: [[392, 0], [523, 0.14], [659, 0.28], [784, 0.42], [1046, 0.62]],
+  lose: [[392, 0], [349, 0.2], [311, 0.4], [261, 0.62]],
+  level: [[523, 0], [659, 0.1], [784, 0.2], [1046, 0.32], [1318, 0.46]],
+  streak: [[659, 0], [988, 0.1]],
+  uav: [[1175, 0], [1175, 0.16], [1568, 0.32]],
+  capture: [[523, 0], [784, 0.12]],
+  lost: [[523, 0], [370, 0.14]],
+  medal: [[880, 0], [1175, 0.08]],
+};
+for (const [name, seq] of Object.entries(SIGNALE)) {
+  rezept(`signal.${name}`, {
+    bus: 'ui', gain: spitze(-18, 'ui'), prio: 6, cap: 2,
+    *make(K, rnd, v) {                                // Generator: je Ton ein Rechenschritt (die Dreiecke sind teuer)
+      const s = spread(v, rnd, 0.015), end = seq[seq.length - 1][1] + 0.6, a = K.buf(end + 0.05);
+      for (const [i, [f, at]] of seq.entries()) {
+        K.tone(a, { type: 'triangle', f: f * s, dur: i === seq.length - 1 ? 0.6 : 0.24, gain: 0.4, at, attack: 0.01 });
+        K.tone(a, { f: f * 2 * s, dur: 0.2, gain: 0.2, at, attack: 0.01 });           // die Oktave trägt den Ton durch den Funk (der Grundton liegt teils unter 500 Hz)
+        K.tone(a, { f: f * 3 * s, dur: 0.12, gain: 0.06, at, attack: 0.005 });
+        yield;
+      }
+      return funk(K, rnd, a, end);
+    },
+  });
+}
+
+// ---------- Umgebung je Karte (Schritt 7.1) ----------
+/** Abtastwerte je Rechenstück langer Schleifen: ein Stück dauert wenige Millisekunden, dazwischen gibt der Generator ab. */
+const STUECK = 24000;
+/** Stückweise rechnen: fn(i0, i1) für alle Stücke von höchstens STUECK Abtastwerten, mit yield dazwischen. */
+function* stuecke(n, fn) { for (let i = 0; i < n; i += STUECK) { fn(i, Math.min(n, i + STUECK)); yield; } }
+/**
+ * Biquad nach RBJ mit beliebigem Verlauf der Eckfrequenz fOf(t) (s → Hz) als Zustand: liefert run(a, i0, i1), so lässt sich ein langes Feld
+ * stückweise filtern. Beiwerte alle 16 Abtastwerte neu; qlin linear.
+ */
+function biquadRun(sr, type, fOf, qlin = Math.SQRT1_2) {
+  let x1 = 0, x2 = 0, y1 = 0, y2 = 0, b0 = 0, b1 = 0, b2 = 0, a1 = 0, a2 = 0;
+  return (a, i0, i1) => {
+    for (let i = i0; i < i1; i++) {
+      if ((i & 15) === 0 || i === i0) {
+        const w0 = (2 * Math.PI * Math.min(fOf(i / sr), sr * 0.49)) / sr, cw = Math.cos(w0), al = Math.sin(w0) / (2 * qlin), a0 = 1 + al;
+        if (type === 'lowpass') { b0 = (1 - cw) / 2 / a0; b1 = (1 - cw) / a0; b2 = b0; }
+        else if (type === 'highpass') { b0 = (1 + cw) / 2 / a0; b1 = -(1 + cw) / a0; b2 = b0; }
+        else { b0 = al / a0; b1 = 0; b2 = -al / a0; }
+        a1 = (-2 * cw) / a0; a2 = (1 - al) / a0;
+      }
+      const x = a[i], y = b0 * x + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2;
+      x2 = x1; x1 = x; y2 = y1; y1 = y;
+      a[i] = y;
+    }
+  };
+}
+/** Rauschen als Zustand (dieselben Formeln wie K.noise): liefert run(a, i0, i1), das a[i0 … i1) füllt – für lange Felder in Stücken. */
+function noiseRun(rnd, color = 'white') {
+  let b0 = 0, b1 = 0, b2 = 0, b3 = 0, b4 = 0, b5 = 0, b6 = 0, l = 0;
+  return (a, i0, i1) => {
+    for (let i = i0; i < i1; i++) {
+      const w = rnd() * 2 - 1;
+      if (color === 'pink') {
+        b0 = 0.99886 * b0 + w * 0.0555179; b1 = 0.99332 * b1 + w * 0.0750759; b2 = 0.969 * b2 + w * 0.153852;
+        b3 = 0.8665 * b3 + w * 0.3104856; b4 = 0.55 * b4 + w * 0.5329522; b5 = -0.7616 * b5 - w * 0.016898;
+        a[i] = (b0 + b1 + b2 + b3 + b4 + b5 + b6 + w * 0.5362) * 0.11; b6 = w * 0.115926;
+      } else if (color === 'brown') { l = (l + 0.02 * w) / 1.02; a[i] = l * 3.5; } else a[i] = w;
+    }
+  };
+}
+/** Sägezahn mit PolyBLEP (kaum Faltung, viel billiger als die Fourier-Reihe von K.tone), addiert: f Hz, ab at für dur s, Pegel gain, Phase ph0 (0 … 1). */
+function blepSaw(a, sr, { f, at = 0, dur, gain = 1, ph0 = 0, vib = 0, vibF = 5 }) {
+  const i0 = Math.max(0, Math.round(at * sr)), n = Math.min(a.length - i0, Math.round(dur * sr));
+  let ph = ph0;
+  for (let i = 0; i < n; i++) {
+    const dt = (f * (1 + (vib ? vib * Math.sin((2 * Math.PI * vibF * i) / sr) : 0))) / sr;
+    let v = 2 * ph - 1;
+    if (ph < dt) { const t = ph / dt; v -= t + t - t * t - 1; } else if (ph > 1 - dt) { const t = (ph - 1) / dt; v -= t * t + t + t + 1; }
+    a[i0 + i] += gain * v;
+    ph += dt;
+    if (ph >= 1) ph -= 1;
+  }
+  return a;
+}
+/**
+ * Lange Schleife nahtlos machen: chs (Kanäle) sind mindestens len + xf + 0,2 s lang. Die Naht liegt bei L, gesucht im Fenster ±0,2 s um len
+ * (von len nach außen): der Sprung vom letzten zum ersten Abtastwert ist klein (unter 1,2 % der Spitze), und die 100 ms vor und nach L sind
+ * gleich laut (höchstens 0,8 dB). Die xf s nach L werden mit gleicher Leistung (Sinus/Kosinus) in den Anfang geblendet – das Ende läuft so
+ * ohne Bruch in den Anfang weiter. Zuletzt wird der Gleichanteil abgezogen (eine Konstante: die Naht bleibt heil). Generator (gibt nach
+ * jedem Kanal ab); liefert die Kanäle der Länge L. period: die Naht liegt nur auf Vielfachen davon (Abtastwerte) – für tonale Schleifen, deren
+ * Grundton dort genau in Phase ist.
+ */
+function* loopify(chs, sr, len, xf = 0.5, period = 1) {
+  const n0 = Math.round(len * sr), X = Math.round(xf * sr), w = Math.floor(Math.round(0.2 * sr) / period), W = Math.round(0.1 * sr), pre = [];
+  // Leistungssummen nur um die gesuchte Naht (lo … hi), nicht über das ganze Feld: spart zwei große Felder (und damit Pausen der Speicherbereinigung)
+  const lo = n0 - period * w - W, hi = n0 + period * w + W;
+  let peak = 0;
+  for (const c of chs) {
+    for (let i = 0; i < c.length; i++) { const v = c[i]; if (v > peak) peak = v; else if (-v > peak) peak = -v; }
+    const p = new Float64Array(hi - lo + 1);
+    for (let i = lo; i < hi; i++) p[i - lo + 1] = p[i - lo] + c[i] * c[i];
+    pre.push(p);
+    yield;
+  }
+  const energy = (a, b) => pre.reduce((s, p) => s + p[b - lo] - p[a - lo], 0);
+  let best = n0, bestS = Infinity;
+  for (let k = 0; k <= 2 * w; k++) {
+    const L = n0 + period * (k & 1 ? (k + 1) / 2 : -k / 2);            // tonale Schleifen: die Naht nur auf ganzen Perioden
+    let step = 0;
+    for (const c of chs) step = Math.max(step, Math.abs(c[L] - c[L - 1]) / (peak || 1));
+    const rd = Math.abs(10 * Math.log10((energy(L - W, L) + 1e-12) / (energy(L, L + W) + 1e-12)));
+    const s = step / 0.012 + rd / 0.8;
+    if (s < bestS) { bestS = s; best = L; }
+    if (step < 0.012 && rd < 0.8) break;
+  }
+  const out = [];
+  for (const c of chs) {
+    yield;
+    const o = c.slice(0, best);
+    for (let i = 0; i < X; i++) { const k = (Math.PI / 2) * (i / X); o[i] = c[i] * Math.sin(k) + c[best + i] * Math.cos(k); }
+    let s = 0;
+    for (let i = 0; i < o.length; i++) s += o[i];
+    s /= o.length;
+    for (let i = 0; i < o.length; i++) o[i] -= s;
+    out.push(o);
+  }
+  return out;
+}
+/** Länge der Umgebungsschleifen (s) und Überblendung an der Naht (s). */
+const AMB_LEN = 12, AMB_XF = 0.5;
+/** Weicher Zufallsverlauf −1 … 1 (Summe aus drei Rauschwerten noise1), rate in Hz. */
+const drift = (rnd, rate) => { const s = (rnd() * 1e9) | 0; return (t) => (noise1(t * rate, s) * 0.6 + noise1(t * rate * 2.3, s + 1) * 0.3 + noise1(t * rate * 5.1, s + 2) * 0.1); };
+/**
+ * Schleife: je Kanal (nch) ein Feld von len + xf + 0,25 s, layer(K, rnd, a, c, sh) füllt und formt es (Generator, gibt zwischen Stücken ab;
+ * sh teilen sich die Kanäle), danach nahtlos gemacht (Naht auf Vielfachen von period). Spitze 1.
+ */
+function* ambLoop(K, rnd, layer, { len = AMB_LEN, xf = AMB_XF, nch = 2, period = 1 } = {}) {
+  const ch = [], sh = {};
+  for (let c = 0; c < nch; c++) { const a = K.buf(len + xf + 0.25); yield* layer(K, rnd, a, c, sh); ch.push(a); }
+  const out = yield* loopify(ch, K.SR, len, xf, period);
+  yield;
+  let p = 0;
+  for (const c of out) p = Math.max(p, K.peak(c));
+  for (const c of out) for (let i = 0; i < c.length; i++) c[i] /= p || 1;
+  return nch === 1 ? out[0] : { ch: out };
+}
+/** Hüllkurven-Stück: multipliziert a[i0 … i1) mit fn(t); fn wird alle 16 Abtastwerte ausgewertet, dazwischen linear. */
+const shapeRun = (sr, fn) => (a, i0, i1) => {
+  for (let i = i0; i < i1; i += 16) {
+    const v0 = fn(i / sr), v1 = fn((i + 16) / sr), m = Math.min(16, i1 - i);
+    for (let j = 0; j < m; j++) a[i + j] *= v0 + ((v1 - v0) * j) / 16;
+  }
+};
+const AMB = {
+  /** Hafenbrummen: braunes Rauschen, Tiefpass 140 Hz (zweimal, steiler), beide Seiten zu 60 % gemeinsam. */
+  'frachthof.brummen': function* (K, rnd, a, c, sh) {
+    if (c === 0) { const nc = noiseRun(rnd, 'brown'); sh.common = new Float32Array(a.length); yield* stuecke(a.length, (i0, i1) => nc(sh.common, i0, i1)); }
+    const nz = noiseRun(rnd, 'brown');
+    yield* stuecke(a.length, (i0, i1) => nz(a, i0, i1));
+    const com = sh.common, lp1 = biquadRun(K.SR, 'lowpass', () => 140), lp2 = biquadRun(K.SR, 'lowpass', () => 140), hp = biquadRun(K.SR, 'highpass', () => 28);
+    const sw = drift(rnd, 0.09), amp = shapeRun(K.SR, (t) => 0.85 + 0.15 * sw(t));
+    yield* stuecke(a.length, (i0, i1) => {
+      for (let i = i0; i < i1; i++) a[i] = 0.6 * com[i] + 0.4 * a[i];
+      lp1(a, i0, i1); lp2(a, i0, i1); hp(a, i0, i1); amp(a, i0, i1);
+    });
+  },
+  /** Wind: rosa Rauschen, Bandpass 300 – 900 Hz; Stärke schwankt mit 0,07 Hz, Tonhöhe mit 0,11 Hz (links und rechts versetzt). */
+  'frachthof.wind': function* (K, rnd, a, c) {
+    const nz = noiseRun(rnd, 'pink');
+    yield* stuecke(a.length, (i0, i1) => nz(a, i0, i1));
+    const p1 = rnd() * 2 * Math.PI + c * 0.9, p2 = rnd() * 2 * Math.PI + c * 1.3, fl = drift(rnd, 0.6);
+    const fOf = (t) => 520 * 1.732 ** Math.sin(2 * Math.PI * 0.11 * t + p2);
+    const bp = biquadRun(K.SR, 'bandpass', fOf, 1.1), bp2 = biquadRun(K.SR, 'bandpass', fOf, 0.8);
+    const amp = shapeRun(K.SR, (t) => (0.55 + 0.45 * Math.sin(2 * Math.PI * 0.07 * t + p1)) * (0.85 + 0.15 * fl(t)));
+    yield* stuecke(a.length, (i0, i1) => { bp(a, i0, i1); bp2(a, i0, i1); amp(a, i0, i1); });
+  },
+  /** Wüstenwind: rosa Rauschen, Bandpass 400 – 1500 Hz, böig (Böen heben Stärke und Tonhöhe). */
+  'oase.wind': function* (K, rnd, a, c) {
+    const nz = noiseRun(rnd, 'pink');
+    yield* stuecke(a.length, (i0, i1) => nz(a, i0, i1));
+    const gust = drift(rnd, 0.18), g = (t) => Math.max(0, Math.min(1, 0.45 + 0.75 * gust(t)));
+    const fOf = (t) => 400 * (1500 / 400) ** (0.15 + 0.7 * g(t));
+    const bp = biquadRun(K.SR, 'bandpass', fOf, 1), bp2 = biquadRun(K.SR, 'bandpass', fOf, 0.7);
+    const amp = shapeRun(K.SR, (t) => 0.2 + 0.8 * g(t) ** 1.6);
+    yield* stuecke(a.length, (i0, i1) => { bp(a, i0, i1); bp2(a, i0, i1); amp(a, i0, i1); });
+  },
+  /** Zikaden: Rauschen, Bandpass 5,5 kHz (q 6), mit 38 Hz in der Lautstärke gepulst, in Wellen von 3 – 6 s (je Seite eigene Wellen). */
+  'oase.zikaden': function* (K, rnd, a, c) {
+    const nz = noiseRun(rnd, 'white');
+    yield* stuecke(a.length, (i0, i1) => nz(a, i0, i1));
+    const waves = [];
+    for (let t = rnd() * 1.5; t < a.length / K.SR; ) { const d = 3 + 3 * rnd(); waves.push([t, d, 0.5 + 0.5 * rnd()]); t += d + 0.6 + 2.4 * rnd(); }
+    const fk = 1 + (c ? 0.035 : -0.02), bp = biquadRun(K.SR, 'bandpass', () => 5500 * fk, 6), bp2 = biquadRun(K.SR, 'bandpass', () => 5500 * fk, 6);
+    const pr = 38 * (1 + (c ? 0.04 : 0)), ph = rnd() * 2 * Math.PI;
+    const wave = (t) => { let v = 0.04; for (const [t0, d, g] of waves) if (t > t0 && t < t0 + d) { const x = (t - t0) / d; v = Math.max(v, g * Math.min(1, x / 0.25, (1 - x) / 0.3)); } return v; };
+    const amp = shapeRun(K.SR, (t) => wave(t) * (0.5 + 0.5 * Math.cos(2 * Math.PI * pr * t + ph)) ** 3);
+    yield* stuecke(a.length, (i0, i1) => { bp(a, i0, i1); bp2(a, i0, i1); amp(a, i0, i1); });
+  },
+};
+/** Umgebung je Karte (Name der Welt → Schleifen; die zweite startet um 5 s versetzt) und ihre Einzelklänge (alle 6 – 20 s, mit eigenem Ort). */
+const AMB_KARTE = {
+  Frachthof: { loops: ['amb.frachthof.brummen', 'amb.frachthof.wind'], einzel: ['amb.kran', 'amb.moewe', 'amb.horn'] },
+  Oase: { loops: ['amb.oase.wind', 'amb.oase.zikaden'], einzel: ['amb.palme', 'amb.markise'] },
+};
+for (const [name, db] of [['frachthof.brummen', -27], ['frachthof.wind', -25], ['oase.wind', -24], ['oase.zikaden', -31]]) {
+  rezept(`amb.${name}`, { n: 1, bus: 'amb', gain: spitze(db, 'amb'), prio: 9, cap: 1, loop: true, make: (K, rnd) => ambLoop(K, rnd, AMB[name]) });
+}
+/** Einzelklänge der Umgebung: Kranschlag, Möwe, Schiffshorn (Frachthof); Palmenrascheln, Markise (Oase). */
+rezept('amb.kran', {
+  later: true, bus: 'amb', gain: spitze(-22, 'amb'), prio: 1, cap: 1, reach: 90, send: 0.6,
+  make(K, rnd, v) {
+    const fk = vary(v, 3, rnd, 0.06), a = K.buf(2.6);
+    K.click(a, rnd, { dur: 0.003, gain: 0.5 });
+    K.modal(a, { at: 0.001, modes: modesOf([[180, 400, 1], [410, 320, 0.7], [960, 220, 0.45], [1630, 120, 0.2]], 1, fk) });
+    K.mix(a, noiseHit(K, rnd, 0.2, { bp: 900 * fk, q: 1, tau: 0.03 }), { gain: 0.3 });
+    return K.norm(K.fade(a, { outT: 0.5 }), 1);
+  },
+});
+rezept('amb.moewe', {
+  later: true, bus: 'amb', gain: spitze(-25, 'amb'), prio: 1, cap: 1, reach: 90, send: 0.3,
+  make(K, rnd, v) {
+    const fk = vary(v, 3, rnd, 0.08), a = K.buf(0.62);
+    for (const [at, g] of [[0.02, 1], [0.26 + 0.04 * rnd(), 0.8]]) {
+      const x = K.buf(0.2), n = x.length;
+      let ph = 0;
+      for (let i = 0; i < n; i++) {
+        const t = i / K.SR, f = 1800 * fk * (1200 / 1800) ** (t / 0.18) * (1 + 0.012 * Math.sin(2 * Math.PI * 24 * t));
+        x[i] = Math.sin(ph) + 0.45 * Math.sin(2 * ph) + 0.2 * Math.sin(3 * ph + 0.4);
+        ph += (2 * Math.PI * f) / K.SR;
+      }
+      K.env(x, [[0, 0.02], [0.025, 1], [0.12, 0.7], [0.18, 0.01], [0.2, 0.001]]);
+      K.mix(a, x, { at, gain: g });
+    }
+    K.mix(a, K.bp(K.env(K.noise(K.buf(0.62), rnd, 'white'), [[0, 0.001], [0.03, 0.06], [0.5, 0.001]]), { f: 2400, q: 0.8 }), { gain: 1 });
+    return K.norm(K.fade(a, { outT: 0.05 }), 1);
+  },
+});
+rezept('amb.horn', {
+  n: 2, later: true, bus: 'amb', gain: spitze(-20, 'amb'), prio: 1, cap: 1, reach: 400, send: 0.8,
+  *make(K, rnd, v) {                                  // Generator: je Schicht ein Rechenschritt (am Stück bis zu 7 ms)
+    const fk = v ? 1.04 : 0.97, a = K.buf(2.6);
+    blepSaw(a, K.SR, { f: 110 * fk, dur: 2.2, gain: 0.5, ph0: rnd() });
+    yield;
+    blepSaw(a, K.SR, { f: 165 * fk, dur: 2.2, gain: 0.4, ph0: rnd() });
+    yield;
+    K.lp(a, { f: 500 }); yield; K.lp(a, { f: 500 });
+    K.env(a, [[0, 0.001], [0.18, 1], [1.8, 0.85], [2.3, 0.001]]);
+    return K.norm(K.fade(a, { outT: 0.3 }), 1);
+  },
+});
+rezept('amb.palme', {
+  later: true, bus: 'amb', gain: spitze(-27, 'amb'), prio: 1, cap: 1, reach: 60, send: 0.2,
+  make(K, rnd, v) {
+    const a = K.buf(1.5), n = 4 + v + ((rnd() * 3) | 0);
+    for (let i = 0; i < n; i++) {
+      const d = 0.04 + 0.08 * rnd(), x = K.noise(K.buf(d), rnd, 'white');
+      K.hp(x, { f: 3000 + 2500 * rnd() }); K.fade(x, { inT: d * 0.3, outT: d * 0.6 });
+      K.mix(a, x, { at: 0.02 + 1.2 * (i / n) + 0.1 * rnd(), gain: 0.4 + 0.6 * rnd() });
+    }
+    return K.norm(K.fade(a, { outT: 0.1 }), 1);
+  },
+});
+rezept('amb.markise', {
+  later: true, bus: 'amb', gain: spitze(-24, 'amb'), prio: 1, cap: 1, reach: 60, send: 0.3,
+  make(K, rnd, v) {
+    const fk = vary(v, 3, rnd, 0.1), a = K.buf(1);
+    for (let i = 0, t = 0.01; i < 2 + (v % 2); i++, t += 0.18 + 0.15 * rnd()) {
+      K.mix(a, noiseHit(K, rnd, 0.25, { lp: 300 * fk, attack: 0.004, tau: 0.045 }), { at: t, gain: 1 - 0.3 * i });
+      const b = K.sine(K.buf(0.12), { f: 75 * fk, f2: 55 * fk, dur: 0.12, gain: 1 });
+      K.decay(b, { attack: 0.003, tau: 0.035 }); K.fade(b, { outT: 0.02 }); K.dc(b);
+      K.mix(a, b, { at: t, gain: 0.5 - 0.15 * i });
+    }
+    return K.norm(K.fade(a, { outT: 0.1 }), 1);
+  },
+});
+
+// ---------- Ortsfeste Quellen (Schritt 7.2): Schleifen von 4 s, mono, mit dem Entfernungsmodell ----------
+const QUELLE = {
+  /** Flackernde Lampe: Sägezahn 100 Hz und Obertöne bei 200 und 300 Hz, leicht schwankend, dazu ein seltenes Knistern. */
+  lampe: function* (K, rnd, a) {
+    blepSaw(a, K.SR, { f: 100, dur: a.length / K.SR, gain: 0.5 });
+    yield;
+    K.sine(a, { f: 200, gain: 0.35 }); K.sine(a, { f: 300, gain: 0.12, phase: 1 });
+    yield;
+    K.hp(a, { f: 70 }); yield; K.lp(a, { f: 2400 });
+    const fl = drift(rnd, 3), amp = shapeRun(K.SR, (t) => 0.8 + 0.2 * fl(t));
+    yield* stuecke(a.length, (i0, i1) => amp(a, i0, i1));
+    for (let i = 0; i < 9; i++) K.click(a, rnd, { at: rnd() * (a.length / K.SR - 0.01), dur: 0.002 + 0.002 * rnd(), gain: 0.25 + 0.3 * rnd() });
+  },
+  /** Fahne: rosa Rauschen, Bandpass 400 – 2000 Hz, in unregelmäßigen Schlägen von 5 – 9 je Sekunde, ab und zu ein Knall des Tuchs. */
+  fahne: function* (K, rnd, a) {
+    const nz = noiseRun(rnd, 'pink'), flaps = [];
+    for (let t = 0; t < a.length / K.SR; t += 1 / (5 + 4 * rnd())) flaps.push([t, 0.04 + 0.05 * rnd(), 0.35 + 0.65 * rnd()]);
+    const gust = drift(rnd, 0.4), env = (t) => { let v = 0.12; for (const [t0, d, g] of flaps) { const x = (t - t0) / d; if (x > -1 && x < 1) v += g * (0.5 + 0.5 * Math.cos(Math.PI * x)); } return v * (0.7 + 0.3 * gust(t)); };
+    const bp = biquadRun(K.SR, 'bandpass', (t) => 900 * 1.6 ** gust(t), 0.9), amp = shapeRun(K.SR, env);
+    yield* stuecke(a.length, (i0, i1) => { nz(a, i0, i1); bp(a, i0, i1); amp(a, i0, i1); });
+    for (let i = 0; i < 3; i++) K.mix(a, noiseHit(K, rnd, 0.05, { bp: 1500 + 800 * rnd(), q: 1.2, tau: 0.008 }), { at: rnd() * (a.length / K.SR - 0.1), gain: 0.5 });
+  },
+  /** Brunnen: viele kurze Sinustöne 1 – 4 kHz (Tropfen, Tonhöhe steigt), dazu leises Plätschern (Bandpass 700 Hz). */
+  brunnen: function* (K, rnd, a) {
+    const nz = noiseRun(rnd, 'white'), bp = biquadRun(K.SR, 'bandpass', () => 700, 0.7), lp = biquadRun(K.SR, 'lowpass', () => 3000), sw = drift(rnd, 1.5);
+    const amp = shapeRun(K.SR, (t) => 0.22 * (0.75 + 0.25 * sw(t)));
+    yield* stuecke(a.length, (i0, i1) => { nz(a, i0, i1); bp(a, i0, i1); lp(a, i0, i1); amp(a, i0, i1); });
+    const n = Math.round((a.length / K.SR) * 70), sr = K.SR;
+    for (let k = 0; k < n; k++) {
+      const f0 = 1000 * 4 ** rnd(), dur = 0.008 + 0.017 * rnd(), tau = 0.004 + 0.008 * rnd(), g = 0.15 + 0.5 * rnd() ** 2, i0 = Math.floor(rnd() * (a.length - dur * sr - 1));
+      let ph = 0;
+      for (let i = 0, m = Math.round(dur * sr); i < m; i++) { const t = i / sr; a[i0 + i] += g * Math.sin(ph) * Math.exp(-t / tau) * Math.min(1, t / 0.0008); ph += (2 * Math.PI * f0 * (1 + 0.4 * (t / dur))) / sr; }
+      if (k % 70 === 69) yield;
+    }
+  },
+};
+for (const [name, db, reach, period] of [['lampe', -28, 8, 480], ['fahne', -24, 10, 1], ['brunnen', -21, 14, 1]]) {
+  rezept(`quelle.${name}`, { n: 1, bus: 'amb', gain: spitze(db, 'amb'), prio: 9, cap: 3, reach, send: 0.2, loop: true, make: (K, rnd) => ambLoop(K, rnd, QUELLE[name], { len: 4, xf: 0.4, nch: 1, period }) });
+}
+/** Flackernde Lampe je Karte, solange der Lampen-Eintrag noch kein Kennzeichen „flackert“ (achter Wert, Phase 4) trägt: [x, z]. */
+const FLACKER = { Frachthof: [34, 0], Oase: [17, -22] };
+/** Brunnen der Oase (Markt): [x, y, z] */
+const BRUNNEN = { Oase: [-5.5, 0.9, 0] };
+
+// ---------- Musik und Motive (Schritt 7.4): d-Moll, 84 Schläge je Minute; im Einsatz keine Dauermusik ----------
+/** Tonhöhe einer MIDI-Note in Hz (A4 = 69 = 440 Hz). */
+const midi = (m) => 440 * 2 ** ((m - 69) / 12);
+/** Sägezahn (PolyBLEP) als Zustand: run(a, i0, i1, gain) addiert in a[i0 … i1) – für lange Felder in Stücken. f in Hz, ph0 Startphase 0 … 1. */
+function sawRun(sr, f, ph0 = 0) {
+  const dt = f / sr;
+  let ph = ph0;
+  return (a, i0, i1, gain = 1) => {
+    for (let i = i0; i < i1; i++) {
+      let v = 2 * ph - 1;
+      if (ph < dt) { const t = ph / dt; v -= t + t - t * t - 1; } else if (ph > 1 - dt) { const t = (ph - 1) / dt; v -= t * t + t + t + 1; }
+      a[i] += gain * v;
+      ph += dt;
+      if (ph >= 1) ph -= 1;
+    }
+  };
+}
+/** Addiert src ab at (s) in a; was über das Ende hinausreicht, beginnt vorn wieder (Schleife). */
+function addWrap(a, src, at, gain = 1, sr = KSR) {
+  const n = a.length, i0 = Math.round(at * sr);
+  for (let i = 0; i < src.length; i++) a[(i0 + i) % n] += src[i] * gain;
+  return a;
+}
+/** Filter über ein periodisches Feld ohne Einschwingen: erst über das Ende (als Vorlauf), dann über das ganze Feld. */
+function periodicRun(a, run, pre) {
+  const w = a.slice(a.length - pre);
+  run(w, 0, w.length);
+  return run;
+}
+/** Tiefe Trommel: Sinus f → f2 mit Klick, Abklingzeit tau (s). Spitze 1. */
+function drum(K, rnd, { f = 70, f2 = 42, len = 0.6, tau = 0.16, click = 0.3 } = {}) {
+  const a = K.sine(K.buf(len), { f, f2, dur: len * 0.6, gain: 1 });
+  K.decay(a, { attack: 0.002, tau });
+  K.click(a, rnd, { dur: 0.004, gain: click });
+  K.mix(a, noiseHit(K, rnd, 0.08, { lp: 1200, tau: 0.02 }), { gain: click * 0.5 });
+  K.fade(a, { outT: 0.05 }); K.dc(a);
+  return K.norm(a, 1);
+}
+/** Gezupfter Ton mit weichem Tiefpass (Melodie der Motive). */
+function plucked(K, rnd, { f, len = 1, tau = 0.5, bright = 0.5, lp = 3000 }) {
+  const a = K.pluck(K.buf(len), rnd, { f, tau, bright, gain: 1 });
+  K.lp(a, { f: lp });
+  K.fade(a, { inT: 0.002, outT: Math.min(0.2, len * 0.3) });
+  return K.norm(a, 1);
+}
+const BPM = 84;
+/**
+ * Menü-Musik: 8 Takte als Schleife. Fläche aus zwei leicht verstimmten Sägezähnen (Tiefpass 600 Hz), Akkord D2–A2–F3–C4–E4; Puls: Sinus 55 Hz
+ * auf jedem Schlag (−12 dB); Sechzehntel-Ticken (Rauschen über 7 kHz, −24 dB); Bass D1–D1–F1–C1 je Takt. Alle Frequenzen sind auf ganze
+ * Schwingungen je Schleife gerundet (höchstens 0,02 Hz daneben) – die Fläche ist damit genau periodisch, Ausklänge laufen vorn wieder ein.
+ * Zuletzt wird das Feld so gedreht, dass die Naht zwischen zwei Sechzehnteln liegt (gleich laut davor und danach). Generator.
+ */
+function* makeMenue(K, rnd) {
+  const sr = K.SR, beat = 60 / BPM, N = Math.round(32 * beat * sr), T = N / sr, q = (f) => Math.max(1, Math.round(f * T)) / T;
+  const ch = [new Float32Array(N), new Float32Array(N)];
+  // Fläche: je Note ein Sägezahn je Seite, ±6 Cent verstimmt, sanft im Zweitakt schwellend
+  const pad = [38, 45, 53, 60, 64].map(midi), pg = [0.32, 0.26, 0.22, 0.18, 0.14];
+  for (let c = 0; c < 2; c++) {
+    const runs = pad.map((f, i) => [sawRun(sr, q(f * 2 ** ((c ? 6 : -6) / 1200)), rnd()), pg[i]]);
+    yield* stuecke(N, (i0, i1) => { for (const [run, g] of runs) run(ch[c], i0, i1, g); });
+    const lp1 = periodicRun(ch[c], biquadRun(sr, 'lowpass', () => 600), sr), lp2 = periodicRun(ch[c], biquadRun(sr, 'lowpass', () => 600), sr);
+    const sw = shapeRun(sr, (t) => 0.82 + 0.18 * Math.sin((2 * Math.PI * t) / (8 * beat) + c * 0.6));
+    yield* stuecke(N, (i0, i1) => { lp1(ch[c], i0, i1); lp2(ch[c], i0, i1); sw(ch[c], i0, i1); });
+  }
+  let pk = 0;
+  for (const c of ch) pk = Math.max(pk, K.peak(c));
+  yield;
+  const k0 = 0.5 / pk;
+  for (const c of ch) yield* stuecke(N, (i0, i1) => { for (let i = i0; i < i1; i++) c[i] *= k0; });
+  // Bass je Takt: D1 D1 F1 C1 (zweimal), Sinus mit etwas Oberton, legato
+  const bass = [26, 26, 29, 24].map(midi);
+  for (let bar = 0; bar < 8; bar++) {
+    const f = bass[bar % 4], len = 4 * beat + 0.25, x = K.buf(len);
+    K.sine(x, { f, gain: 1 }); K.sine(x, { f: 2 * f, gain: 0.35, phase: 0.5 }); K.sine(x, { f: 3 * f, gain: 0.12 });
+    yield;
+    K.env(x, [[0, 0.001], [0.03, 1], [4 * beat - 0.1, 0.75], [len, 0.001]]);
+    for (const c of ch) addWrap(c, x, bar * 4 * beat, 0.42);
+    yield;
+  }
+  yield;
+  // Puls: Sinus 55 Hz auf jedem Schlag, −12 dB gegen die Fläche
+  const pulse = K.sine(K.buf(0.5), { f: 55, gain: 1 });
+  K.decay(pulse, { attack: 0.004, tau: 0.11 }); K.fade(pulse, { outT: 0.05 }); K.dc(pulse);
+  for (let b = 0; b < 32; b++) for (const c of ch) addWrap(c, pulse, b * beat, 0.5 * 10 ** (-12 / 20) * (b % 4 ? 0.8 : 1));
+  yield;
+  // Sechzehntel-Ticken: Rauschen über 7 kHz, −24 dB, abwechselnd etwas links und rechts
+  for (let k = 0; k < 128; k++) {
+    const x = noiseHit(K, rnd, 0.02, { hp: 7000, attack: 0.0005, tau: 0.004 });
+    K.fade(x, { outT: 0.006 });
+    const g = 0.5 * 10 ** (-24 / 20) * (k % 4 === 2 ? 1 : 0.6);
+    addWrap(ch[0], x, (k * beat) / 4, g * (k % 2 ? 0.7 : 1));
+    addWrap(ch[1], x, (k * beat) / 4, g * (k % 2 ? 1 : 0.7));
+    if (k % 32 === 31) yield;
+  }
+  // Naht zwischen die Sechzehntel 3 und 4 des letzten Schlags legen (je 89 ms Abstand): Feld drehen
+  const r = Math.round((31 * beat + (2.5 * beat) / 4) * sr);
+  const out = [];
+  for (const c of ch) { const o = new Float32Array(N); o.set(c.subarray(r)); o.set(c.subarray(0, r), N - r); out.push(o); yield; }
+  pk = 0;
+  for (const c of out) pk = Math.max(pk, K.peak(c));
+  yield;
+  const k1 = 1 / pk;
+  for (const c of out) yield* stuecke(N, (i0, i1) => { for (let i = i0; i < i1; i++) c[i] *= k1; });
+  return { ch: out };
+}
+rezept('musik.menue', { n: 1, bus: 'musik', gain: spitze(-21, 'musik'), prio: 9, cap: 1, loop: true, later: true, make: (K, rnd) => makeMenue(K, rnd) });
+/** Motiv „Start“: steigende Quinte D4 → A4 und ein Schlag, 1,2 s. */
+rezept('musik.start', {
+  n: 2, bus: 'musik', gain: spitze(-16, 'musik'), prio: 8, cap: 1, later: true,
+  make(K, rnd, v) {
+    const fk = v ? 1 : 1.003, a = K.buf(1.2);
+    K.mix(a, plucked(K, rnd, { f: midi(62) * fk, len: 0.5, tau: 0.4, bright: 0.6, lp: 2500 }), { gain: 0.6 });
+    K.mix(a, plucked(K, rnd, { f: midi(69) * fk, len: 0.85, tau: 0.7, bright: 0.7, lp: 3000 }), { at: 0.3, gain: 0.8 });
+    const pad = K.buf(0.9);
+    blepSaw(pad, K.SR, { f: midi(57) * fk, dur: 0.9, gain: 0.3 }); blepSaw(pad, K.SR, { f: midi(62) * fk * 1.004, dur: 0.9, gain: 0.3 });
+    K.lp(pad, { f: 900 }); K.env(pad, [[0, 0.001], [0.05, 1], [0.6, 0.6], [0.9, 0.001]]);
+    K.mix(a, pad, { at: 0.3, gain: 0.5 });
+    K.mix(a, drum(K, rnd, { f: 80, f2: 40, len: 0.8, tau: 0.2, click: 0.4 }), { at: 0.3, gain: 0.9 });
+    return K.norm(K.fade(a, { outT: 0.15 }), 1);
+  },
+});
+/** Motiv „Spannung“: 4 Takte bei 100 Schlägen je Minute – tiefe Trommel auf jedem Schlag, darüber ein Anstieg (Fläche öffnet sich, Rauschen steigt). */
+rezept('musik.spannung', {
+  n: 1, bus: 'musik', gain: spitze(-17, 'musik'), prio: 8, cap: 1, later: true,
+  *make(K, rnd) {
+    const sr = K.SR, beat = 0.6, len = 16 * beat + 0.8, a = K.buf(len), n = a.length;
+    const runs = [38, 45, 50, 53].map((m, i) => [sawRun(sr, midi(m) * (1 + (i % 2 ? 0.003 : -0.003)), rnd()), 0.25]);
+    yield* stuecke(n, (i0, i1) => { for (const [run, g] of runs) run(a, i0, i1, g); });
+    const lp = biquadRun(sr, 'lowpass', (t) => 250 * (2200 / 250) ** Math.min(1, t / (16 * beat)), 1.2);
+    const env = shapeRun(sr, (t) => (t < 16 * beat ? 0.25 + 0.75 * (t / (16 * beat)) ** 1.5 : Math.max(0, 1 - (t - 16 * beat) / 0.6)));
+    yield* stuecke(n, (i0, i1) => { lp(a, i0, i1); env(a, i0, i1); });
+    K.norm(a, 0.45);
+    yield;
+    const riser = K.noise(K.buf(16 * beat), rnd, 'pink');
+    yield;
+    K.bp(riser, { f: 300, f2: 3500, q: 1.5 });
+    yield;
+    const rEnv = shapeRun(sr, (t) => (t < 16 * beat - 0.3 ? 0.01 * 100 ** (t / (16 * beat - 0.3)) : Math.max(0.001, 1 - (t - 16 * beat + 0.3) / 0.3)));
+    yield* stuecke(riser.length, (i0, i1) => rEnv(riser, i0, i1));
+    K.mix(a, K.norm(riser, 0.25));
+    yield;
+    const dr = drum(K, rnd, { f: 65, f2: 40, len: 0.55, tau: 0.15, click: 0.35 });
+    for (let b = 0; b < 16; b++) K.mix(a, dr, { at: b * beat, gain: (b % 4 ? 0.55 : 0.85) * (0.7 + 0.3 * (b / 15)) });
+    K.mix(a, drum(K, rnd, { f: 90, f2: 35, len: 0.8, tau: 0.25, click: 0.5 }), { at: 16 * beat, gain: 1 });
+    return K.norm(K.fade(a, { outT: 0.2 }), 1);
+  },
+});
+/** Motiv „Sieg“: D-Dur aufwärts (D4 F♯4 A4 D5), dann der Akkord. */
+rezept('musik.sieg', {
+  n: 1, bus: 'musik', gain: spitze(-15, 'musik'), prio: 8, cap: 1, later: true,
+  *make(K, rnd) {
+    const a = K.buf(2.8), notes = [62, 66, 69, 74].map(midi);
+    notes.forEach((f, i) => K.mix(a, plucked(K, rnd, { f, len: 2.4 - i * 0.15, tau: 0.9, bright: 0.65, lp: 3500 }), { at: i * 0.15, gain: 0.55 }));
+    yield;
+    const pad = K.buf(2.2);
+    for (const [i, f] of notes.entries()) { blepSaw(pad, K.SR, { f: f * (1 + (i % 2 ? 0.003 : -0.003)), dur: 2.2, gain: 0.22, ph0: rnd() }); if (i === 1) yield; }
+    yield;
+    K.lp(pad, { f: 1400 }); K.env(pad, [[0, 0.001], [0.15, 1], [1.4, 0.7], [2.2, 0.001]]);
+    K.mix(a, pad, { at: 0.45, gain: 0.6 });
+    K.mix(a, drum(K, rnd, { f: 85, f2: 45, len: 0.7, tau: 0.2, click: 0.4 }), { at: 0.45, gain: 0.8 });
+    return K.norm(K.fade(a, { outT: 0.3 }), 1);
+  },
+});
+/** Motiv „Niederlage“: D – C – B – A abwärts (D3 C3 B♭2 A2), dunkel über Dm, endet offen auf A. */
+rezept('musik.niederlage', {
+  n: 1, bus: 'musik', gain: spitze(-16, 'musik'), prio: 8, cap: 1, later: true,
+  *make(K, rnd) {
+    const a = K.buf(3.4), notes = [50, 48, 46, 45].map(midi);
+    notes.forEach((f, i) => K.mix(a, plucked(K, rnd, { f, len: i === 3 ? 1.9 : 0.8, tau: i === 3 ? 1.2 : 0.6, bright: 0.35, lp: 900 }), { at: i * 0.45, gain: 0.7 }));
+    yield;
+    const pad = K.buf(3.2);
+    for (const [i, m] of [38, 45, 53].entries()) { blepSaw(pad, K.SR, { f: midi(m) * (1 + (i % 2 ? 0.004 : -0.004)), dur: 3.2, gain: 0.3, ph0: rnd() }); yield; }
+    K.lp(pad, { f: 500 }); K.env(pad, [[0, 0.001], [0.4, 1], [2.4, 0.6], [3.2, 0.001]]);
+    yield;
+    K.mix(a, pad, { gain: 0.45 });
+    K.mix(a, drum(K, rnd, { f: 60, f2: 35, len: 0.9, tau: 0.3, click: 0.2 }), { at: 1.35, gain: 0.6 });
+    return K.norm(K.fade(a, { outT: 0.3 }), 1);
+  },
+});
+/** Motiv „Stufe“ (neue Stufe erreicht): helles Aufsteigen D5 – A5 – D6 mit Glockenklang. */
+rezept('musik.stufe', {
+  n: 1, bus: 'musik', gain: spitze(-17, 'musik'), prio: 8, cap: 1, later: true,
+  *make(K, rnd) {
+    const a = K.buf(1.6);
+    for (const [i, m] of [74, 81, 86].entries()) { const f = midi(m); K.modal(a, { at: i * 0.12, modes: [[f, 500, 1], [f * 2.76, 180, 0.35], [f * 5.4, 70, 0.15]] }); yield; }
+    K.mix(a, plucked(K, rnd, { f: midi(62), len: 1.4, tau: 0.8, bright: 0.5, lp: 2000 }), { gain: 0.5 });
+    return K.norm(K.fade(a, { outT: 0.2 }), 1);
+  },
+});
+
+// ---------- Zustände (Schritt 7.5): nahe Explosion, wenig Leben ----------
+rezept('zustand.piepen', {
+  n: 2, bus: 'ui', gain: spitze(-21, 'ui'), prio: 8, cap: 1,
+  make(K, rnd, v) {
+    const a = K.sine(K.buf(5), { f: v ? 4230 : 4200, gain: 1 });
+    K.decay(a, { attack: 0.03, tau: 1.5 });
+    return K.norm(K.fade(a, { outT: 1.2 }), 1);
+  },
+});
+/** Herzschlag: Doppelschlag (0 und 0,14 – 0,17 s), der zweite leiser – dumpfer Sinus 55 → 38 Hz und tiefes Rauschen. */
+rezept('zustand.herz', {
+  bus: 'foley', gain: spitze(-14, 'foley'), prio: 8, cap: 2,
+  make(K, rnd, v) {
+    const fk = vary(v, 3, rnd, 0.14), a = K.buf(0.5), t2 = 0.14 + 0.02 * v + 0.01 * rnd();      // Varianten: Tonhöhe und Abstand der Schläge
+    for (const [at, g] of [[0, 1], [t2, 0.6]]) {
+      const b = K.sine(K.buf(0.22), { f: 55 * fk, f2: 38 * fk, dur: 0.12, gain: 1 });
+      K.decay(b, { attack: 0.008, tau: 0.05 }); K.fade(b, { outT: 0.03 }); K.dc(b);
+      K.mix(a, b, { at, gain: g });
+      K.mix(a, noiseHit(K, rnd, 0.12, { lp: 160 * fk, attack: 0.006, tau: 0.03 }), { at, gain: 0.35 * g });
+    }
+    return K.norm(K.fade(a, { outT: 0.05 }), 1);
+  },
+});
+/** Leises Atmen: Einatmen (Bandpass steigend um 1,2 kHz) und Ausatmen (Bandpass fallend um 800 Hz). */
+rezept('zustand.atem', {
+  bus: 'foley', gain: spitze(-30, 'foley'), prio: 4, cap: 1,
+  make(K, rnd, v) {
+    const fk = vary(v, 3, rnd, 0.1), a = K.buf(2.1);
+    const inh = K.noise(K.buf(0.8), rnd, 'pink'); K.bp(inh, { f: 900 * fk, f2: 1500 * fk, q: 0.9 }); K.env(inh, [[0, 0.01], [0.5, 1], [0.8, 0.01]]);
+    const exh = K.noise(K.buf(1.1), rnd, 'pink'); K.bp(exh, { f: 900 * fk, f2: 600 * fk, q: 0.8 }); K.env(exh, [[0, 0.01], [0.15, 1], [1.1, 0.005]]);
+    K.mix(a, K.norm(inh, 0.7), { at: 0.02 }); K.mix(a, K.norm(exh, 1), { at: 0.9 });
+    return K.norm(K.fade(a, { outT: 0.08 }), 1);
+  },
+});
+
+// ---------- Spaß-Paket (Schritt 7.7): Rutschen, Zischen eines Fasses, Überflug beim Luftschlag ----------
+/** Rutschen je Untergrund: Bandpass (Hz, Güte), dazu tiefes Rumpeln (Tiefpass) und Körnigkeit 0 … 1. */
+const RUTSCH = { stein: [1800, 0.9, 260, 0.6], metall: [2600, 1.4, 320, 0.35], holz: [950, 1, 220, 0.5], sand: [1300, 0.7, 180, 0.9] };
+for (const [grund, [bf, bq, lf, grit]] of Object.entries(RUTSCH)) {
+  rezept(`rutschen.${grund}`, {
+    bus: 'welt', gain: spitze(-18, 'welt'), prio: 4, cap: 3, reach: 22, send: 0.15,
+    make(K, rnd, v) {
+      const fk = vary(v, 3, rnd, 0.08), len = 0.75, a = K.noise(K.buf(len), rnd, grund === 'sand' ? 'pink' : 'white');
+      K.bp(a, { f: bf * fk * 1.15, f2: bf * fk * 0.85, q: bq });                     // das Tempo fällt von 8 auf 4 m/s: der Klang wird dunkler
+      const lo = K.noise(K.buf(len), rnd, 'white');
+      K.lp(lo, { f: lf * fk }); K.lp(lo, { f: lf * fk });
+      K.mix(a, K.norm(lo, K.peak(a) * 0.9));
+      // Körnigkeit: kurze Einbrüche und Spitzen in der Lautstärke
+      const sd = (rnd() * 1e9) | 0;
+      for (let i = 0; i < a.length; i++) a[i] *= 1 - grit * 0.5 + grit * 0.5 * Math.abs(noise1((i / K.SR) * 90, sd));
+      if (grund === 'metall') K.modal(a, { at: 0.01, modes: modesOf([[1250, 120, 0.15], [2730, 80, 0.1]], K.peak(a), fk) });
+      K.env(a, [[0, 0.02], [0.03, 1], [0.5, 0.6], [0.68, 0.4], [0.75, 0.002]]);
+      return K.norm(K.fade(a, { outT: 0.03 }), 1);
+    },
+  });
+}
+/** Zischen eines Fasses kurz vor der Explosion: Rauschen, Bandpass steigend 2,5 → 6 kHz, Lautstärke steigend, leises Knistern; 0,25 s (gespielt 0,12 – 0,22 s). */
+rezept('zischen', {
+  bus: 'welt', gain: spitze(-16, 'welt'), prio: 6, cap: 3, reach: 30, send: 0.2,
+  make(K, rnd, v) {
+    const fk = vary(v, 3, rnd, 0.08), a = K.noise(K.buf(0.25), rnd, 'white');
+    K.hp(a, { f: 1800 }); K.bp(a, { f: 2500 * fk, f2: 6000 * fk, q: 1.1 });
+    K.env(a, [[0, 0.15], [0.2, 1], [0.232, 0.6], [0.243, 0.001]]);          // endet vor dem Feldende: die letzten 5 ms bleiben still
+    for (let i = 0; i < 6; i++) K.click(a, rnd, { at: 0.01 + rnd() * 0.2, dur: 0.001, gain: K.peak(a) * 0.3 });
+    return K.norm(K.fade(a, { outT: 0.012 }), 1);
+  },
+});
+/**
+ * Überflug: 2,6 s Rauschen mit Bandpass 600 → 2400 → 300 Hz (am höchsten, wenn die Maschine über dem Ziel ist), dazu tiefes Dröhnen;
+ * Lautstärke als Glocke um 1,3 s. Die Stereo-Lage setzt S.jet je nach Flugweg.
+ */
+rezept('jet', {
+  n: 2, bus: 'welt', gain: spitze(-8, 'welt'), prio: 7, cap: 2, send: 0.5,
+  *make(K, rnd, v) {
+    const len = 2.6, mid = 1.3, a = K.buf(len), sr = K.SR, fk = v ? 1.04 : 0.97;
+    const nz = noiseRun(rnd, 'pink'), nw = noiseRun(rnd, 'white'), w = new Float32Array(a.length);
+    const fOf = (t) => fk * (t < mid ? 600 * 4 ** (t / mid) : 2400 * (300 / 2400) ** ((t - mid) / (len - mid)));
+    const bp = biquadRun(sr, 'bandpass', fOf, 1.2), bpw = biquadRun(sr, 'bandpass', (t) => fOf(t) * 1.8, 2);
+    yield* stuecke(a.length, (i0, i1) => { nz(a, i0, i1); nw(w, i0, i1); bp(a, i0, i1); bpw(w, i0, i1); for (let i = i0; i < i1; i++) a[i] += 0.35 * w[i]; });
+    const lo = K.noise(K.buf(len), rnd, 'brown');
+    K.lp(lo, { f: 140 }); yield; K.lp(lo, { f: 140 }); K.hp(lo, { f: 30 });
+    yield;
+    K.mix(a, K.norm(lo, K.peak(a) * 0.8));
+    K.env(a, [[0, 0.01], [0.6, 0.12], [mid, 1], [mid + 0.25, 0.75], [2.1, 0.12], [len, 0.002]]);
+    return K.norm(K.fade(a, { inT: 0.05, outT: 0.08 }), 1);
+  },
+});
+
+/** Gruppen der Rezepte (Hörprobe): Name → Gruppe; KLANG_GRUPPEN in der Reihenfolge der Anzeige. */
+const KLANG_GRUPPEN = ['Waffen', 'Mechanik', 'Hülsen', 'Schritte', 'Einschläge', 'Treffer', 'Foley', 'Explosion', 'Funk-Signale', 'Umgebung', 'Musik', 'Zustände', 'Spaß-Paket'];
+const klangGruppe = (n) => (/^schuss\./.test(n) ? 'Waffen' : /^(mech|ausklang)\.|^leer$/.test(n) ? 'Mechanik' : /^huelse\./.test(n) ? 'Hülsen'
+  : /^(schritt|landung)\./.test(n) ? 'Schritte' : /^(einschlag\.|querschlaeger$|knall$|pfeifen$)/.test(n) ? 'Einschläge'
+    : /^(treffer|kopfschuss|abschuss|schaden)$/.test(n) ? 'Treffer' : /^(explosion|granate)\./.test(n) ? 'Explosion' : /^(ui|signal)\./.test(n) ? 'Funk-Signale'
+      : /^(amb|quelle)\./.test(n) ? 'Umgebung' : /^musik\./.test(n) ? 'Musik' : /^zustand\./.test(n) ? 'Zustände' : /^(rutschen\.|zischen$|jet$)/.test(n) ? 'Spaß-Paket' : 'Foley');
+
+/** Berechnete Varianten: Name → [{ data: [Kanäle …] mit Spitze 0,9, lvl: Spitze aus make() / 0,9, ab: AudioBuffer }] */
+const BANK = new Map();
+const KF = forge();
+const KNORM = 0.9;
+/**
+ * Rechenzeit der Klangschmiede: Summe (ms), längste sichtbare Scheibe (ms), längster einzelner Rechenschritt (ms), Zahl der Scheiben, fertig,
+ * Wanduhr von Beginn bis Ende (ms)
+ */
+const KBAKE = { ms: 0, maxSlice: 0, maxStep: 0, slices: 0, done: false, wall: 0 };
+let bakeJob = null;
+/** make() darf ein Generator sein (function*): Er gibt zwischen teuren Schichten mit yield ab, und das Backen verteilt ihn über mehrere Scheiben. */
+const isGen = (o) => !!o && typeof o.next === 'function' && !(o instanceof Float32Array);
+/**
+ * Fertig berechnete Variante ablegen: Gleichanteil weg (nicht bei Schleifen), Spitze auf 0,9 – der Faktor lvl stellt beim Abspielen
+ * den Pegel wieder her, den make() geliefert hat. Laut wird ein Rezept also nur über gain.
+ */
+function klangFinish(name, out) {
+  const ch = out instanceof Float32Array ? [out] : out.ch;
+  if (!KLANG[name].loop) for (const c of ch) KF.dc(c);
+  let p = 0;
+  for (const c of ch) p = Math.max(p, KF.peak(c));
+  if (p > 0) for (const c of ch) for (let i = 0; i < c.length; i++) c[i] *= KNORM / p;
+  return { data: ch, lvl: p / KNORM, ab: null };
+}
+const klangStart = (name, v) => KLANG[name].make(KF, KF.rng(klangHash(name) + v), v);
+/** Eine Variante am Stück berechnen (ein Generator läuft dabei ganz durch). */
+function klangMake(name, v) {
+  let out = klangStart(name, v);
+  if (isGen(out)) { let r; while (!(r = out.next()).done); out = r.value; }
+  return klangFinish(name, out);
+}
+const klangHas = (name, v) => !!BANK.get(name)?.[v];
+function klangPut(name, v, d) {
+  let list = BANK.get(name);
+  if (!list) BANK.set(name, (list = []));
+  if (!list[v]) list[v] = d;
+}
+/**
+ * Berechnen in Scheiben (läuft ab App-Start): höchstens 8 ms je Scheibe, dann weiter per setTimeout(0); ist die Seite verdeckt, alles am Stück
+ * (dort drosselt der Browser die Zeitgeber, und niemand sieht ein Ruckeln). Reihenfolge: Oberfläche, die eigenen Waffen (first), der Rest,
+ * zuletzt die Raumantworten für 48 kHz. Schleifen (loop) gehören nicht dazu – Umgebung und Musik werden beim Laden der Karte berechnet.
+ * Ein Rechenschritt ist eine ganze Variante oder – bei Generatoren – das Stück bis zum nächsten yield.
+ * onProgress(0 … 1) nach jeder Scheibe. Liefert ein Promise, das mit dem letzten Rezept erfüllt ist.
+ */
+function klangBake(first = [], onProgress = null) {
+  if (!bakeJob) {
+    const names = Object.keys(KLANG).filter((n) => !KLANG[n].loop && !KLANG[n].later), seen = new Set(), todo = [];
+    for (const n of [...names.filter((x) => /^(ui|signal)\./.test(x)), ...first.filter((x) => KLANG[x]), ...names]) {
+      if (seen.has(n)) continue;
+      seen.add(n);
+      for (let v = 0; v < KLANG[n].n; v++) todo.push([n, v]);
+    }
+    for (const z of ZONEN) todo.push([null, z]);
+    const job = (bakeJob = { todo, i: 0, cbs: [], t0: performance.now(), gen: null });
+    /** Ein Rechenschritt; liefert seine Dauer in ms. */
+    const step = () => {
+      const a = performance.now(), [n, v] = todo[job.i];
+      if (job.gen && !n) {                                          // Raumantwort, kanalweise
+        const r = job.gen.next();
+        if (r.done) { let m = RAUM_IR.get(KSR); if (!m) RAUM_IR.set(KSR, (m = {})); m[v] ||= r.value; job.gen = null; job.i++; }
+      } else if (job.gen) {
+        if (klangHas(n, v)) { job.gen = null; job.i++; }          // inzwischen auf Verlangen berechnet
+        else { const r = job.gen.next(); if (r.done) { klangPut(n, v, klangFinish(n, r.value)); job.gen = null; job.i++; } }
+      } else if (!n) { if (RAUM_IR.get(KSR)?.[v]) job.i++; else job.gen = raumAntwortGen(v, KSR); }
+      else if (klangHas(n, v)) job.i++;
+      else {
+        const out = klangStart(n, v);
+        if (isGen(out)) job.gen = out; else { klangPut(n, v, klangFinish(n, out)); job.i++; }
+      }
+      const dt = performance.now() - a;
+      KBAKE.ms += dt;
+      if (dt > KBAKE.maxStep) { KBAKE.maxStep = dt; KBAKE.maxStepOf = n ? `${n}#${v}` : `raum.${v}`; }
+      if (dt > 4) (KBAKE.slow ||= []).push(`${n ? `${n}#${v}` : `raum.${v}`} ${dt.toFixed(1)}`);
+      return dt;
+    };
+    job.promise = new Promise((resolve) => {
+      let est = 0;                                   // längster Schritt bisher: keinen anfangen, der die Scheibe über 8 ms triebe
+      const slice = () => {
+        const t0 = performance.now(), hidden = document.hidden;
+        for (let first = true; job.i < todo.length && (hidden || first || performance.now() - t0 + est < 8); first = false) est = Math.max(est, Math.min(6, step()));
+        const dt = performance.now() - t0;
+        KBAKE.slices++;
+        if (!hidden) KBAKE.maxSlice = Math.max(KBAKE.maxSlice, dt);
+        const p = job.i / todo.length;
+        for (const cb of job.cbs) try { cb(p); } catch { /* Anzeige egal */ }
+        if (job.i < todo.length) { setTimeout(slice, 0); return; }
+        KBAKE.done = true;
+        KBAKE.wall = performance.now() - job.t0;
+        job.cbs.length = 0;
+        resolve();
+        klangLater(Object.keys(KLANG).filter((n) => KLANG[n].later && /^musik\./.test(n)));       // danach die Musik, im Hintergrund
+      };
+      setTimeout(slice, 0);
+    });
+  }
+  if (onProgress) { if (KBAKE.done) onProgress(1); else bakeJob.cbs.push(onProgress); }
+  return bakeJob.promise;
+}
+/** Variante holen, fehlt sie, sofort berechnen. */
+function klangGet(name, v) {
+  if (!klangHas(name, v)) { const t0 = performance.now(); klangPut(name, v, klangMake(name, v)); KBAKE.ms += performance.now() - t0; }
+  return BANK.get(name)[v];
+}
+/**
+ * Rechenzeit der Schleifen (Umgebung, Musik), die nicht zum Backen gehören und erst bei Bedarf berechnet werden: Summe (ms), längste
+ * sichtbare Scheibe, längster Rechenschritt, Scheiben, je Rezept (ms).
+ */
+const KLOOP = { ms: 0, maxSlice: 0, maxStep: 0, slices: 0, by: {} };
+/** Name → Promise, das erfüllt ist, sobald alle Varianten des Rezepts berechnet sind; dazu die Warteschlange [Name, erfüllen]. */
+const loopWait = new Map(), loopQ = [];
+let loopRun = false;
+/**
+ * Schleifen (oder andere Rezepte) im Hintergrund berechnen, in Scheiben wie beim Backen (höchstens 8 ms, verdeckt am Stück), eines nach dem
+ * anderen. Liefert ein Promise, das erfüllt ist, wenn alle genannten Rezepte fertig sind.
+ */
+function klangLater(names) {
+  const ps = [];
+  for (const n of names) {
+    if (!KLANG[n]) continue;
+    if (!loopWait.has(n)) loopWait.set(n, new Promise((res) => loopQ.push([n, res])));
+    ps.push(loopWait.get(n));
+  }
+  if (!loopRun && loopQ.length) {
+    loopRun = true;
+    let v = 0, gen = null, est = 0;
+    const step = () => {
+      const a = performance.now(), [n, res] = loopQ[0];
+      if (v >= KLANG[n].n) { loopQ.shift(); v = 0; gen = null; res(); return 0; }
+      if (klangHas(n, v)) { gen = null; v++; }
+      else if (!gen) { const out = klangStart(n, v); if (isGen(out)) gen = out; else { klangPut(n, v, klangFinish(n, out)); v++; } }
+      else if (gen.out) { klangPut(n, v, klangFinish(n, gen.out)); gen = null; v++; }          // Abschluss (Gleichanteil, Spitze) als eigener Schritt
+      else { const r = gen.next(); if (r.done) gen.out = r.value; }
+      const dt = performance.now() - a;
+      KLOOP.ms += dt; KLOOP.by[n] = (KLOOP.by[n] || 0) + dt;
+      if (dt > KLOOP.maxStep) { KLOOP.maxStep = dt; KLOOP.maxStepOf = n; }
+      if (dt > 4) (KLOOP.slow ||= []).push(`${n} ${dt.toFixed(1)} (Schritt ${KLOOP.steps})`);
+      KLOOP.steps = (KLOOP.steps || 0) + 1;
+      return dt;
+    };
+    const slice = () => {
+      const t0 = performance.now(), hidden = document.hidden;
+      for (let first = true; loopQ.length && (hidden || first || performance.now() - t0 + est < 8); first = false) est = Math.max(est, Math.min(6, step()));
+      KLOOP.slices++;
+      if (!hidden) KLOOP.maxSlice = Math.max(KLOOP.maxSlice, performance.now() - t0);
+      if (loopQ.length) setTimeout(slice, 0); else loopRun = false;
+    };
+    setTimeout(slice, 0);
+  }
+  return Promise.all(ps);
+}
+
+// --------------------------------------------------------------------------
+// 8c · Mischpult: Stimmen-Pool, Busse, Begrenzer, Entfernung, Verdeckung, Raumzonen und Hall.
+// Je Stimme: BufferSource → Tiefpass (ortsgebunden) → Gain → StereoPanner (ortsgebunden oder mit Seitenlage) → Bus, dazu Gain → Hall.
+// Busse und Hall → Summe (prefs.volume) → Begrenzer → audio().out. Die Klänge selbst kommen fertig berechnet aus der Klangschmiede.
+// --------------------------------------------------------------------------
+const VOICES_MAX = 28;
+/** Begrenzer an der Summe (DynamicsCompressor). */
+const LIMIT = { threshold: -4, knee: 2, ratio: 20, attack: 0.002, release: 0.09 };
+/**
+ * Der DynamicsCompressor hebt alles selbsttätig an (Aufholverstärkung, bei diesen Werten +1,94 dB in Chromium und Firefox gemessen).
+ * Der Ausgleich dahinter nimmt das zurück: unter der Schwelle bleibt jeder Klang so laut wie geliefert, darüber wird begrenzt.
+ */
+const LIMIT_TRIM = 10 ** (-1.94 / 20);
+/**
+ * Nachtmodus (Schritt 7.6): Begrenzer mit Schwelle −14 dB und Verhältnis 8; seine Aufholverstärkung beträgt +6,98 dB (Chromium und Firefox,
+ * Sinus unter der Schwelle) – der Ausgleich nimmt sie zurück, leise Klänge bleiben also gleich laut, laute werden stark gedämpft.
+ */
+const LIMIT_NACHT = { ...LIMIT, threshold: -14, ratio: 8 }, NACHT_TRIM = 10 ** (-6.98 / 20);
+const IMPACT_SND = { concrete: 'beton', metal: 'metall', wood: 'holz', body: 'koerper', sand: 'sand', cloth: 'stoff' };
+/** Überschall-Munition: vorbeifliegende Kugeln knallen vor dem Pfeifen */
+const UEBERSCHALL = { rifle: true, dmr: true, sniper: true, lmg: true };
+const RELOAD_SND = { out: 'raus', in: 'rein', shell: 'patrone', bolt: 'verschluss' };
+/** Abspielrate der Nachlade-Klänge je Waffenklasse */
+const RELOAD_RATE = { pistol: 1.25, smg: 1.1, rifle: 1, dmr: 0.95, lmg: 0.8 };
+/** Hülsen: Zeit bis zum Aufprall (s) und Abspielrate je Waffenart */
+const HUELSE_T = { shotgun: 0.75, sniper: 0.95 }, HUELSE_RATE = { pistol: 1.15, smg: 1.08, shotgun: 0.8, sniper: 0.9, lmg: 0.92 };
+/** Automatische Waffen mit Ausklang nach einem Feuerstoß */
+const AUSKLANG = { rifle: true, smg: true, lmg: true };
+/**
+ * Raumantworten der vier Zonen: Länge (s), Impulsdichte je s (Anfang → Ende), RT60 (s), Filter (Bandpass bp oder gleitender Tiefpass lp, Hz),
+ * frühe Echos [ms, dB] (earlyLp: eigener Tiefpass, spread: links und rechts versetzt, s), Flatterecho comb [links s, rechts s, Rückkopplung], Rückweg (dB).
+ */
+const RAUM = {
+  hof: { len: 1.6, dens: [1500, 300], rt: 1.3, bp: [250, 3000], early: [[47, -8], [83, -11], [131, -13], [197, -16], [263, -19]], earlyLp: 2500, spread: 0.004, ret: -10 },
+  halle: { len: 1.0, dens: [3000, 3000], rt: 0.9, lp: [9000, 2200], early: [[9, -4], [14, -6], [22, -7], [31, -9], [43, -11]], ret: -7 },
+  gasse: { len: 0.7, dens: [2000, 2000], rt: 0.55, bp: [400, 5000], comb: [0.017, 0.021, 0.55], ret: -9 },
+  raum: { len: 0.35, dens: [4000, 4000], rt: 0.28, lp: [6000, 3000], early: [[4, -3], [7, -5], [11, -7]], ret: -8 },
+};
+const ZONEN = Object.keys(RAUM);
+/** Berechnete Raumantworten je Abtastrate: sr → { zone: [links, rechts] } (der ConvolverNode verlangt die Rate des AudioContext). */
+const RAUM_IR = new Map();
+/**
+ * Stereo-Raumantwort: dünnes Impulsrauschen (±1 mit der Dichte der Tabelle) mal exp(−t/tau), tau = RT60/6,91, gefiltert,
+ * auf Energie 1 gebracht (der Rückweg bestimmt die Lautstärke), dazu die frühen Echos. Links und rechts aus verschiedenen Saaten.
+ */
+function raumAntwort(name, sr) { const g = raumAntwortGen(name, sr); let r; while (!(r = g.next()).done); return r.value; }
+/** Dasselbe als Generator: gibt nach jedem Kanal ab (für das Backen in Scheiben). */
+function* raumAntwortGen(name, sr) {
+  const D = RAUM[name], K = forge(sr), tau = D.rt / 6.91, ch = [];
+  const shape = (x) => { if (D.bp) { K.hp(x, { f: D.bp[0] }); K.lp(x, { f: D.bp[1] }); } else K.lp(x, { f: D.lp[0], f2: D.lp[1] }); return x; };
+  for (let c = 0; c < 2; c++) {
+    const rnd = K.rng(klangHash(`raum.${name}`) + c), a = K.buf(D.len), n = a.length;
+    for (let i = 0; i < n; i++) {
+      const t = i / sr;
+      if (rnd() < (D.dens[0] * (D.dens[1] / D.dens[0]) ** (t / D.len)) / sr) a[i] = (rnd() < 0.5 ? -1 : 1) * Math.exp(-t / tau);
+    }
+    shape(a);
+    if (D.comb) K.comb(a, { delay: D.comb[c], fb: D.comb[2], damp: 0.2 });
+    K.fade(a, { inT: 0.002, outT: Math.min(0.1, D.len * 0.2) });
+    const e = Math.sqrt(a.reduce((q, x) => q + x * x, 0)) || 1;
+    for (let i = 0; i < n; i++) a[i] /= e;
+    if (D.early) {
+      const ea = K.buf(D.len);
+      D.early.forEach(([ms, db], j) => {
+        const i = Math.round((ms / 1000 + (D.spread ? (c ? 1 : -1) * (j % 2 ? -1 : 1) * D.spread : 0)) * sr);
+        if (i >= 0 && i < n) ea[i] += 10 ** (db / 20);
+      });
+      if (D.earlyLp) K.lp(ea, { f: D.earlyLp }); else shape(ea);
+      K.mix(a, ea);
+    }
+    ch.push(a);
+    if (c === 0) yield;
+  }
+  return ch;
+}
+/** Raumantwort einer Zone (oder ohne zone: aller Zonen) bei der Abtastrate sr, einmal berechnet. */
+function raumIR(sr, zone) {
+  let m = RAUM_IR.get(sr);
+  if (!m) RAUM_IR.set(sr, (m = {}));
+  for (const z of zone ? [zone] : ZONEN) m[z] ||= raumAntwort(z, sr);
+  return zone ? m[zone] : m;
+}
+
+/**
+ * Klang des Spiels. getPrefs() liefert die Vorgaben (volume …). Alle alten Methoden (shot, explosion, …) bleiben mit ihren Signaturen
+ * und spielen über play(). Neu: play, setWorld, listen, bake, voices, state.
+ */
+function createSound(getPrefs) {
+  let ctx = null, sum = null, gone = false, phys = null, LL = { x: 0, y: 1.6, z: 0, yaw: 0 };
+  let lsend = null, zoneL = 'hof', shown = 'hof', zoneT = 0, forced = null, shownVol = -1;
+  const bus = {}, pool = [], last = {}, stat = { plays: 0, steals: 0, drops: 0, max: 0, by: {} }, st = { hp: 100, boom: 0 };
+  // Dauerklänge (Umgebung, ortsfeste Quellen, Musik) laufen außerhalb des Stimmen-Pools: ihre Zahl ist begrenzt, und sie werden nie verdrängt.
+  const beds = [];
+  /** Umgebung der Karte: want = AMB_KARTE-Eintrag, ready = Schleifen berechnet, on = laufende Schleifen, t = Zeit bis zum nächsten Einzelklang (s). */
+  const amb = { want: null, ready: false, on: [], t: 8, inside: false };
+  let ambIn = null, ambLp = null, lastListen = 0, tickId = 0, NYQ = 24000, lim = null, trim = null, shownMix = '', graphAt = 0, graphT = 0;
+  /** Begrenzer für Tag und Nacht, je { lim, trim (Ausgleich), to (Ziel des Ausgleichs) }; lim/trim zeigen auf den gerade gültigen. */
+  const lims = {};
+  /** Zustände (Schritt 7.5): je Bus außer ui eine Senke und ein Tiefpass (nahe Explosion), dazu am Bus welt der Tiefpass bei wenig Leben. */
+  const zst = {}, hp = { lp: null, f: 0, k: 0, beat: 0, breath: 0 };
+  /** Ortsfeste Quellen der Karte: { name, x, y, z, reach, v (laufende Stimme oder null) } – sie klingen nur in Reichweite (Schritt 7.2). */
+  const srcs = [];
+  /** Musik: want = gewünschte Dauermusik (Rezeptname oder null), v = laufende Stimme (Schritt 7.4). */
+  const mus = { want: null, v: null };
+  const hallIn = {}, lzone = {}, zcache = new Map();
+  const burst = { kind: null, n: 0, t: 0, dt: 0 }, ladder = { n: 0, t: -9 }, progStep = new WeakMap();
+  let sprintN = 0;         // eigener Feuerstoß: Art, Schüsse, letzter Schuss (s), Schussabstand (s)
+  const vol = () => getPrefs().volume;
+  const ok = () => !gone && sfx.enabled && audioReady() && vol() > 0;
+
+  function graph() {
+    if (ctx) return;
     const a = audio();
     ctx = a.ctx;
-    if (!out) { out = ctx.createGain(); out.connect(a.out); }
-    out.gain.value = getVolume();
-    if (!noiseBuf) {
-      noiseBuf = ctx.createBuffer(1, ctx.sampleRate, ctx.sampleRate);
-      const d = noiseBuf.getChannelData(0);
-      for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+    sum = ctx.createGain();
+    sum.gain.value = shownVol = vol();
+    const night = !!getPrefs().night, dry = ctx.createGain(), outN = ctx.createGain();
+    // Zwei Begrenzer nebeneinander (Tag nach V3; Nacht: Schwelle −14 dB, Verhältnis 8), jeder mit seinem Ausgleich; der Nachtmodus blendet
+    // zwischen beiden über (mixLevel). Ein DynamicsCompressor übernimmt neue Werte sofort – bei lauten Klängen wäre das ein Pegelsprung.
+    for (const [id, LV, to] of [['tag', LIMIT, LIMIT_TRIM], ['nacht', LIMIT_NACHT, NACHT_TRIM]]) {
+      const l = ctx.createDynamicsCompressor(), tg = ctx.createGain();
+      for (const k in LV) l[k].value = LV[k];
+      sum.connect(l); l.connect(tg); tg.connect(outN);
+      lims[id] = { lim: l, trim: tg, to };
     }
-    const g = ctx.createGain();
-    g.gain.value = vol;
-    if (pan && ctx.createStereoPanner) { const p = ctx.createStereoPanner(); p.pan.value = clamp(pan, -1, 1); g.connect(p); p.connect(out); } else g.connect(out);
-    return g;
+    ({ lim, trim } = lims[night ? 'nacht' : 'tag']);
+    outN.connect(a.out);
+    // Ein frisch angelegter DynamicsCompressor regelt in seinen ersten rund 100 ms kräftig herunter (gemessen −11 dB für einen Klang, der
+    // gleich beim Anlegen startet). Die ersten 0,15 s läuft die Summe deshalb am Begrenzer vorbei, dann wird in 0,1 s übergeblendet.
+    const t0 = (graphT = ctx.currentTime);
+    for (const q of Object.values(lims)) { q.trim.gain.setValueAtTime(0, t0); q.trim.gain.setValueAtTime(0, t0 + 0.15); q.trim.gain.linearRampToValueAtTime(q.trim === trim ? q.to : 0, t0 + 0.25); }
+    shownMix = `${night}`;
+    dry.gain.setValueAtTime(1, t0); dry.gain.setValueAtTime(1, t0 + 0.15); dry.gain.linearRampToValueAtTime(0, t0 + 0.25);
+    const pre = ctx.createDelay(0.05);
+    pre.delayTime.value = 0.006;                     // so spät wie der Begrenzer (Vorausschau 6 ms), sonst löschen sich beide beim Überblenden teils aus
+    sum.connect(pre);
+    pre.connect(dry);
+    dry.connect(outN);
+    setTimeout(() => { try { sum.disconnect(pre); pre.disconnect(); dry.disconnect(); } catch { /* schon ab */ } }, 1000);
+    NYQ = ctx.sampleRate / 2;                       // ein Tiefpass auf Nyquist lässt alles unverändert durch
+    const lowpass = () => { const f = ctx.createBiquadFilter(); f.type = 'lowpass'; f.frequency.value = NYQ; f.Q.value = 0; return f; };
+    for (const [b, db] of Object.entries(BUSSE)) {
+      bus[b] = ctx.createGain(); bus[b].gain.value = 10 ** (db / 20);           // die Regler setzt mixLevel beim ersten Klang
+      if (b === 'ui') { bus[b].connect(sum); continue; }
+      const duck = ctx.createGain(), lp = lowpass();
+      bus[b].connect(duck); duck.connect(lp);
+      if (b === 'welt') { hp.lp = lowpass(); hp.f = NYQ; lp.connect(hp.lp); hp.lp.connect(sum); } else lp.connect(sum);
+      zst[b] = { duck, lp };
+    }
+    // Umgebung der Karte (Schleifen und Einzelklänge): innen (Zone halle oder raum) Tiefpass 1,2 kHz und −5 dB, überblendet in 0,4 s
+    ambIn = ctx.createGain(); ambLp = lowpass();
+    ambIn.connect(ambLp); ambLp.connect(bus.amb);
+    tickId = setInterval(tick, 100);
+    // Hall: je Zone ein ConvolverNode. Ortsgebundene Stimmen senden in die Zone der Quelle, alles andere über lsend in die Zone des Hörers
+    // (lzone blendet beim Zonenwechsel über).
+    const ir = raumIR(ctx.sampleRate), hallOut = ctx.createGain(), hDuck = ctx.createGain(), hLp = lowpass();
+    hallOut.connect(hDuck); hDuck.connect(hLp); hLp.connect(sum);
+    zst.hall = { duck: hDuck, lp: hLp };
+    lsend = ctx.createGain();
+    for (const z of ZONEN) {
+      const ab = ctx.createBuffer(2, ir[z][0].length, ctx.sampleRate), cv = ctx.createConvolver(), ret = ctx.createGain();
+      ab.copyToChannel(ir[z][0], 0); ab.copyToChannel(ir[z][1], 1);
+      cv.normalize = false;
+      cv.buffer = ab;
+      ret.gain.value = 10 ** (RAUM[z].ret / 20);
+      hallIn[z] = ctx.createGain();
+      hallIn[z].connect(cv); cv.connect(ret); ret.connect(hallOut);
+      lzone[z] = ctx.createGain();
+      lzone[z].gain.value = z === shown ? 1 : 0;
+      lsend.connect(lzone[z]); lzone[z].connect(hallIn[z]);
+    }
+    S.tap = outN;
+    graphAt = performance.now();
   }
-  /** Rauschstoß durch einen Filter. */
-  function burst(dest, { type = 'lowpass', f = 2000, f2 = 0, q = 0.7, dur = 0.1, vol = 0.5, rate = 1, when = 0, attack = 0.001 }) {
-    const t = ctx.currentTime + when, src = ctx.createBufferSource(), fl = ctx.createBiquadFilter(), g = ctx.createGain();
-    src.buffer = noiseBuf; src.loop = true; src.playbackRate.value = rate;
-    fl.type = type; fl.Q.value = q;
-    fl.frequency.setValueAtTime(f, t);
-    if (f2) fl.frequency.exponentialRampToValueAtTime(f2, t + dur);
-    g.gain.setValueAtTime(0.0001, t);
-    g.gain.exponentialRampToValueAtTime(vol, t + attack);
-    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
-    src.connect(fl); fl.connect(g); g.connect(dest);
-    src.start(t, Math.random() * 0.8); src.stop(t + dur + 0.03);
-  }
-  function osc(dest, { type = 'sine', f = 440, f2 = 0, dur = 0.1, vol = 0.3, when = 0, attack = 0.003 }) {
-    const t = ctx.currentTime + when, o = ctx.createOscillator(), g = ctx.createGain();
-    o.type = type;
-    o.frequency.setValueAtTime(f, t);
-    if (f2) o.frequency.exponentialRampToValueAtTime(f2, t + dur);
-    g.gain.setValueAtTime(0.0001, t);
-    g.gain.exponentialRampToValueAtTime(vol, t + attack);
-    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
-    o.connect(g); g.connect(dest);
-    o.start(t); o.stop(t + dur + 0.03);
-  }
-  /** Lautstärke und Stereo-Lage eines Geräuschs in der Welt, vom Hörer aus. */
-  function place(L, x, y, z, reach) {
-    const dx = x - L.x, dz = z - L.z, d = Math.hypot(dx, y - L.y, dz);
-    if (d > reach) return null;
-    const vol = 1 / (1 + (d / (reach * 0.16)) ** 2);
-    const side = d < 0.5 ? 0 : (dx * Math.cos(L.yaw) + dz * Math.sin(L.yaw)) / d;
-    return { vol: vol * (1 - d / reach * 0.4), pan: side * 0.85, far: clamp(d / reach, 0, 1) };
-  }
-  const S = {
-    /** Schuss. L = Hörer {x, y, z, yaw}; own = die eigene Waffe (voll, mit Nachhall). */
-    shot(kind, L, x, y, z, own = false) {
-      if (!ok()) return;
-      const p = SHOT_SND[kind] || SHOT_SND.rifle;
-      let pl = { vol: 1, pan: 0, far: 0 };
-      if (!own) {
-        pl = place(L, x, y, z, 110);
-        if (!pl) return;
-        const now = performance.now();
-        if (now - shotsAt > 100) { shotsAt = now; shots = 0; }
-        if (++shots > 3) return;                    // dichtes Feuergefecht: nicht jeden Schuss einzeln
+  /**
+   * Regler der Busse (Schritt 7.6): Effekte (waffe, welt, foley, ui), Umgebung (amb), Musik (musik) als Faktor auf den Bus-Pegel;
+   * Nachtmodus stellt den Begrenzer um. Nur bei einer Änderung.
+   */
+  function mixLevel() {
+    const P = getPrefs(), f01 = (v, d) => (typeof v === 'number' && Number.isFinite(v) ? clamp(v, 0, 1) : d);
+    const fx = f01(P.volFx, 1), am = f01(P.volAmb, 0.7), mu = f01(P.volMusic, 0.6), night = !!P.night, key = `${fx}|${am}|${mu}|${night}`;
+    if (key === shownMix) return;
+    const t = ctx.currentTime, nightWas = shownMix.endsWith('true'), first = !shownMix.includes('|');
+    shownMix = key;
+    for (const [b, db] of Object.entries(BUSSE)) {
+      const g = 10 ** (db / 20) * (b === 'amb' ? am : b === 'musik' ? mu : fx);
+      if (first) bus[b].gain.value = g; else bus[b].gain.setTargetAtTime(g, t, 0.02);
+    }
+    if (night !== nightWas) {                         // Nachtmodus: in 80 ms vom einen Begrenzer zum anderen überblenden (gleich laut, wo keiner regelt)
+      ({ lim, trim } = lims[night ? 'nacht' : 'tag']);
+      const early = t < graphT + 0.15, s0 = Math.max(t, graphT + 0.15);           // noch im Umweg der ersten 0,15 s: dessen Überblendung übernehmen
+      for (const q of Object.values(lims)) {
+        const g = q.trim.gain;
+        g.cancelScheduledValues(t); g.setValueAtTime(early ? 0 : g.value, s0); g.linearRampToValueAtTime(q.trim === trim ? q.to : 0, s0 + (early ? 0.1 : 0.08));
       }
-      const g = chain(pl.pan, (own ? 0.5 : 0.42) * pl.vol);
-      const cut = p.cut * (1 - pl.far * 0.75);
-      burst(g, { f: cut, f2: Math.max(200, cut * 0.14), dur: p.dur * (1 + pl.far), vol: p.noise, rate: p.rate });
-      osc(g, { type: 'triangle', f: p.f, f2: p.f * 0.32, dur: p.dur * 0.7, vol: p.body });
-      if (pl.far < 0.5) burst(g, { type: 'highpass', f: 3500, dur: 0.035, vol: 0.4 * (1 - pl.far * 2) });
-      if (own || pl.far < 0.3) burst(g, { f: 900, f2: 240, dur: 0.5 + p.dur, vol: p.noise * 0.14, attack: 0.03, rate: 0.6 });
+    }
+  }
+  /** Summe folgt prefs.volume (auch im Menü, etwa beim Schieben des Reglers): je Bild weich, vor einem neuen Klang sofort. */
+  function level(soft) {
+    mixLevel();
+    const v = vol();
+    if (v === shownVol) return;
+    shownVol = v;
+    const t = ctx.currentTime;
+    sum.gain.cancelScheduledValues(t);
+    if (soft) sum.gain.setTargetAtTime(v, t, 0.02); else sum.gain.setValueAtTime(v, t);
+  }
+
+  // ---------- Stimmen ----------
+  /** Stimme aus Pool oder Dauerklängen nehmen. */
+  function drop(v) { for (const list of [pool, beds]) { const i = list.indexOf(v); if (i >= 0) list.splice(i, 1); } }
+  function release(v) {
+    if (v.off) return;
+    v.off = true;
+    drop(v);
+    for (const n of v.nodes) try { n.disconnect(); } catch { /* schon ab */ }
+  }
+  /** Stimme beenden: kurz ausblenden, dann anhalten; sie zählt sofort nicht mehr. */
+  function stop(v, fade = 0.012) {
+    if (v.off || v.ending) return;
+    v.ending = true;
+    drop(v);
+    const t = ctx.currentTime;
+    try { v.g.gain.cancelScheduledValues(t); v.g.gain.setTargetAtTime(0, t, fade / 3); v.src.stop(t + fade + 0.02); } catch { /* schon gestoppt */ }
+    setTimeout(() => release(v), (fade + 0.25) * 1000);
+  }
+  /** Stimmen, deren Ende verpasst wurde (Audio-Uhr stand), nach der Wanduhr räumen. */
+  function purge(now) { for (let i = pool.length - 1; i >= 0; i--) { const v = pool[i]; if (!v.loop && now > v.until) { stop(v); release(v); } } }
+  const loudness = (v, now) => v.vol * Math.max(0, 1 - (now - v.t0) / 1000 / v.len);
+  /** Wer zuerst weicht: niedrigste Priorität, dann die leiseste, dann die älteste. Eigene Schüsse nie. */
+  function weakest(list, now) {
+    let w = null, wl = 0;
+    for (const v of list) {
+      if (v.prot) continue;
+      const l = loudness(v, now);
+      if (!w || v.prio < w.prio || (v.prio === w.prio && (l < wl - 1e-6 || (Math.abs(l - wl) <= 1e-6 && v.t0 < w.t0)))) { w = v; wl = l; }
+    }
+    return w;
+  }
+  /** Platz schaffen. false: die neue Stimme ist zu unwichtig. */
+  function vacate(list, prio, prot, now) {
+    let w = weakest(list, now);
+    if (!w && prot) w = list.filter((v) => v.prot).sort((a, b) => a.t0 - b.t0)[0];     // ein eigener Schuss weicht nur einem neueren eigenen
+    if (!w || (w.prio > prio && !prot)) return false;
+    stop(w);
+    stat.steals++;
+    return true;
+  }
+
+  // ---------- Entfernung und Verdeckung ----------
+  /** Freie Sicht vom Auge des Hörers zur Quelle (RAY bleibt unberührt: das Spiel liest ihn nach eigenen Strahlen). */
+  function sight(L, x, y, z) {
+    const t = RAY.t, i = RAY.i, ax = RAY.axis, r = phys.los(L.x, L.y, L.z, x, y + 0.15, z);
+    RAY.t = t; RAY.i = i; RAY.axis = ax;
+    return r;
+  }
+  /** Lage einer Quelle vom Hörer aus: Pegel, Tiefpass, Laufzeit, Stereo – oder null, wenn außer Hörweite. */
+  function place(L, x, y, z, reach, free) {
+    const dx = x - L.x, dz = z - L.z, d = Math.hypot(dx, y - L.y, dz), dh = Math.hypot(dx, dz);
+    if (d > reach) return null;
+    let vol = (1 - (0.4 * d) / reach) / (1 + (d / (0.16 * reach)) ** 2);
+    let fc = Math.max(700, 18000 * Math.exp(-d / (0.35 * reach)));
+    const side = d < 0.5 ? 0 : (dx * Math.cos(L.yaw) + dz * Math.sin(L.yaw)) / d;
+    const back = dh < 0.5 ? 0 : clamp(-(dx * Math.sin(L.yaw) - dz * Math.cos(L.yaw)) / dh, 0, 1);
+    vol *= 10 ** ((-1.5 * back) / 20);
+    fc *= 1 - 0.3 * back;
+    if (phys && !free && !sight(L, x, y, z)) { fc = Math.max(500, fc * 0.25); vol *= 0.5; }
+    // Richtung im Raum des Hörers (Blick −Z) für den Kopfhörer-Modus
+    const inv = d > 0.01 ? 1 / d : 0, rx = (dx * Math.cos(L.yaw) + dz * Math.sin(L.yaw)) * inv, rz = -(dx * Math.sin(L.yaw) - dz * Math.cos(L.yaw)) * inv;
+    return { d, vol, fc, pan: side * 0.85, delay: Math.min(d / 343, 0.35), rx, ry: (y - L.y) * inv, rz: inv ? rz : -1 };
+  }
+
+  // ---------- Raumzonen ----------
+  /**
+   * Zone an einer Stelle (y = Fußhöhe): ein Strahl nach oben (überdacht?), acht waagerechte in Augenhöhe (je höchstens 30 m).
+   * Überdacht: freie Weite w = Median der acht Strahlen, w < 5 raum, sonst halle. Offen: die acht Strahlen bilden vier gegenüberliegende
+   * Paare, die Breite eines Paars ist die Summe seiner zwei Entfernungen; ist die kleinste Breite unter 8 m, gasse, sonst hof (Mittel und
+   * Median erkannten Gassen, die nur zu einer Seite eng sind, als Hof). Je Meter-Zelle zwischengespeichert; RAY bleibt unberührt.
+   */
+  function zoneAt(x, y, z) {
+    if (!phys) return zoneL;
+    const key = `${Math.round(x)}|${Math.round(y)}|${Math.round(z)}`;
+    let zn = zcache.get(key);
+    if (zn) return zn;
+    const t = RAY.t, i = RAY.i, ax = RAY.axis, roof = phys.raycast(x, y + 1.7, z, 0, 1, 0, 14) !== Infinity;
+    const ws = [];
+    for (let k = 0; k < 8; k++) { const r = phys.raycast(x, y + 1.6, z, Math.cos((k * Math.PI) / 4), 0, Math.sin((k * Math.PI) / 4), 30); ws.push(r === Infinity ? 30 : r); }
+    RAY.t = t; RAY.i = i; RAY.axis = ax;
+    if (roof) {
+      const so = [...ws].sort((a, b) => a - b), w = (so[3] + so[4]) / 2;
+      zn = w < 5 ? 'raum' : 'halle';
+    } else zn = Math.min(ws[0] + ws[4], ws[1] + ws[5], ws[2] + ws[6], ws[3] + ws[7]) < 8 ? 'gasse' : 'hof';
+    if (zcache.size > 4000) zcache.clear();
+    zcache.set(key, zn);
+    return zn;
+  }
+  /** Hall des Hörers auf seine (oder die vorgegebene) Zone überblenden, rund 0,3 s. */
+  function fadeZone() {
+    const z = forced || zoneL;
+    if (!ctx || z === shown) return;
+    shown = z;
+    const t = ctx.currentTime;
+    for (const k of ZONEN) { lzone[k].gain.cancelScheduledValues(t); lzone[k].gain.setTargetAtTime(k === z ? 1 : 0, t, 0.1); }
+  }
+
+  /**
+   * Spielt ein Rezept. o: { x, y, z (ohne: nicht ortsgebunden), gain (Faktor), rate, when (s), own,
+   *   L (Hörer, sonst der letzte aus listen), v (Variante), pan, bus, send (Hall-Anteil), zone (der Quelle), free (ohne Verdeckung),
+   *   bed (Dauerklang außerhalb des Pools), dest (Knoten statt Bus), offset (Beginn im Puffer, s), fadeIn (s), dur (nach dur s ausblenden und enden) }.
+   * Liefert die Stimme ({ stop(fade) }) oder null.
+   */
+  function play(name, o = {}) {
+    const R = KLANG[name];
+    if (!R || !ok()) return null;
+    graph();
+    level();
+    const now = performance.now(), L = o.L || LL;
+    purge(now);
+    const pl = o.x !== undefined && R.reach > 0 ? place(L, o.x, o.y ?? L.y, o.z ?? L.z, R.reach, o.free) : null;
+    if (o.x !== undefined && R.reach > 0 && !pl) return null;
+    const prio = R.prio, prot = !!o.own && R.bus === 'waffe';
+    const mine = o.bed ? [] : pool.filter((v) => v.name === name);
+    if (!o.bed && ((mine.length >= R.cap && !vacate(mine, prio, prot, now)) || (pool.length >= VOICES_MAX && !vacate(pool, prio, prot, now)))) { stat.drops++; return null; }
+    let vi = o.v ?? (Math.random() * R.n) | 0;
+    if (o.v === undefined && R.n > 1 && vi === last[name]) vi = (vi + 1 + ((Math.random() * (R.n - 1)) | 0)) % R.n;
+    last[name] = vi;
+    const B = klangGet(name, vi);
+    if (!B.ab) {
+      B.ab = ctx.createBuffer(B.data.length, B.data[0].length, KSR);
+      B.data.forEach((c, i) => B.ab.copyToChannel(c, i));
+    }
+    const src = ctx.createBufferSource(), g = ctx.createGain(), nodes = [src, g];
+    src.buffer = B.ab;
+    src.loop = R.loop;
+    const rate = o.rate || 1;
+    src.playbackRate.value = rate;
+    let head = src;
+    if (pl) { const lp = ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = pl.fc; lp.Q.value = -3; src.connect(lp); head = lp; nodes.push(lp); }
+    head.connect(g);
+    const vol = 10 ** (R.gain / 20) * B.lvl * (o.gain ?? 1) * (pl ? pl.vol : 1);
+    const t = ctx.currentTime + (o.when || 0) + (pl ? pl.delay : 0), len = B.ab.duration / rate, dest = o.dest || bus[o.bus || R.bus];
+    if (o.fadeIn) { g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(vol, t + o.fadeIn); } else g.gain.value = vol;
+    if (o.dur) { g.gain.setValueAtTime(vol, t + Math.max(0, o.dur - 0.012)); g.gain.linearRampToValueAtTime(0, t + o.dur); }
+    const pan = pl ? pl.pan : o.pan || 0;
+    if (pl || pan) {
+      let p;
+      if (pl && getPrefs().hrtf) {                   // Kopfhörer-Modus: Richtung über HRTF; die Entfernung rechnet weiter das Mischpult
+        p = ctx.createPanner();
+        Object.assign(p, { panningModel: 'HRTF', distanceModel: 'linear', rolloffFactor: 0, refDistance: 1, maxDistance: 10000 });
+        aim(p, pl, 0);
+      } else { p = ctx.createStereoPanner(); p.pan.value = clamp(pan, -1, 1); }
+      g.connect(p); p.connect(dest); nodes.push(p);
+    } else g.connect(dest);
+    const v = { name, prio, prot, vol, t0: now, len, until: now + ((o.when || 0) + (pl ? pl.delay : 0) + len + 1.5) * 1000, loop: R.loop, src, g, nodes, off: false, ending: false, bed: !!o.bed };
+    // ortsgebundener Dauerklang: listen führt Pegel, Tiefpass und Lage mit dem Hörer nach
+    if (o.bed && pl) Object.assign(v, { pos: [o.x, o.y ?? L.y, o.z ?? L.z], reach: R.reach, free: !!o.free, base: vol / pl.vol, lp: nodes[2], pan: nodes[nodes.length - 1], blocked: false });
+    v.stop = (fade) => stop(v, fade);
+    src.onended = () => release(v);
+    // Hall: in die Zone der Quelle; liegt der Hörer woanders, die Hälfte zusätzlich in seine
+    const send = o.send ?? R.send + (pl ? (R.sendD * pl.d) / R.reach : 0), zl = forced || zoneL;
+    if (send > 0 && zl !== 'aus') {
+      const sg = ctx.createGain();
+      sg.gain.value = send;
+      g.connect(sg);
+      nodes.push(sg);
+      if (pl) {
+        const zs = forced || o.zone || zoneAt(o.x, Math.max(0, (o.y ?? L.y) - 1.2), o.z ?? L.z);
+        sg.connect(hallIn[zs]);
+        if (zs !== zl) { const s2 = ctx.createGain(); s2.gain.value = 0.5; sg.connect(s2); s2.connect(lsend); nodes.push(s2); }
+      } else sg.connect(lsend);
+    }
+    src.start(t, R.loop ? (o.offset || 0) % B.ab.duration : 0);
+    if (o.dur) src.stop(t + o.dur + 0.01);
+    (o.bed ? beds : pool).push(v);
+    stat.plays++;
+    stat.by[name] = (stat.by[name] || 0) + 1;
+    stat.max = Math.max(stat.max, pool.length);
+    return v;
+  }
+
+  // ---------- Umgebung der Karte (Schritt 7.1) ----------
+  /** Neue Karte: laufende Umgebung ausblenden, die Schleifen der Karte im Hintergrund berechnen (sie starten im ersten listen danach). */
+  function ambWorld(w) {
+    ambStop(1.2);
+    const want = (amb.want = (w && AMB_KARTE[w.name]) || null);
+    amb.ready = false;
+    amb.t = 6 + 14 * Math.random();                 // erster Einzelklang wie alle weiteren nach 6 – 20 s
+    if (want) klangLater([...want.loops, ...want.einzel]).then(() => { if (amb.want === want) amb.ready = true; });
+  }
+  /** Beide Schleifen starten, die zweite um 5 s versetzt; sanft eingeblendet. */
+  function ambStart() {
+    amb.want.loops.forEach((n, i) => { const v = play(n, { bed: true, dest: ambIn, offset: i ? 5 : 0, fadeIn: 2.5 }); if (v) amb.on.push(v); });
+  }
+  function ambStop(fade) { for (const v of amb.on) stop(v, fade); amb.on.length = 0; }
+  /** Ein Einzelklang der Karte an einem Ort um den Hörer: Möwe hoch oben, Schiffshorn weit weg, Kran auf Höhe des Portalkrans. */
+  function ambOne() {
+    const list = amb.want.einzel, name = list[(Math.random() * list.length) | 0], a = Math.random() * 2 * Math.PI;
+    const [d, y, free] = { 'amb.horn': [150 + 60 * Math.random(), 6, true], 'amb.moewe': [15 + 25 * Math.random(), LL.y + 14 + 10 * Math.random(), true], 'amb.kran': [14 + 20 * Math.random(), 9.5, false], 'amb.palme': [6 + 16 * Math.random(), 6, false] }[name] || [6 + 16 * Math.random(), 2.6, false];
+    play(name, { x: LL.x + Math.sin(a) * d, y, z: LL.z + Math.cos(a) * d, free, dest: ambIn });
+  }
+  /** Innen (halle, raum) dämpfen: Tiefpass 1,2 kHz und −5 dB, in 0,4 s. */
+  function ambInside(on) {
+    if (on === amb.inside || !ambIn) return;
+    amb.inside = on;
+    const t = ctx.currentTime;
+    ambLp.frequency.cancelScheduledValues(t); ambLp.frequency.setTargetAtTime(on ? 1200 : NYQ, t, 0.4 / 3);
+    ambIn.gain.cancelScheduledValues(t); ambIn.gain.setTargetAtTime(on ? 10 ** (-5 / 20) : 1, t, 0.4 / 3);
+  }
+  // ---------- Ortsfeste Quellen (Schritt 7.2) ----------
+  /** Quellen der Karte festlegen: flackernde Lampe (Kennzeichen im Lampen-Eintrag, sonst FLACKER), Brunnen; Fahnen kommen mit S.flags. */
+  function srcWorld(w) {
+    srcStop();
+    srcs.length = 0;
+    if (!w) return;
+    const lamps = (w.lamps || []).filter((l) => l[7]), fb = FLACKER[w.name];
+    if (!lamps.length && fb) { const l = (w.lamps || []).find((q) => Math.abs(q[0] - fb[0]) < 0.6 && Math.abs(q[2] - fb[1]) < 0.6); if (l) lamps.push(l); }
+    for (const l of lamps) srcs.push({ name: 'quelle.lampe', x: l[0], y: l[1], z: l[2], v: null });
+    const bb = BRUNNEN[w.name];
+    if (bb) srcs.push({ name: 'quelle.brunnen', x: bb[0], y: bb[1], z: bb[2], v: null });
+    klangLater(srcs.map((q) => q.name));
+  }
+  function srcStop() { for (const q of srcs) if (q.v) { stop(q.v, 0.3); q.v = null; } }
+  /** Alle 0,25 s: Quellen in Reichweite starten (Schleife an zufälliger Stelle), außer Reichweite (mit 3 m Abstand) beenden. */
+  function srcCheck() {
+    for (const q of srcs) {
+      const R = KLANG[q.name], d = Math.hypot(q.x - LL.x, q.y - LL.y, q.z - LL.z);
+      if (q.v?.off) q.v = null;
+      if (!q.v && d < R.reach && klangHas(q.name, 0)) q.v = play(q.name, { bed: true, x: q.x, y: q.y, z: q.z, offset: Math.random() * 4 });
+      else if (q.v && d > R.reach + 3) { stop(q.v, 0.3); q.v = null; }
+    }
+  }
+  /** PannerNode (Kopfhörer-Modus) auf die Richtung der Quelle stellen; tau > 0 gleitet. */
+  function aim(p, pl, tau) {
+    const t = ctx.currentTime;
+    if (p.positionX) for (const [q, v] of [[p.positionX, pl.rx], [p.positionY, pl.ry], [p.positionZ, pl.rz]]) { if (tau) q.setTargetAtTime(v, t, tau); else q.value = v; }
+    else p.setPosition(pl.rx, pl.ry, pl.rz);
+  }
+  /** Lage, Pegel und Tiefpass eines ortsgebundenen Dauerklangs nachführen (je Bild); Verdeckung nur, wenn occ (alle 0,25 s). */
+  function follow(v, occ) {
+    const [x, y, z] = v.pos, pl = place(LL, x, y, z, v.reach, true), t = ctx.currentTime;
+    if (occ) v.blocked = !!phys && !v.free && !!pl && !sight(LL, x, y, z);
+    const vol = pl ? v.base * pl.vol * (v.blocked ? 0.5 : 1) : 0, fc = pl ? (v.blocked ? Math.max(500, pl.fc * 0.25) : pl.fc) : 700;
+    v.g.gain.setTargetAtTime(vol, t, 0.04);
+    if (v.lp?.frequency) v.lp.frequency.setTargetAtTime(fc, t, 0.04);
+    if (pl && v.pan?.pan) v.pan.pan.setTargetAtTime(clamp(pl.pan, -1, 1), t, 0.04);
+    else if (pl && v.pan?.panningModel) aim(v.pan, pl, 0.04);
+  }
+  /**
+   * Alle 100 ms (ab dem ersten Klang): ruft listen nicht mehr (Partie verlassen, Fenster verdeckt), enden die Umgebung und die Quellen der Karte;
+   * ruft es wieder, beginnen sie neu.
+   */
+  // ---------- Zustände (Schritt 7.5) ----------
+  /**
+   * Nahe Explosion (k = 1 direkt daneben … 0 in 10 m), ab delay s: alle Busse außer ui um bis zu 12 dB gesenkt und mit Tiefpass bis 900 Hz,
+   * nach 0,35 s in rund 0,85 s zurück (zusammen 1,2 s); dazu das Piepen (Sinus 4,2 kHz, tau 1,5 s).
+   */
+  function boomFx(k, delay = 0) {
+    const t = ctx.currentTime + delay, g = 10 ** ((-12 * k) / 20), f = NYQ * (900 / NYQ) ** k;
+    for (const z of Object.values(zst)) {
+      for (const [p, v, back] of [[z.duck.gain, g, 1], [z.lp.frequency, f, NYQ]]) {
+        p.cancelScheduledValues(t);
+        p.setTargetAtTime(v, t, 0.015);
+        p.setTargetAtTime(back, t + 0.35, 0.85 / 3);
+      }
+    }
+    play('zustand.piepen', { gain: k, when: delay });
+  }
+  /**
+   * Wenig Leben (unter 40): k = 0 bei 40 … 1 bei 10. Bus welt mit Tiefpass von 8 kHz (bei 40) bis 2,5 kHz (bei 10); darüber offen.
+   * Herzschlag und Atmen laufen in listen.
+   */
+  function lowHp(v) {
+    const on = v > 0 && v < 40, k = on ? clamp((40 - v) / 30, 0, 1) : 0, f = on ? 8000 * (2500 / 8000) ** k : NYQ;
+    hp.k = on ? Math.max(0.001, k) : 0;
+    if (!hp.lp || Math.abs(Math.log(f / hp.f)) < 0.03) return;
+    hp.f = f;
+    const t = ctx.currentTime;
+    hp.lp.frequency.cancelScheduledValues(t);
+    hp.lp.frequency.setTargetAtTime(f, t, 0.1);
+  }
+  /** Dauermusik dem Wunsch angleichen: alte ausblenden (1,5 s), neue einblenden, sobald berechnet. Während der Hörprobe (Raum vorgegeben) still. */
+  function musicPump() {
+    const want = forced ? null : mus.want, cur = mus.v && !mus.v.off && !mus.v.ending ? mus.v.name : null;
+    if (cur === want) return;
+    if (mus.v) { stop(mus.v, 1.5); mus.v = null; }
+    if (!want || !ok()) return;
+    if (!klangHas(want, 0)) { klangLater([want]); return; }
+    mus.v = play(want, { bed: true, fadeIn: 1.5 });
+  }
+  function tick() {
+    if (gone) return;
+    level(true);
+    musicPump();
+    if (performance.now() - lastListen > 600) { if (amb.on.length) ambStop(1); srcStop(); if (hp.k) lowHp(100); }
+  }
+
+  const S = {
+    play,
+    /** Welt der Partie (nach createPhysics): Verdeckung, Raumzonen, Umgebung der Karte. null: ohne Welt. */
+    setWorld(p, w) { phys = p || null; zcache.clear(); zoneT = 0; ambWorld(p ? w : null); srcWorld(p ? w : null); },
+    /** Fahnen der Stellungen („Herrschaft“) als ortsfeste Quellen: [{ x, y (Boden), z }]; leer: keine. */
+    flags(list = []) {
+      for (const q of srcs) if (q.name === 'quelle.fahne' && q.v) { stop(q.v, 0.3); q.v = null; }
+      for (let i = srcs.length - 1; i >= 0; i--) if (srcs[i].name === 'quelle.fahne') srcs.splice(i, 1);
+      for (const f of list) srcs.push({ name: 'quelle.fahne', x: f.x, y: (f.y || 0) + 3, z: f.z, v: null });
+      if (list.length) klangLater(['quelle.fahne']);
     },
+    /** Einmal je Bild (am Ende von M.aim): Hörer merken, Lautstärke nachführen, alle 0,25 s die Zone des Hörers bestimmen, Umgebung. */
+    listen(L, dt = 0) {
+      LL = L;
+      if (!ctx && ok() && amb.ready) graph();
+      if (!ctx) return;
+      lastListen = performance.now();
+      level(true);
+      // Ausklang: ein Feuerstoß aus mindestens 3 Schüssen ist zu Ende, wenn für das 1,6-Fache des Schussabstands nichts mehr kam
+      if (burst.n >= 3 && performance.now() / 1000 - burst.t > 1.6 * burst.dt) { play(`ausklang.${burst.kind}`, { own: true }); burst.n = 0; }
+      const occ = (zoneT -= dt) <= 0;
+      if (occ) { zoneT = 0.25; zoneL = zoneAt(L.x, Math.max(0, L.y - 1.6), L.z); fadeZone(); ambInside(zoneL === 'halle' || zoneL === 'raum'); srcCheck(); }
+      for (const v of beds) if (v.pos && !v.ending) follow(v, occ);
+      if (amb.want && amb.ready && !amb.on.length && ok()) ambStart();
+      if (amb.on.length && (amb.t -= dt) <= 0) { amb.t = 6 + 14 * Math.random(); ambOne(); }
+      // wenig Leben: Herzschlag (70 Schläge je Minute bei 40, 130 bei 10) und leises Atmen
+      if (hp.k) {
+        if ((hp.beat -= dt) <= 0) { hp.beat = 60 / (70 + 60 * hp.k); play('zustand.herz', { gain: 0.6 + 0.4 * hp.k }); }
+        if ((hp.breath -= dt) <= 0) { hp.breath = 3.2 - 1.2 * hp.k; play('zustand.atem', { gain: 0.6 + 0.4 * hp.k, rate: 1 + 0.15 * hp.k }); }
+      } else { hp.beat = 0; hp.breath = 0.6; }
+    },
+    /** Raum vorgeben (Hörprobe): 'hof' | 'halle' | 'gasse' | 'raum' | 'aus' (ohne Hall) – null: wieder selbst bestimmen. Solange vorgegeben, schweigt die Musik. */
+    room(z) { forced = z && (z === 'aus' || RAUM[z]) ? z : null; fadeZone(); if (ctx) musicPump(); },
+    /** Dauermusik: 'menue' (Schleife im Hauptmenü) oder null (aus). Darf je Bild gerufen werden. */
+    music(name) {
+      const want = name && KLANG[`musik.${name}`] ? `musik.${name}` : null;
+      if (want === mus.want && (ctx || !want)) return;
+      mus.want = want;
+      if (!ctx && want && ok()) graph();             // nach der ersten Geste: das Mischpult anlegen, auch wenn noch kein Klang lief
+      if (ctx) musicPump();
+    },
+    /** Motiv: 'start' | 'spannung' | 'sieg' | 'niederlage' | 'stufe', nach when s. */
+    motif(name, when = 0) { if (KLANG[`musik.${name}`]) play(`musik.${name}`, { when }); },
+    zone: () => forced || zoneL,
+    voices() { purge(performance.now()); return pool.length; },
+    /** Zustände: { hp } je Bild (Lebenspunkte der eigenen Figur, gefallen: 100), { boom: 0 … 1, delay } bei einer nahen Explosion. */
+    state(o) {
+      Object.assign(st, o);
+      if (!ctx) return;
+      if (o.boom > 0) boomFx(clamp(o.boom, 0, 1), o.delay || 0);
+      if (o.hp !== undefined) lowHp(o.hp);
+    },
+    /** Pegel und Tiefpass der Busse (Prüfungen): je Bus { gain, duck, lp }, welt zusätzlich hpLp; hall; innen: Dämpfung der Umgebung. */
+    busse: () => ({
+      ...Object.fromEntries([...Object.keys(BUSSE), 'hall'].map((b) => [b, { gain: bus[b]?.gain.value ?? null, duck: zst[b]?.duck.gain.value ?? 1, lp: zst[b]?.lp.frequency.value ?? null, ...(b === 'welt' ? { hpLp: hp.lp?.frequency.value } : {}) }])),
+      innen: ambIn ? { on: amb.inside, duck: ambIn.gain.value, lp: ambLp.frequency.value } : null,
+      limit: lim ? { threshold: lim.threshold.value, ratio: lim.ratio.value, trim: trim.gain.value } : null,
+    }),
+    stats: () => ({ ...stat, by: { ...stat.by }, voices: pool.length, beds: beds.length, bedNames: beds.map((v) => v.name) }),
+    /** Dauerklänge mit ihren aktuellen Werten (Prüfungen): Name, Pegel, Tiefpass, Stereo-Lage. */
+    beds: () => beds.map((v) => ({ name: v.name, gain: v.g.gain.value, fc: v.lp?.frequency?.value ?? null, pan: v.pan?.pan?.value ?? null, pos: v.pos || null })),
+    /** Alle Rezepte in Scheiben berechnen (siehe klangBake); first: Namen, die nach der Oberfläche zuerst drankommen. */
+    bake: (onProgress, first) => klangBake(first, onProgress),
+    ready: () => KBAKE.done,
+    tap: null,
+    /** Summe hinter Begrenzer und Ausgleich (für Mitschnitte in Prüfungen). */
+    out() { graph(); return S.tap; },
+    /** Schuss. L = Hörer {x, y, z, yaw}; own = die eigene Waffe. */
+    shot(kind, L, x, y, z, own = false, magK = 1) {
+      const k = SCHUSS[kind] ? kind : 'rifle';
+      if (own) {
+        play(`schuss.${k}.ich`, { own: true });
+        if (k === 'shotgun') play('mech.pump', { own: true, when: 0.28 });
+        else if (k === 'sniper') play('mech.bolt', { own: true, when: 0.35 });
+        // Magazin-Hinweis: unter 30 % zusätzlich der Leer-Klick, 18 dB (bei 0,3) bis 8 dB (letzter Schuss) unter der Spitze des Schusses, höher
+        if (magK < 0.3) { const q = clamp(1 - magK / 0.3, 0, 1); play('leer', { own: true, gain: 10 ** ((SCHUSS[k].db - 18 + 10 * q + 22) / 20), rate: 1 + 0.25 * q }); }
+        // Feuerstoß automatischer Waffen merken (Ausklang in listen)
+        const now = performance.now() / 1000;
+        if (AUSKLANG[k] && burst.kind === k && now - burst.t < 0.3) { burst.dt = now - burst.t; burst.n++; } else Object.assign(burst, { kind: k, n: 1, dt: 0 });
+        burst.t = now;
+        return;
+      }
+      // fremd: nah und fern zugleich, übergeblendet zwischen 25 und 60 m
+      const kf = sstep(25, 60, Math.hypot(x - L.x, y - L.y, z - L.z));
+      if (kf < 1) play(`schuss.${k}.nah`, { L, x, y, z, gain: 1 - kf });
+      if (kf > 0) play(`schuss.${k}.fern`, { L, x, y, z, gain: kf });
+    },
+    /** Explosion: nah und fern zugleich, übergeblendet zwischen 30 und 70 m. */
     explosion(L, x, y, z) {
-      if (!ok()) return;
-      const pl = place(L, x, y, z, 140);
-      if (!pl) return;
-      const g = chain(pl.pan, 0.9 * pl.vol);
-      burst(g, { f: 1800 * (1 - pl.far * 0.6), f2: 90, dur: 1.1, vol: 1.3, rate: 0.5 });
-      osc(g, { f: 82, f2: 30, dur: 0.75, vol: 1.3 });
-      burst(g, { type: 'highpass', f: 2200, dur: 0.07, vol: 0.5 });
-      burst(g, { f: 500, f2: 120, dur: 2, vol: 0.22, attack: 0.1, rate: 0.4 });
+      const d = Math.hypot(x - L.x, y - L.y, z - L.z), kf = sstep(30, 70, d);
+      if (kf < 1) play('explosion.nah', { L, x, y, z, gain: 1 - kf });
+      if (kf > 0) play('explosion.fern', { L, x, y, z, gain: kf });
+      if (d < 10 && ok()) S.state({ boom: 1 - d / 10, delay: d / 343 + 0.03 });       // nahe Explosion: kurz taub (nach dem ersten Knall)
     },
     impact(L, x, y, z, kind) {
-      if (!ok()) return;
-      const pl = place(L, x, y, z, 26);
-      if (!pl) return;
-      const g = chain(pl.pan, 0.28 * pl.vol);
-      if (kind === 'metal') { osc(g, { type: 'square', f: rnd(1500, 2600), f2: 900, dur: 0.07, vol: 0.2 }); burst(g, { type: 'bandpass', f: 4200, q: 4, dur: 0.05, vol: 0.5 }); }
-      else if (kind === 'wood') burst(g, { type: 'bandpass', f: 700, q: 2, dur: 0.07, vol: 0.9 });
-      else if (kind === 'body') burst(g, { f: 500, dur: 0.08, vol: 0.9 });
-      else burst(g, { type: 'bandpass', f: rnd(1400, 2200), q: 1.2, dur: 0.06, vol: 0.8 });
+      play(`einschlag.${IMPACT_SND[kind] || 'beton'}`, { L, x, y, z });
+      if (kind === 'metal' && Math.random() < 0.15) play('querschlaeger', { L, x, y, z, when: 0.008 });       // Querschläger
     },
-    step(L, x, y, z, own, loud = 1) {
-      if (!ok()) return;
-      const pl = own ? { vol: 1, pan: 0 } : place(L, x, y, z, 18);
-      if (!pl) return;
-      const g = chain(pl.pan, (own ? 0.1 : 0.16) * pl.vol * loud);
-      burst(g, { f: rnd(260, 420), f2: 110, dur: 0.09, vol: 1, rate: 0.7 });
-      burst(g, { type: 'bandpass', f: rnd(1800, 2600), q: 1.5, dur: 0.03, vol: 0.2 });
+    /** Schritt; surf = Trefferart des Untergrunds (phys.surface). Eigene Schritte auf dem Bus foley, 4 dB leiser als fremde aus nächster Nähe. */
+    step(L, x, y, z, own, loud = 1, surf) {
+      const name = `schritt.${GRUND[surf] || 'stein'}`;
+      if (own) {
+        play(name, { own: true, bus: 'foley', gain: loud * 10 ** ((BUSSE.welt - BUSSE.foley - 4) / 20) });
+        if (loud > 1.2 && (sprintN = (sprintN + 1) % 2) === 0) play('klappern', { own: true });          // Ausrüstung klappert bei jedem zweiten Sprintschritt
+      }
+      else play(name, { L, x, y, z, gain: loud });
     },
-    land() { if (ok()) { const g = chain(0, 0.3); burst(g, { f: 300, f2: 80, dur: 0.16, vol: 1, rate: 0.6 }); osc(g, { f: 90, f2: 45, dur: 0.14, vol: 0.5 }); } },
-    reload(part) {
-      if (!ok()) return;
-      const g = chain(0.1, 0.3);
-      if (part === 'out') { burst(g, { type: 'bandpass', f: 1900, q: 3, dur: 0.05, vol: 0.9 }); osc(g, { type: 'square', f: 420, f2: 210, dur: 0.05, vol: 0.12 }); }
-      else if (part === 'in') { burst(g, { type: 'bandpass', f: 1300, q: 2.5, dur: 0.07, vol: 1 }); osc(g, { type: 'square', f: 260, f2: 150, dur: 0.07, vol: 0.2 }); }
-      else if (part === 'shell') { burst(g, { type: 'bandpass', f: 1500, q: 3, dur: 0.05, vol: 0.8 }); osc(g, { type: 'triangle', f: 520, f2: 300, dur: 0.05, vol: 0.2 }); }
-      else { burst(g, { type: 'bandpass', f: 2600, q: 4, dur: 0.04, vol: 0.9 }); burst(g, { type: 'bandpass', f: 1700, q: 4, dur: 0.05, vol: 0.9, when: 0.09 }); }
+    /** Landung der eigenen Figur; k = Stärke 0 … 1. */
+    land(surf, k = 1) { play(`landung.${GRUND[surf] || 'stein'}`, { own: true, gain: 0.35 + 0.65 * clamp(k, 0, 1) }); },
+    /**
+     * Hülse der eigenen Waffe fällt auf den Untergrund. when: Verzögerung (s) – ohne Angabe die Fallzeit nach Waffenart (Schrotflinte und
+     * Scharfschützengewehr werfen erst beim Repetieren aus). Phase 6 ruft es beim Aufprall der sichtbaren Hülse mit when = 0.
+     */
+    shell(surf, kind, when) { play(`huelse.${GRUND[surf] || 'stein'}`, { own: true, when: when ?? HUELSE_T[kind] ?? 0.5, rate: HUELSE_RATE[kind] || 1 }); },
+    /**
+     * Nachladen der eigenen Waffe: part 'out' | 'in' | 'shell' | 'bolt', kind = Waffenart (Abspielrate je Klasse). Der Verschluss der
+     * Schrotflinte ist der Vorderschaft (mech.pump), der des Scharfschützengewehrs der Kammerstängel (mech.bolt). Phase 6 ruft es aus der Zeitleiste.
+     */
+    reload(part, kind) {
+      if (part === 'bolt' && (kind === 'shotgun' || kind === 'sniper')) { play(kind === 'shotgun' ? 'mech.pump' : 'mech.bolt', { own: true }); return; }
+      play(`nachladen.${RELOAD_SND[part] || 'verschluss'}`, { own: true, pan: 0.1, rate: RELOAD_RATE[kind] || 1 });
     },
-    dry() { if (ok()) burst(chain(0, 0.2), { type: 'bandpass', f: 3200, q: 5, dur: 0.03, vol: 0.9 }); },
-    swap() { if (ok()) burst(chain(0, 0.14), { type: 'bandpass', f: 900, q: 0.8, dur: 0.16, vol: 0.9, attack: 0.05 }); },
-    swing() { if (ok()) burst(chain(0, 0.25), { type: 'bandpass', f: 1200, f2: 3200, q: 1.2, dur: 0.16, vol: 0.9, attack: 0.04 }); },
+    dry() { play('leer', { own: true }); },
+    swap() { play('wechsel', { own: true }); },
+    swing() { play('messer.schwung', { own: true }); },
+    /** Messer: 'schwung' | 'treffer' | 'wand' */
+    knife(art) { play(`messer.${art === 'treffer' || art === 'wand' ? art : 'schwung'}`, { own: true }); },
+    /** Anlegen (true) oder Absetzen (false) der eigenen Waffe */
+    ads(on) { play(on ? 'anlegen' : 'absetzen', { own: true }); },
+    jump() { play('stoff', { own: true }); play('klappern', { own: true, gain: 0.7 }); },
+    mantle() { play('stoff', { own: true, rate: 0.85, gain: 1.3 }); play('klappern', { own: true }); },
+    /** Stoff der eigenen Kleidung (Ducken, Aufstehen) */
+    cloth() { play('stoff', { own: true, gain: 0.7 }); },
+    bodyfall(L, x, y, z) { play('koerper.fall', { L, x, y, z }); },
+    pickup() { play('munition', { own: true }); },
+    /** Treffer-Bestätigung. Leiter: jeder weitere Treffer binnen 0,4 s hebt die Tonhöhe um 6 %, höchstens fünfmal. */
     hit(head, kill) {
-      if (!ok()) return;
-      const g = chain(0, 0.34);
-      burst(g, { type: 'bandpass', f: head ? 3600 : 2500, q: 6, dur: 0.045, vol: 1 });
-      osc(g, { type: 'triangle', f: head ? 1900 : 1300, dur: 0.05, vol: 0.3 });
-      if (kill) { osc(g, { f: 880, dur: 0.12, vol: 0.28, when: 0.05 }); osc(g, { f: 1318, dur: 0.2, vol: 0.26, when: 0.12 }); }
+      const now = performance.now() / 1000;
+      ladder.n = now - ladder.t < 0.4 ? Math.min(5, ladder.n + 1) : 0;
+      ladder.t = now;
+      play(head ? 'kopfschuss' : 'treffer', { rate: 1.06 ** ladder.n });
+      if (kill) play('abschuss');
     },
-    hurt() { if (ok()) { const g = chain(0, 0.4); burst(g, { f: 420, f2: 120, dur: 0.14, vol: 1 }); osc(g, { f: 120, f2: 60, dur: 0.13, vol: 0.6 }); } },
-    whiz(pan) { if (ok()) burst(chain(pan, 0.2), { type: 'bandpass', f: 2800, f2: 900, q: 3, dur: 0.11, vol: 0.9, attack: 0.02 }); },
-    bounce(L, x, y, z) { const pl = ok() && place(L, x, y, z, 30); if (pl) osc(chain(pl.pan, 0.2 * pl.vol), { type: 'triangle', f: rnd(900, 1300), f2: 500, dur: 0.06, vol: 0.6 }); },
-    pin() { if (ok()) { const g = chain(0, 0.25); osc(g, { type: 'square', f: 2400, f2: 1600, dur: 0.03, vol: 0.3 }); burst(g, { type: 'bandpass', f: 800, q: 1, dur: 0.2, vol: 0.5, when: 0.06, attack: 0.06 }); } },
-    ui(kind = 'tick') {
-      if (!ok()) return;
-      const g = chain(0, 0.22);
-      if (kind === 'tick') osc(g, { type: 'triangle', f: 1500, f2: 1100, dur: 0.03, vol: 0.25 });
-      else if (kind === 'ok') { osc(g, { f: 620, f2: 930, dur: 0.09, vol: 0.4 }); }
-      else if (kind === 'back') osc(g, { f: 700, f2: 420, dur: 0.09, vol: 0.35 });
-      else if (kind === 'beep') osc(g, { type: 'square', f: 880, dur: 0.09, vol: 0.14 });
-      else if (kind === 'go') { osc(g, { type: 'square', f: 1320, dur: 0.3, vol: 0.14 }); }
+    hurt() { play('schaden', { own: true }); },
+    /** Kugel knapp am Kopf vorbei: pan −1 … 1; kind = Waffenart des Schützen (Überschall knallt, 20 ms später das Pfeifen). */
+    whiz(pan, kind) {
+      const sup = !!UEBERSCHALL[kind];
+      if (sup) play('knall', { pan });
+      play('pfeifen', { pan, when: sup ? 0.02 : 0 });
     },
-    /** Kurze Tonfolgen für Ereignisse */
-    jingle(kind) {
+    bounce(L, x, y, z, surf) { play(`granate.aufprall.${GRUND[surf] || 'stein'}`, { L, x, y, z }); },
+    /**
+     * Rutschen (0,75 s, einmal je Beginn); kind = Trefferart des Bodens. Die eigene Figur lauter und nicht ortsgebunden (Bus foley).
+     * Liefert die Stimme: endet das Rutschen früher (Sprung, Anstoß), kann der Aufrufer sie mit stop(0.08) ausblenden.
+     */
+    slide(L, x, y, z, own, kind) {
+      const name = `rutschen.${GRUND[kind] || 'stein'}`;
+      if (own) return play(name, { own: true, bus: 'foley', gain: 10 ** ((BUSSE.welt - BUSSE.foley + 3) / 20) });
+      return play(name, { L, x, y, z });
+    },
+    /** Zischen eines Fasses kurz vor der Explosion: dur 0,12 – 0,22 s, ansteigend; endet mit dur (dann kommt die Explosion). */
+    fuse(L, x, y, z, dur = 0.18) { play('zischen', { L, x, y, z, dur: clamp(dur, 0.05, 0.25) }); },
+    /**
+     * Überflug beim Luftschlag (2,6 s): die Maschine fliegt in Blickrichtung yaw des Rufers über den Zielpunkt (x, y, z), 45 m hoch, mit 70 m/s;
+     * über ihr ist sie nach 1,3 s. Die Stereo-Lage wandert mit dem Flugweg (vom Hörer aus gesehen), der Pegel sinkt mild mit dem Abstand zum Ziel.
+     */
+    jet(L, x, y, z, yaw = 0) {
       if (!ok()) return;
-      const g = chain(0, 0.3);
-      const seq = {
-        win: [[392, 0], [523, 0.14], [659, 0.28], [784, 0.42], [1046, 0.62]],
-        lose: [[392, 0], [349, 0.2], [311, 0.4], [261, 0.62]],
-        level: [[523, 0], [659, 0.1], [784, 0.2], [1046, 0.32], [1318, 0.46]],
-        streak: [[659, 0], [988, 0.1]],
-        uav: [[1175, 0], [1175, 0.16], [1568, 0.32]],
-        capture: [[523, 0], [784, 0.12]],
-        lost: [[523, 0], [370, 0.14]],
-        medal: [[880, 0], [1175, 0.08]],
-      }[kind] || [];
-      seq.forEach(([f, when], i) => {
-        osc(g, { type: 'triangle', f, dur: i === seq.length - 1 ? 0.6 : 0.24, vol: 0.4, when, attack: 0.01 });
-        osc(g, { f: f * 2, dur: 0.2, vol: 0.08, when, attack: 0.01 });
-      });
+      const fx = Math.sin(yaw), fz = -Math.cos(yaw), curve = new Float32Array(27);
+      for (let i = 0; i < curve.length; i++) {
+        const t = i * 0.1 - 1.3, px = x + fx * 70 * t - L.x, py = y + 45 - L.y, pz = z + fz * 70 * t - L.z, d = Math.hypot(px, py, pz) || 1;
+        curve[i] = clamp(((px * Math.cos(L.yaw) + pz * Math.sin(L.yaw)) / d) * 0.9, -1, 1);
+      }
+      const v = play('jet', { pan: curve[0] || 0.001, gain: clamp(1 - Math.hypot(x - L.x, z - L.z) / 300, 0.3, 1) });
+      const p = v?.nodes.find((n) => n.pan);
+      if (p) try { p.pan.setValueCurveAtTime(curve, ctx.currentTime + 0.01, 2.6); } catch { /* ohne Wandern */ }
+    },
+    pin() { play('granate.splint', { own: true }); },
+    ui(kind = 'tick') { play(`ui.${kind}`); },
+    /** Kurze Tonfolgen für Ereignisse (Funk-Signale) */
+    jingle(kind) { play(`signal.${kind}`); },
+    /**
+     * Eroberungs-Fortschritt einer Stellung key (je Bild): p = 0 … 1, solange die eigene Seite erobert und man selbst darin steht, sonst −1.
+     * Je volle 10 % ein Funk-Klick, dessen Tonhöhe mit dem Fortschritt steigt.
+     */
+    progress(key, p) {
+      const k = p >= 0 ? Math.floor(p * 10) : -1, was = progStep.get(key) ?? -1;
+      if (k > was && k > 0) play('ui.fortschritt', { rate: 1 + 0.06 * k });
+      progStep.set(key, k);
     },
     /** App geschlossen: nichts mehr spielen, den eigenen Ausgang abhängen (was schon klingt, klingt kurz aus). */
     dispose() {
       gone = true;
-      const o = out;
-      out = null;
-      if (o) setTimeout(() => { try { o.disconnect(); } catch { /* schon ab */ } }, 2500);
+      clearInterval(tickId);
+      for (const v of [...pool, ...beds]) if (v.loop) stop(v, 0.3);
+      const s = sum;
+      if (s) setTimeout(() => { try { s.disconnect(); } catch { /* schon ab */ } }, 2500);
     },
   };
   return S;
@@ -1995,35 +5058,132 @@ function createSound(getVolume) {
 // ==========================================================================
 // 9 · Spiel
 // ==========================================================================
-// ---------- 9a · Effekte: Funken, Staub, Leuchtspuren, Einschusslöcher, Lichtblitze ----------
-function createFx() {
+// ---------- 9a · Effekte: Funken, Staub, Rauch, Feuer, Leuchtspuren, Einschusslöcher, Trümmer, Blut, Lichtblitze ----------
+/**
+ * Mündungsfeuer je Waffenart (WEAPONS[…].snd): s = Größe des Sterns in m, side = Seitenflammen, sparks = Funken nach vorn,
+ * dust = Staubstoß am Boden unter der Mündung, light = Radius des Lichts, smoke = Größe der Rauchwolke danach.
+ */
+const MUZZLE = {
+  pistol: { s: 0.06, side: 0, sparks: 0, light: 5, smoke: 0.045 },
+  smg: { s: 0.07, side: 0, sparks: 0, light: 6, smoke: 0.05 },
+  rifle: { s: 0.085, side: 2, sparks: 0, light: 7, smoke: 0.06 },
+  lmg: { s: 0.095, side: 2, sparks: 0, light: 8, smoke: 0.065 },
+  dmr: { s: 0.1, side: 2, sparks: 0, light: 8, smoke: 0.07 },
+  sniper: { s: 0.12, side: 2, sparks: 0, dust: true, light: 10, smoke: 0.085 },
+  shotgun: { s: 0.14, side: 0, sparks: 6, light: 10, smoke: 0.09 },
+};
+/**
+ * Effekte einer Partie. prefs: Einstellungen der App (quality für Obergrenze und Schwebstaub, blood), phys: Kollision (Boden unter Trümmern,
+ * Strahl für Blutflecken), world: Karte (Sandschleier auf Sandböden). Partikel: puff(x, y, z, vx, vy, vz, o) mit o = { life, s, grow, c, a, k, grav, drag, frames, seed, damp }
+ * (frames: höchstens so viele Bilder sichtbar, seed: Saat des Rauschens im Shader, sonst zufällig, damp: das Wachsen klingt mit dieser Rate ab).
+ */
+function createFx(prefs = null, phys = null, world = null) {
   const quads = new Float32Array(MAX_QUADS * 4 * QSTRIDE);
-  const parts = [], tracers = [], decals = [], lights = [];
+  const parts = [], tracers = [], decals = [], lights = [], chunks = [], blood = [], booms = [], columns = [];
+  const counts = new Int32Array(12);                 // Vierecke je Art im letzten Bild (Prüfungen, etwa Q_BLOOD)
   let qn = 0, rx = 1, ry = 0, rz = 0, ux = 0, uy = 1, uz = 0, cx = 0, cy = 0, cz = 0;
+  const seedOf = () => (Math.random() * 64) | 0;
+  /** Obergrenze der Partikel nach Qualitätsstufe (TIERS.particles; „Auto“ wie „Mittel“) */
+  const capOf = (n) => Math.round(n * (TIERS[prefs?.quality]?.particles ?? 1));
 
-  function corner(o, x, y, z, u, v, r, g, b, a, k) {
+  function corner(o, x, y, z, u, v, r, g, b, a, k, e0, e1) {
     quads[o] = x; quads[o + 1] = y; quads[o + 2] = z; quads[o + 3] = u; quads[o + 4] = v;
-    quads[o + 5] = r; quads[o + 6] = g; quads[o + 7] = b; quads[o + 8] = a; quads[o + 9] = k;
+    quads[o + 5] = r; quads[o + 6] = g; quads[o + 7] = b; quads[o + 8] = a; quads[o + 9] = k; quads[o + 10] = e0; quads[o + 11] = e1;
   }
-  /** Viereck aus Mittelpunkt und zwei Halbachsen */
-  function quad(x, y, z, ax, ay, az, bx, by, bz, r, g, b, a, k) {
+  /** Viereck aus Mittelpunkt und zwei Halbachsen; e0 = Saat + Alter, e1 = Größe (bei flachen Arten die Fläche 0 … 5) */
+  function quad(x, y, z, ax, ay, az, bx, by, bz, r, g, b, a, k, e0 = 0, e1 = 0) {
     if (qn >= MAX_QUADS) return;
     const o = qn++ * 4 * QSTRIDE;
-    corner(o, x - ax - bx, y - ay - by, z - az - bz, 0, 0, r, g, b, a, k);
-    corner(o + QSTRIDE, x + ax - bx, y + ay - by, z + az - bz, 1, 0, r, g, b, a, k);
-    corner(o + 2 * QSTRIDE, x + ax + bx, y + ay + by, z + az + bz, 1, 1, r, g, b, a, k);
-    corner(o + 3 * QSTRIDE, x - ax + bx, y - ay + by, z - az + bz, 0, 1, r, g, b, a, k);
+    counts[k | 0]++;
+    corner(o, x - ax - bx, y - ay - by, z - az - bz, 0, 0, r, g, b, a, k, e0, e1);
+    corner(o + QSTRIDE, x + ax - bx, y + ay - by, z + az - bz, 1, 0, r, g, b, a, k, e0, e1);
+    corner(o + 2 * QSTRIDE, x + ax + bx, y + ay + by, z + az + bz, 1, 1, r, g, b, a, k, e0, e1);
+    corner(o + 3 * QSTRIDE, x - ax + bx, y - ay + by, z - az + bz, 0, 1, r, g, b, a, k, e0, e1);
   }
-  /** Zur Kamera gedrehtes Viereck */
-  function bill(x, y, z, s, r, g, b, a, k, rot = 0) {
-    const c = Math.cos(rot) * s, sn = Math.sin(rot) * s;
-    quad(x, y, z, rx * c + ux * sn, ry * c + uy * sn, rz * c + uz * sn, ux * c - rx * sn, uy * c - ry * sn, uz * c - rz * sn, r, g, b, a, k);
+  /** Zur Kamera gedrehtes Viereck (nie um die Blickachse gedreht: die Saat dreht das Rauschen, die Scheinnormale bleibt richtig) */
+  function bill(x, y, z, s, r, g, b, a, k, e0 = 0) {
+    quad(x, y, z, rx * s, ry * s, rz * s, ux * s, uy * s, uz * s, r, g, b, a, k, e0, s);
+  }
+  /** Viereck in Richtung (dx, dy, dz) gestreckt, quer zum Blick: Länge len, halbe Breite w; u läuft vom Ende (0) zum Kopf (1) */
+  function streak(x, y, z, dx, dy, dz, len, w, r, g, b, a, k, e0 = 0) {
+    const vx = cx - x, vy = cy - y, vz = cz - z;
+    let sx = dy * vz - dz * vy, sy = dz * vx - dx * vz, sz = dx * vy - dy * vx;
+    const sl = w / (Math.hypot(sx, sy, sz) || 1), hl = len / 2;
+    sx *= sl; sy *= sl; sz *= sl;
+    quad(x - dx * hl, y - dy * hl, z - dz * hl, dx * hl, dy * hl, dz * hl, sx, sy, sz, r, g, b, a, k, e0, w);
+  }
+  /** Flach auf einer Fläche (axis 0 … 2, sign ±1), etwas davor; Kantenlänge 2·s, gedreht um rot */
+  function flat(x, y, z, axis, sign, s, r, g, b, a, k, e0, rot = 0) {
+    const o = 0.012 * sign, c = Math.cos(rot) * s, sn = Math.sin(rot) * s, f = axis * 2 + (sign > 0 ? 1 : 0);
+    if (axis === 0) quad(x + o, y, z, 0, sn, c, 0, c, -sn, r, g, b, a, k + Q_FLAT, e0, f);
+    else if (axis === 1) quad(x, y + o, z, c, 0, sn, -sn, 0, c, r, g, b, a, k + Q_FLAT, e0, f);
+    else quad(x, y, z + o, c, sn, 0, -sn, c, 0, r, g, b, a, k + Q_FLAT, e0, f);
   }
   function puff(x, y, z, vx, vy, vz, o) {
-    if (parts.length > 520) parts.shift();
-    parts.push({ x, y, z, vx, vy, vz, life: o.life, max: o.life, s: o.s, grow: o.grow || 0, r: o.c[0], g: o.c[1], b: o.c[2], a: o.a ?? 1, k: o.k, grav: o.grav || 0, drag: o.drag || 0, rot: Math.random() * TAU });
+    if (parts.length >= capOf(FX_MAX.parts)) parts.shift();
+    parts.push({ x, y, z, vx, vy, vz, life: o.life, max: o.life, s: o.s, grow: o.grow || 0, r: o.c[0], g: o.c[1], b: o.c[2], a: o.a ?? 1, k: o.k,
+      grav: o.grav || 0, drag: o.drag || 0, frames: o.frames || 0, seed: o.seed ?? seedOf(), dir: o.dir || null, len: o.len || 0, damp: o.damp || 0 });
+  }
+  let own = { kind: 'rifle', seed: 0 };              // letzter eigener Schuss: Art und Saat des Mündungsfeuers in der Hand
+  /** Seitenflammen und Flamme nach vorn eines fremden Mündungsfeuers: gestreckt, der helle Kopf sitzt an der Mündung, die Spitze zeigt nach außen */
+  function flame(x, y, z, dx, dy, dz, len, w, life, seed) {
+    puff(x, y, z, 0, 0, 0, { life, s: w, c: [1, 0.72, 0.38], k: Q_SPARK, dir: [-dx, -dy, -dz], len, seed });
   }
   const DUST = { concrete: [0.62, 0.6, 0.57], sand: [0.72, 0.6, 0.42], wood: [0.5, 0.36, 0.2], cloth: [0.7, 0.7, 0.7], metal: [0.45, 0.45, 0.47] };
+  /**
+   * Einschlag je Material: v = Variante von Q_CRACK (Beton, Metall, Holz, Sand, Stoff), s = halbe Kantenlänge des Lochs, life/fade in s,
+   * n = Trümmerstücke [min, max] mit Größe [Breite, Höhe, Länge] und Farbe (linear, Art K_*).
+   */
+  const HOLE = {
+    concrete: { v: 0, s: [0.05, 0.07], life: 40, fade: 4, n: [3, 5], box: [0.018, 0.014, 0.022], col: [0.34, 0.33, 0.31, K_MATTE] },
+    metal: { v: 1, s: [0.03, 0.04], life: 40, fade: 4, n: [0, 0] },
+    wood: { v: 2, s: [0.045, 0.06], life: 40, fade: 4, n: [3, 4], box: [0.009, 0.009, 0.06], col: [0.55, 0.34, 0.13, K_MATTE] },
+    sand: { v: 3, s: [0.08, 0.1], life: 8, fade: 3, n: [0, 0] },
+    cloth: { v: 4, s: [0.012, 0.016], life: 40, fade: 4, n: [2, 2], box: [0.004, 0.004, 0.05], col: [0.45, 0.45, 0.43, K_MATTE] },
+  };
+  /**
+   * Schwebstaub (TIERS.dust): 160 Teilchen in einem 12-m-Würfel um die Kamera, Orte aus einer festen Streufolge mit Umlauf (das Feld
+   * wandert mit, ohne neu zu entstehen), am Würfelrand ausgeblendet. Sie sind beleuchtet wie Staub – sichtbar also vor allem im Licht
+   * (Sonne, Lampen). Auf Sandböden zusätzlich 18 große, flache Sandschleier knapp über dem Boden in 40 m um die Kamera.
+   */
+  const MOTES = new Float32Array(160 * 6), VEILS = new Float32Array(18 * 5);
+  {
+    let sd = 7;
+    const r = () => ((sd = (Math.imul(sd, 1664525) + 1013904223) >>> 0) / 4294967296);
+    for (let i = 0; i < 160; i++) MOTES.set([r() * 12, r() * 12, r() * 12, r() * TAU, 0.014 + r() * 0.016, 0.25 + r() * 0.2], i * 6);
+    for (let i = 0; i < 18; i++) VEILS.set([r() * 40, r() * 40, 0.35 + r() * 0.45, 1.6 + r() * 1.6, r()], i * 5);
+  }
+  const sandy = world?.groundHit === 'sand', moteCol = sandy ? [0.86, 0.76, 0.6] : [0.82, 0.8, 0.76];
+  let clock = 0;
+  const wrap = (v, c, n) => c - n / 2 + ((((v - (c - n / 2)) % n) + n) % n);
+  function motes() {
+    if (!(TIERS[prefs?.quality] || TIERS.medium).dust) return;
+    for (let i = 0, o = 0; i < 160; i++, o += 6) {
+      const ph = MOTES[o + 3], t = clock * 0.35 + ph;
+      const x = wrap(MOTES[o] + clock * 0.12 + Math.sin(t) * 0.25, cx, 12), y = wrap(MOTES[o + 1] + Math.sin(t * 0.7) * 0.3, cy, 12), z = wrap(MOTES[o + 2] + clock * 0.05 + Math.cos(t) * 0.25, cz, 12);
+      const e = Math.max(Math.abs(x - cx), Math.abs(y - cy), Math.abs(z - cz)), a = MOTES[o + 5] * (1 - sstep(4.2, 6, e));
+      if (a > 0.004 && y > 0.02) bill(x, y, z, MOTES[o + 4], moteCol[0], moteCol[1], moteCol[2], a, Q_DUST, (i & 63) + 0.5);
+    }
+    if (!sandy) return;
+    for (let i = 0, o = 0; i < 18; i++, o += 5) {
+      const x = wrap(VEILS[o] + clock * 0.6, cx, 40), z = wrap(VEILS[o + 1] + clock * 0.25, cz, 40), d = Math.hypot(x - cx, z - cz);
+      const a = (0.12 + 0.08 * VEILS[o + 4]) * (1 - sstep(14, 20, d)) * sstep(1.5, 4, d);
+      const w = VEILS[o + 3], l = Math.hypot(rx, rz) || 1;            // zur Kamera gedreht, aber aufrecht
+      if (a > 0.004) quad(x, VEILS[o + 2], z, (rx / l) * w, 0, (rz / l) * w, 0, w * 0.3, 0, 0.84, 0.72, 0.54, a, Q_DUST, (i * 7) & 63, 0.5);
+    }
+  }
+  /** Blut nur mit Einstellung „Blut“ (prefs.blood, Vorgabe an); Flecken: höchstens FX_MAX.blood, 20 s sichtbar, dann 4 s verblassend */
+  const bloodOn = () => prefs?.blood !== false;
+  function splat(x, y, z, axis, sign, s) {
+    if (blood.length >= FX_MAX.blood) blood.shift();
+    blood.push({ x, y, z, axis, sign, s, life: 24, fade: 4, a: 0.85, k: Q_BLOOD, c: [0.25, 0.035, 0.03], seed: seedOf(), rot: rnd(TAU) });
+  }
+  /** Trümmerstück: kleiner Quader mit Drall, Schwerkraft 14, ein Aufprall auf der Höhe, die beim Entstehen einmal bestimmt wird */
+  function chunk(x, y, z, vx, vy, vz, box, col, life) {
+    if (chunks.length >= capOf(FX_MAX.chunks)) chunks.shift();
+    const f = phys ? phys.floorBelow(x, y + 0.02, z, 0.02) : 0, k = rnd(0.7, 1.3);
+    chunks.push({ x, y, z, vx, vy, vz, rx: rnd(TAU), ry: rnd(TAU), wx: rnd(-25, 25), wy: rnd(-25, 25), sx: box[0] * k, sy: box[1] * k, sz: box[2] * k, col, life, floor: f, hit: 0 });
+  }
 
   const F = {
     quads, lights,
@@ -2034,41 +5194,143 @@ function createFx() {
       if (tracers.length > 60) tracers.shift();
       tracers.push({ x0, y0, z0, x1, y1, z1, len, t: 0, dur: Math.max(0.035, len / 300), w: thin ? 0.018 : 0.03 });
     },
-    /** Einschlag in die Welt: Loch, Staub oder Funken. axis/sign beschreiben die getroffene Fläche. */
+    /** Einschlag in die Welt: Loch je Material (HOLE), Trümmer, Funken oder Staub. axis/sign beschreiben die getroffene Fläche. */
     impact(x, y, z, axis, sign, kind) {
-      if (decals.length > 170) decals.shift();
-      decals.push({ x, y, z, axis, sign, s: rnd(0.014, 0.022), life: 40, k: Q_DECAL, c: 0.035 });
+      const h = HOLE[kind] || HOLE.concrete, col = DUST[kind] || DUST.concrete;
+      if (decals.length >= FX_MAX.decals) decals.shift();
+      decals.push({ x, y, z, axis, sign, s: rnd(h.s[0], h.s[1]), life: h.life, fade: h.fade, a: 1, k: Q_CRACK, c: col, seed: h.v + 8 * ((Math.random() * 8) | 0), rot: rnd(TAU) });
       const n = [0, 0, 0];
       n[axis] = sign;
-      const col = DUST[kind] || DUST.concrete;
-      if (kind === 'metal') {
-        for (let i = 0; i < 5; i++) puff(x, y, z, n[0] * rnd(2, 6) + rnd(-2, 2), n[1] * rnd(2, 6) + rnd(-1, 3), n[2] * rnd(2, 6) + rnd(-2, 2), { life: rnd(0.12, 0.3), s: 0.025, c: [1, 0.75, 0.35], k: Q_GLOW, grav: 12 });
-        puff(x + n[0] * 0.03, y + n[1] * 0.03, z + n[2] * 0.03, 0, 0, 0, { life: 0.06, s: 0.22, c: [1, 0.8, 0.5], k: Q_GLOW });
+      const ox = x + n[0] * 0.04, oy = y + n[1] * 0.04, oz = z + n[2] * 0.04;
+      for (let i = 0, m = Math.round(rnd(h.n[0], h.n[1])); i < m; i++) {
+        const v = rnd(1.5, 3.5);
+        chunk(ox, oy, oz, n[0] * v + rnd(-1.2, 1.2), n[1] * v + rnd(0.3, 2.2), n[2] * v + rnd(-1.2, 1.2), h.box, h.col, rnd(0.6, 1.2));
       }
-      for (let i = 0; i < 3; i++) puff(x + n[0] * 0.05, y + n[1] * 0.05, z + n[2] * 0.05, n[0] * rnd(0.6, 2) + rnd(-0.5, 0.5), n[1] * rnd(0.6, 2) + rnd(-0.2, 0.9), n[2] * rnd(0.6, 2) + rnd(-0.5, 0.5),
-        { life: rnd(0.35, 0.7), s: rnd(0.05, 0.09), grow: rnd(0.5, 0.9), c: col, a: kind === 'metal' ? 0.25 : 0.55, k: Q_DUST, drag: 3, grav: -0.3 });
+      if (kind === 'metal') {
+        for (let i = 0, m = Math.round(rnd(6, 8)); i < m; i++) {
+          const v = rnd(3, 8);
+          puff(ox, oy, oz, n[0] * v + rnd(-2.5, 2.5), n[1] * v + rnd(-1, 3), n[2] * v + rnd(-2.5, 2.5), { life: rnd(0.15, 0.35), s: 0.006, c: [1, 0.72, 0.36], k: Q_SPARK, grav: 12, drag: 0.8 });
+        }
+        puff(x + n[0] * 0.03, y + n[1] * 0.03, z + n[2] * 0.03, 0, 0, 0, { life: 0.05, s: 0.16, c: [1, 0.8, 0.5], k: Q_GLOW });
+        puff(ox, oy, oz, n[0] * 0.8, n[1] * 0.8 + 0.3, n[2] * 0.8, { life: rnd(0.3, 0.5), s: 0.05, grow: 0.5, c: col, a: 0.25, k: Q_DUST, drag: 3, grav: -0.3 });
+      } else if (kind === 'sand') {                      // Sandfontäne
+        for (let i = 0; i < 5; i++) puff(ox, oy, oz, n[0] * rnd(0.3, 1) + rnd(-0.4, 0.4), rnd(1.5, 3.2), n[2] * rnd(0.3, 1) + rnd(-0.4, 0.4),
+          { life: rnd(0.45, 0.8), s: rnd(0.035, 0.055), grow: 0.25, c: col, a: 0.32, k: Q_DUST, drag: 1.5, grav: 4 });
+      } else {
+        const big = kind === 'concrete' ? 1.3 : 1;
+        for (let i = 0; i < 3; i++) puff(x + n[0] * 0.05, y + n[1] * 0.05, z + n[2] * 0.05, n[0] * rnd(0.6, 2) + rnd(-0.5, 0.5), n[1] * rnd(0.6, 2) + rnd(-0.2, 0.9), n[2] * rnd(0.6, 2) + rnd(-0.5, 0.5),
+          { life: rnd(0.3, 0.6) * big, s: rnd(0.04, 0.07) * big, grow: rnd(0.35, 0.6) * big, c: col, a: kind === 'cloth' ? 0.2 : 0.38, k: Q_DUST, drag: 3, grav: -0.3 });
+      }
     },
-    /** Treffer an einer Figur */
+    /**
+     * Treffer an einer Figur, (dx, dy, dz) = Schussrichtung. Mit Blut (prefs.blood, Vorgabe an): feiner Nebel und ein Strahl nach hinten
+     * (höchstens 2,5 m) – trifft er eine Fläche, bleibt dort ein Fleck von 8–16 cm. Ohne Blut: eine helle Staubwolke.
+     */
     flesh(x, y, z, dx, dy, dz) {
-      for (let i = 0; i < 3; i++) puff(x, y, z, -dx * rnd(0.5, 1.6) + rnd(-0.7, 0.7), rnd(-0.2, 0.9), -dz * rnd(0.5, 1.6) + rnd(-0.7, 0.7), { life: rnd(0.2, 0.4), s: rnd(0.04, 0.07), grow: 0.5, c: [0.36, 0.05, 0.04], a: 0.8, k: Q_DUST, drag: 4, grav: 2 });
+      if (!bloodOn()) {
+        for (let i = 0; i < 3; i++) puff(x, y, z, -dx * rnd(0.3, 1) + rnd(-0.5, 0.5), rnd(0, 0.7), -dz * rnd(0.3, 1) + rnd(-0.5, 0.5), { life: rnd(0.25, 0.45), s: rnd(0.05, 0.08), grow: 0.5, c: [0.8, 0.78, 0.74], a: 0.35, k: Q_DUST, drag: 4, grav: -0.2 });
+        return;
+      }
+      for (let i = 0; i < 3; i++) puff(x, y, z, -dx * rnd(0.5, 1.6) + rnd(-0.7, 0.7), rnd(-0.2, 0.9), -dz * rnd(0.5, 1.6) + rnd(-0.7, 0.7), { life: rnd(0.2, 0.4), s: rnd(0.04, 0.07), grow: 0.5, c: [0.36, 0.05, 0.04], a: 0.7, k: Q_BLOOD, drag: 4, grav: 2 });
+      for (let i = 0; i < 2; i++) puff(x, y, z, dx * rnd(1, 2.5) + rnd(-0.4, 0.4), dy * rnd(1, 2.5) + rnd(0, 0.6), dz * rnd(1, 2.5) + rnd(-0.4, 0.4), { life: rnd(0.25, 0.4), s: rnd(0.03, 0.05), grow: 0.6, c: [0.34, 0.05, 0.04], a: 0.55, k: Q_BLOOD, drag: 5, grav: 3 });
+      const l = Math.hypot(dx, dy, dz) || 1, d = [dx / l, dy / l, dz / l];
+      if (phys && Number.isFinite(phys.raycast(x + d[0] * 0.05, y + d[1] * 0.05, z + d[2] * 0.05, d[0], d[1], d[2], 2.5))) {
+        const t = RAY.t + 0.05, ax = RAY.axis;
+        splat(x + d[0] * t, y + d[1] * t, z + d[2] * t, ax, d[ax] > 0 ? -1 : 1, rnd(0.07, 0.14));
+      }
     },
+    /** Abschuss: Fleck von 25–40 cm am Boden unter der Figur (nur mit Blut) */
+    pool(x, y, z) {
+      if (!bloodOn() || !phys) return;
+      splat(x + rnd(-0.15, 0.15), phys.floorBelow(x, y + 0.3, z, 0.05), z + rnd(-0.15, 0.15), 1, 1, rnd(0.23, 0.36));
+    },
+    /**
+     * Explosion: zwei Bilder weißer Blitz (HDR 12), Feuerball (wächst in 0,25 s auf 3 m, das Rauschen frisst ihn mit dem Alter),
+     * Druckring am Boden (0 → 7 m in 0,3 s), 24 Funken, 8–12 Trümmerstücke, Staubring, Rauchsäule über 4–6 s, Brandfleck.
+     * booms merkt sich Ort und Alter für die Bildwirkungen (Bildwelle, Farbsaum, Glühen) in M.frame.
+     */
     explosion(x, y, z) {
+      const f = phys ? phys.floorBelow(x, y + 0.3, z, 0.1) : 0, low = y - f < 1.2;
+      if (booms.length > 5) booms.shift();
+      booms.push({ x, y: y + 0.6, z, t: 0 });
       F.light(x, y + 0.6, z, 18, [5, 3.2, 1.6], 0.4);
-      puff(x, y + 0.5, z, 0, 0, 0, { life: 0.14, s: 4.5, c: [1, 0.85, 0.6], k: Q_GLOW });
-      for (let i = 0; i < 9; i++) puff(x + rnd(-0.6, 0.6), y + rnd(0.2, 1), z + rnd(-0.6, 0.6), rnd(-2.5, 2.5), rnd(0.5, 4), rnd(-2.5, 2.5), { life: rnd(0.25, 0.45), s: rnd(0.7, 1.2), grow: 3.5, c: [1, 0.5, 0.14], k: Q_GLOW, drag: 3 });
-      for (let i = 0; i < 12; i++) puff(x + rnd(-0.8, 0.8), y + rnd(0.2, 1.2), z + rnd(-0.8, 0.8), rnd(-2, 2), rnd(0.8, 3.2), rnd(-2, 2), { life: rnd(1.2, 2.4), s: rnd(0.8, 1.4), grow: 1.5, c: [0.16, 0.15, 0.14], a: 0.75, k: Q_SMOKE, drag: 1.6, grav: -0.5 });
-      for (let i = 0; i < 18; i++) puff(x, y + 0.3, z, rnd(-11, 11), rnd(2, 12), rnd(-11, 11), { life: rnd(0.3, 0.8), s: 0.04, c: [1, 0.7, 0.3], k: Q_GLOW, grav: 16, drag: 0.6 });
-      for (let i = 0; i < 10; i++) { const a = rnd(TAU); puff(x, y + 0.15, z, Math.cos(a) * rnd(3, 7), rnd(0.2, 1), Math.sin(a) * rnd(3, 7), { life: rnd(0.7, 1.3), s: 0.5, grow: 2.2, c: [0.5, 0.45, 0.38], a: 0.5, k: Q_DUST, drag: 2.6 }); }
-      if (y < 0.4) decals.push({ x, y: 0, z, axis: 1, sign: 1, s: rnd(1.5, 2.1), life: 60, k: Q_DECAL, c: 0.015 });
+      puff(x, y + 0.6, z, 0, 0, 0, { life: 0.2, s: 3.2, c: [1.88, 1.85, 1.8], k: Q_GLOW, frames: 2 });     // Blitz: 1,88^2,2 · 3 ≈ 12
+      puff(x, y + 0.7, z, 0, 0.6, 0, { life: 0.65, s: 0.3, grow: 11, damp: 8, c: [1, 0.85, 0.7], k: Q_FIRE, drag: 3 });
+      for (let i = 0; i < 5; i++) {
+        const a = rnd(TAU), r = rnd(0.3, 0.8);
+        puff(x + Math.cos(a) * r, y + rnd(0.3, 1.1), z + Math.sin(a) * r, Math.cos(a) * rnd(1, 3), rnd(0.8, 3), Math.sin(a) * rnd(1, 3), { life: rnd(0.4, 0.6), s: rnd(0.25, 0.4), grow: rnd(5, 7), damp: 7, c: [1, 0.8, 0.6], k: Q_FIRE, drag: 3.5 });
+      }
+      if (low) puff(x, f + 0.05, z, 0, 0, 0, { life: 0.3, s: 0.2, grow: 23, c: [0.62, 0.58, 0.52], a: 0.55, k: Q_RING });
+      for (let i = 0; i < 24; i++) {
+        const v = rnd(8, 20), a = rnd(TAU), e = rnd(0.1, 1);
+        puff(x, y + 0.4, z, Math.cos(a) * v * (1 - e * 0.6), v * e, Math.sin(a) * v * (1 - e * 0.6), { life: rnd(0.35, 0.9), s: 0.012, c: [1, 0.68, 0.3], k: Q_SPARK, grav: 14, drag: 0.8 });
+      }
+      for (let i = 0, m = Math.round(rnd(8, 12)); i < m; i++) {
+        const a = rnd(TAU), v = rnd(3, 8);
+        chunk(x + Math.cos(a) * 0.2, y + 0.2, z + Math.sin(a) * 0.2, Math.cos(a) * v, rnd(3, 8), Math.sin(a) * v, [0.05, 0.035, 0.06], [0.16, 0.15, 0.14, K_MATTE], rnd(1.4, 2.4));
+      }
+      for (let i = 0; i < 12; i++) { const a = rnd(TAU); puff(x, f + 0.15, z, Math.cos(a) * rnd(3, 7), rnd(0.2, 1), Math.sin(a) * rnd(3, 7), { life: rnd(0.8, 1.5), s: 0.5, grow: 2.2, c: [0.6, 0.55, 0.48], a: 0.45, k: Q_DUST, drag: 2.6 }); }
+      for (let i = 0; i < 8; i++) puff(x + rnd(-0.8, 0.8), y + rnd(0.3, 1.4), z + rnd(-0.8, 0.8), rnd(-1.5, 1.5), rnd(0.8, 2.6), rnd(-1.5, 1.5), { life: rnd(1.5, 2.6), s: rnd(0.8, 1.3), grow: 1.4, c: [0.58, 0.56, 0.53], a: 0.7, k: Q_SMOKE, drag: 1.6, grav: -0.4 });
+      if (columns.length > 4) columns.shift();
+      columns.push({ x, y: y + 0.8, z, t: 0, dur: rnd(4, 6), next: 0 });
+      if (low) decals.push({ x, y: f, z, axis: 1, sign: 1, s: rnd(1.5, 2.1), life: 60, k: Q_DECAL, c: [0.03, 0.028, 0.026], seed: seedOf() });
     },
-    /** Mündungsfeuer einer fremden Waffe */
-    muzzle(x, y, z) { puff(x, y, z, 0, 0, 0, { life: 0.05, s: rnd(0.2, 0.3), c: [1, 0.8, 0.45], k: Q_FLASH }); },
+    /**
+     * Schuss an der Mündung (x, y, z) in Richtung (dx, dy, dz), kind = Waffenart (MUZZLE): Licht, Rauchwolke, bei fremden Waffen das
+     * Mündungsfeuer (Stern, Seitenflammen, Flamme nach vorn), Funken der Schrotflinte, Staubstoß des Scharfschützengewehrs.
+     * Das eigene Mündungsfeuer zeichnet flash() mit der Waffe in der Hand.
+     */
+    shot(x, y, z, dx, dy, dz, kind, mine) {
+      const m = MUZZLE[kind] || MUZZLE.rifle, seed = seedOf();
+      F.light(x, y, z, m.light, [2.6, 1.8, 0.8], 0.05);
+      if (mine) own = { kind, seed };
+      else {
+        const s = m.s * rnd(3, 3.8), life = 0.05;
+        puff(x, y, z, 0, 0, 0, { life, s, c: [1, 0.8, 0.5], k: Q_FLASH, seed });
+        puff(x, y, z, 0, 0, 0, { life, s: s * 2, c: [1, 0.7, 0.4], a: 0.35, k: Q_GLOW });
+        flame(x, y, z, dx, dy, dz, s * rnd(1.3, 1.8), s * 0.3, life, seed);
+        if (m.side) {
+          const l = Math.hypot(dx, dz) || 1, sx = -dz / l, sz = dx / l;
+          for (const k of [-1, 1]) flame(x, y, z, sx * k * 0.8 + dx * 0.6, rnd(-0.1, 0.25), sz * k * 0.8 + dz * 0.6, s * rnd(0.7, 1.1), s * 0.18, life, seed);
+        }
+      }
+      for (let i = 0; i < m.sparks; i++) {
+        const v = rnd(9, 17);
+        puff(x, y, z, dx * v + rnd(-1.5, 1.5), dy * v + rnd(-1, 1.5), dz * v + rnd(-1.5, 1.5), { life: rnd(0.1, 0.22), s: 0.008, c: [1, 0.72, 0.38], k: Q_SPARK, grav: 6, drag: 1.5 });
+      }
+      puff(x + dx * 0.08, y + dy * 0.08, z + dz * 0.08, dx * 0.7 + rnd(-0.1, 0.1), dy * 0.7 + rnd(0.1, 0.35), dz * 0.7 + rnd(-0.1, 0.1),
+        { life: rnd(0.4, 0.7), s: m.smoke, grow: m.smoke * 4, c: [0.78, 0.77, 0.75], a: 0.26, k: Q_SMOKE, drag: 2.2, grav: -0.35 });
+      if (m.dust && phys) {
+        const f = phys.floorBelow(x, y, z, 0.05);
+        if (y - f < 1.8) for (let i = 0; i < 6; i++) {
+          const a = rnd(TAU);
+          puff(x + dx * 0.5, f + 0.06, z + dz * 0.5, Math.cos(a) * rnd(1, 2.5) + dx * 1.5, rnd(0.1, 0.5), Math.sin(a) * rnd(1, 2.5) + dz * 1.5,
+            { life: rnd(0.5, 0.9), s: 0.12, grow: 0.8, c: [0.62, 0.58, 0.52], a: 0.3, k: Q_DUST, drag: 3 });
+        }
+      }
+    },
+    /** Mündungsfeuer einer fremden Waffe ohne Richtung (älterer Aufruf) */
+    muzzle(x, y, z, kind = 'rifle') { F.shot(x, y, z, 0, 0, -1, kind, false); },
     /** Leuchtende Scheibe am Boden (nur während build(): markiert Stellungen) */
-    disc(x, y, z, r, c, a) { quad(x, y, z, r, 0, 0, 0, 0, r, c[0], c[1], c[2], a, Q_GLOW); },
+    disc(x, y, z, r, c, a) { quad(x, y, z, r, 0, 0, 0, 0, r, c[0], c[1], c[2], a, Q_GLOW + Q_FLAT, 0, 3); },
+    /**
+     * Lampe (Eintrag aus W.lamp, nur während build()): leuchtender Fleck unter der Leuchte, zur Kamera hin versetzt (sonst blendet ihn die
+     * Leuchte dahinter weich aus), und ein Lichtkegel aus zwei gekreuzten senkrechten Vierecken (Länge min(y, 4) m). Die Deckkraft der
+     * beiden Vierecke folgt dem Blickwinkel, damit keines von der Kante her gesehen wird und die Summe gleich bleibt. k = Helligkeit (Flackern).
+     */
+    lamp(l, k) {
+      const x = l[0], y = l[8] ?? l[1], z = l[2], m = Math.max(l[4], l[5], l[6]), r = l[4] / m, g = l[5] / m, b = l[6] / m;
+      const dx = cx - x, dy = cy - y, dz = cz - z, dl = Math.hypot(dx, dy, dz) || 1, off = Math.min(0.3, dl * 0.5) / dl;
+      bill(x + dx * off, y - 0.05 + dy * off, z + dz * off, 0.35, r, g, b, k, Q_GLOW);
+      const len = Math.min(y, 4), hw = 0.25 + len * 0.3, vl = Math.hypot(dx, dz) || 1, f1 = Math.abs(dz) / vl, f2 = Math.abs(dx) / vl, a = 0.11 * k / (f1 + f2 || 1);
+      quad(x, y - len / 2, z, hw, 0, 0, 0, len / 2, 0, r, g, b, a * f1, Q_CONE);
+      quad(x, y - len / 2, z, 0, 0, hw, 0, len / 2, 0, r, g, b, a * f2, Q_CONE);
+    },
     /** Rauchfaden an der Mündung nach langem Feuer */
     wisp(x, y, z) { puff(x, y, z, rnd(-0.2, 0.2), rnd(0.3, 0.7), rnd(-0.2, 0.2), { life: rnd(0.5, 0.9), s: 0.05, grow: 0.3, c: [0.7, 0.7, 0.7], a: 0.22, k: Q_SMOKE, drag: 1 }); },
 
     update(dt) {
+      clock += dt;
       for (let i = parts.length - 1; i >= 0; i--) {
         const p = parts[i];
         if ((p.life -= dt) <= 0) { parts[i] = parts[parts.length - 1]; parts.pop(); continue; }
@@ -2077,46 +5339,108 @@ function createFx() {
         p.x += p.vx * dt; p.y += p.vy * dt; p.z += p.vz * dt;
         if (p.y < 0.02 && p.grav > 0) { p.y = 0.02; p.vy *= -0.3; p.vx *= 0.5; p.vz *= 0.5; }
         p.s += p.grow * dt;
+        if (p.damp) p.grow *= Math.exp(-p.damp * dt);
+      }
+      for (let i = booms.length - 1; i >= 0; i--) if ((booms[i].t += dt) > 1) booms.splice(i, 1);
+      for (let i = columns.length - 1; i >= 0; i--) {                    // Rauchsäule: alle 0,15 s eine Wolke, nach oben dünner werdend
+        const c = columns[i];
+        if ((c.t += dt) > c.dur) { columns.splice(i, 1); continue; }
+        if ((c.next -= dt) > 0) continue;
+        c.next = 0.15;
+        const k = 1 - c.t / c.dur;
+        puff(c.x + rnd(-0.4, 0.4), c.y + rnd(0, 0.5), c.z + rnd(-0.4, 0.4), rnd(-0.3, 0.3), rnd(1.2, 2), rnd(-0.3, 0.3),
+          { life: rnd(2.5, 3.5), s: rnd(0.5, 0.8), grow: 0.7, c: [0.55, 0.53, 0.5], a: 0.5 * k + 0.1, k: Q_SMOKE, drag: 0.6, grav: -0.25 });
       }
       for (let i = tracers.length - 1; i >= 0; i--) if ((tracers[i].t += dt) > tracers[i].dur) tracers.splice(i, 1);
       for (let i = decals.length - 1; i >= 0; i--) if ((decals[i].life -= dt) <= 0) decals.splice(i, 1);
+      for (let i = blood.length - 1; i >= 0; i--) if ((blood[i].life -= dt) <= 0) blood.splice(i, 1);
       for (let i = lights.length - 1; i >= 0; i--) if ((lights[i].life -= dt) <= 0) lights.splice(i, 1);
+      for (let i = chunks.length - 1; i >= 0; i--) {
+        const c = chunks[i];
+        if ((c.life -= dt) <= 0) { chunks.splice(i, 1); continue; }
+        if (c.hit > 1) continue;                         // liegt
+        c.vy -= 14 * dt; c.x += c.vx * dt; c.y += c.vy * dt; c.z += c.vz * dt; c.rx += c.wx * dt; c.ry += c.wy * dt;
+        if (c.y < c.floor + c.sy / 2 && c.vy < 0) {
+          c.y = c.floor + c.sy / 2;
+          if (c.hit++ || c.vy > -1.5) { c.hit = 2; c.rx = Math.round(c.rx / Math.PI) * Math.PI; }   // zweiter Aufprall: liegen bleiben
+          else { c.vy *= -0.3; c.vx *= 0.55; c.vz *= 0.55; c.wx *= 0.5; c.wy *= 0.5; }
+        }
+      }
     },
     /** Füllt den Puffer für dieses Bild. Liefert die Zahl der Vierecke. */
     build(cam, extra) {
-      qn = 0;
+      qn = 0; counts.fill(0);
       basis(cam.yaw, cam.pitch, cam.roll || 0);
       rx = B[0]; ry = B[1]; rz = B[2]; ux = B[3]; uy = B[4]; uz = B[5]; cx = cam.x; cy = cam.y; cz = cam.z;
-      for (const d of decals) {
-        const a = Math.min(1, d.life / 4) * 0.85, o = 0.012 * d.sign, s = d.s;
-        if (d.axis === 0) quad(d.x + o, d.y, d.z, 0, 0, s, 0, s, 0, d.c, d.c, d.c, a, d.k);
-        else if (d.axis === 1) quad(d.x, d.y + o, d.z, s, 0, 0, 0, 0, s, d.c, d.c, d.c, a, d.k);
-        else quad(d.x, d.y, d.z + o, s, 0, 0, 0, s, 0, d.c, d.c, d.c, a, d.k);
+      for (const L of [decals, blood]) for (const d of L) {
+        const a = Math.min(1, d.life / (d.fade || 4)) * (d.a ?? 0.85);
+        flat(d.x, d.y, d.z, d.axis, d.sign, d.s, d.c[0], d.c[1], d.c[2], a, d.k, d.seed, d.rot || 0);
       }
-      for (const p of parts) if (p.k === Q_SMOKE || p.k === Q_DUST) { const t = p.life / p.max; bill(p.x, p.y, p.z, p.s, p.r, p.g, p.b, p.a * Math.min(1, t * 2), p.k, p.rot); }
+      for (const p of parts) {
+        if (p.k !== Q_SMOKE && p.k !== Q_DUST && p.k !== Q_BLOOD) continue;
+        const t = p.life / p.max;
+        bill(p.x, p.y, p.z, p.s, p.r, p.g, p.b, p.a * Math.min(1, t * 2), p.k, p.seed + Math.min(0.999, 1 - t));
+      }
+      motes();
       if (extra) extra();
-      for (const p of parts) if (p.k === Q_GLOW || p.k === Q_FLASH) { const t = p.life / p.max; bill(p.x, p.y, p.z, p.s, p.r, p.g, p.b, p.a * t, p.k, p.k === Q_FLASH ? p.rot : 0); }
+      for (const p of parts) {
+        if (p.k === Q_SMOKE || p.k === Q_DUST || p.k === Q_BLOOD) continue;
+        const t = p.life / p.max, e0 = p.seed + Math.min(0.999, 1 - t);
+        if (p.frames && --p.frames <= 0) p.life = 0;              // nur so viele Bilder sichtbar (Blitz)
+        if (p.len) streak(p.x, p.y, p.z, p.dir[0], p.dir[1], p.dir[2], p.len, p.s, p.r, p.g, p.b, p.a * t, Q_SPARK, e0);
+        else if (p.k === Q_SPARK) {
+          const v = Math.hypot(p.vx, p.vy, p.vz) || 1, len = Math.min(0.25, v * 0.03);
+          streak(p.x, p.y, p.z, p.vx / v, p.vy / v, p.vz / v, len, p.s, p.r, p.g, p.b, p.a * Math.min(1, t * 2.5), Q_SPARK, e0);
+        } else if (p.k === Q_RING) {
+          const s = p.s;
+          quad(p.x, p.y, p.z, s, 0, 0, 0, 0, s, p.r, p.g, p.b, p.a * t, Q_RING + Q_FLAT, e0, 3);
+        } else bill(p.x, p.y, p.z, p.s, p.r, p.g, p.b, p.a * (p.k === Q_FIRE ? Math.min(1, t * 3) : t), p.k, e0);
+      }
       for (const t of tracers) {
         const k = t.t / t.dur, dx = (t.x1 - t.x0) / t.len, dy = (t.y1 - t.y0) / t.len, dz = (t.z1 - t.z0) / t.len;
         const head = k * t.len, tail = Math.max(0, head - Math.min(10, t.len * 0.5));
         const mx = t.x0 + dx * (head + tail) / 2, my = t.y0 + dy * (head + tail) / 2, mz = t.z0 + dz * (head + tail) / 2;
-        // Breite quer zur Blickrichtung
-        const vx = cx - mx, vy = cy - my, vz = cz - mz;
-        let sx = dy * vz - dz * vy, sy = dz * vx - dx * vz, sz = dx * vy - dy * vx;
-        const sl = t.w * (1 + Math.hypot(vx, vy, vz) * 0.03) / (Math.hypot(sx, sy, sz) || 1), hl = (head - tail) / 2;
-        sx *= sl; sy *= sl; sz *= sl;
-        quad(mx, my, mz, dx * hl, dy * hl, dz * hl, sx, sy, sz, 1, 0.86, 0.55, 0.9, Q_BEAM);
+        const w = t.w * (1 + Math.hypot(cx - mx, cy - my, cz - mz) * 0.03);       // Breite quer zur Blickrichtung, in der Ferne breiter
+        streak(t.x0 + dx * head, t.y0 + dy * head, t.z0 + dz * head, dx, dy, dz, head - tail, w, 1, 0.86, 0.55, 0.9, Q_BEAM);      // streak() nimmt den Kopf, nicht die Mitte
       }
       return qn;
     },
-    /** Mündungsfeuer der eigenen Waffe: wird mit der Waffe gezeichnet (hinter den Welt-Effekten im Puffer). */
-    flash(x, y, z, size) {
-      const before = qn;
-      bill(x, y, z, size, 1, 0.82, 0.5, 1, Q_FLASH, Math.random() * TAU);
-      bill(x, y, z, size * 1.9, 1, 0.6, 0.25, 0.35, Q_GLOW);
+    /**
+     * Mündungsfeuer der eigenen Waffe: wird mit der Waffe gezeichnet (hinter den Welt-Effekten im Puffer). Art und Saat vom letzten
+     * eigenen Schuss (shot), also bleibt die Form über die paar Bilder gleich; die Seitenflammen liegen quer im Bild.
+     */
+    flash(x, y, z) {
+      const before = qn, m = MUZZLE[own.kind] || MUZZLE.rifle, s = m.s * (1.05 + 0.25 * ((own.seed * 0.618) % 1)), l = s * 0.85;
+      bill(x, y, z, s, 1, 0.82, 0.55, 1, Q_FLASH, own.seed);
+      bill(x, y, z, s * 2, 1, 0.72, 0.45, 0.2, Q_GLOW);
+      // Seitenflammen setzen am Kern an, ungleich lang und leicht schräg (aus der Saat), damit kein sauberer Strich durch den Stern entsteht
+      if (m.side) for (const k of [-1, 1]) {
+        const h = ((own.seed * (k > 0 ? 0.381 : 0.727)) % 1), lk = l * (0.75 + 0.45 * h), t = (h - 0.5) * 0.5, n = 1 / Math.hypot(1, t);
+        const dx = (rx * k + ux * t) * n, dy = (ry * k + uy * t) * n, dz = (rz * k + uz * t) * n;
+        streak(x, y, z, -dx, -dy, -dz, lk, s * 0.16, 1, 0.74, 0.42, 0.8, Q_SPARK, own.seed);
+      }
       return qn - before;
     },
-    clear() { parts.length = 0; tracers.length = 0; decals.length = 0; lights.length = 0; },
+    clear() { parts.length = 0; tracers.length = 0; decals.length = 0; lights.length = 0; chunks.length = 0; blood.length = 0; booms.length = 0; columns.length = 0; },
+    /** Trümmerstücke: zeichnet M.frame über den Instanz-Schreiber (Quader mit Drall, werfen Schatten) */
+    chunks,
+    /** Explosionen der letzten Sekunde { x, y, z, t = Alter in s } für die Bildwirkungen in M.frame */
+    booms,
+    /** Zahl der Vierecke je Art im letzten Bild (Prüfungen) und der Partikel */
+    counts, get partCount() { return parts.length; },
+
+    // ---------- Phase 8 (Spaß-Paket): einzelne Teilchen für Rutschen, Fässer und Luftschlag ----------
+    /** Staub am Boden (Rutschen); kind = Untergrund wie bei impact() */
+    dust(x, y, z, kind) {
+      const c = DUST[kind] || DUST.concrete;
+      for (let i = 0; i < 2; i++) puff(x + rnd(-0.2, 0.2), y + 0.06, z + rnd(-0.2, 0.2), rnd(-0.5, 0.5), rnd(0.2, 0.7), rnd(-0.5, 0.5), { life: rnd(0.45, 0.8), s: rnd(0.1, 0.18), grow: 0.9, c, a: kind === 'metal' ? 0.2 : 0.45, k: Q_DUST, drag: 2.5, grav: -0.2 });
+    },
+    /** Aufsteigender Rauch (ausgebranntes Fass, Rauchsäule des Luftschlags); c = Farbe, a = Deckkraft, s = Größe */
+    smoke(x, y, z, c, a = 0.5, s = 0.35) {
+      puff(x, y, z, rnd(-0.2, 0.2), rnd(0.9, 1.5), rnd(-0.2, 0.2), { life: rnd(2.2, 3.4), s, grow: 0.7, c, a, k: Q_SMOKE, drag: 0.5, grav: -0.12 });
+    },
+    /** Glut, Funken, Leuchten (zischendes Fass, Leuchtfleck des Luftschlags): ein leuchtender Fleck, der in life Sekunden vergeht */
+    glow(x, y, z, s, c, life = 0.1) { puff(x, y, z, 0, 0, 0, { life, s, c, k: Q_GLOW }); },
   };
   return F;
 }
@@ -2169,12 +5493,14 @@ const PAL = {
   foe: { cloth: [0.23, 0.17, 0.095, K_CAMO], vest: [0.085, 0.03, 0.022, K_MATTE], helm: [0.16, 0.12, 0.07, K_CAMO], mark: [1, 0.1, 0.05, K_GLOW], skin: [0.42, 0.26, 0.18, K_MATTE], boot: [0.02, 0.015, 0.012, K_MATTE], glove: [0.035, 0.026, 0.018, K_MATTE] },
 };
 const eyeOf = (s) => lerp(EYE_STAND, EYE_CROUCH, s.crouchK);
+const SLIDE_LEAN = 0.8;                            // Rutschen: so weit legt sich die Figur zurück (rad)
 
 /** Figur aus Quadern. fall 0 … 1 lässt sie umkippen (dir: +1 nach hinten, −1 nach vorn). Merkt sich die Mündung der Waffe. */
 function drawSoldier(I, s, pal, fall = 0, dir = 1) {
   const c = s.crouchK, hipY = 0.93 - 0.42 * c;
   mIdent(TR); mTrans(TR, s.x, s.y, s.z); mRotY(TR, -s.yaw);
   if (fall) { mRotX(TR, fall * dir * 1.52); mTrans(TR, 0, fall * 0.1, 0); }
+  if (s.sliding) mRotX(TR, SLIDE_LEAN);             // Rutschen: geduckte Figur nach hinten gelegt – Beine vorn, Oberkörper zurück
   const amp = clamp(s.speed / 4, 0, 1.25) * (s.ground ? 1 : 0.35) * (1 - fall);
   for (const side of [-1, 1]) {
     const ph = s.phase + (side > 0 ? Math.PI : 0);
@@ -2204,6 +5530,7 @@ function drawSoldier(I, s, pal, fall = 0, dir = 1) {
   // Waffe im Anschlag, Arme greifen an Griff und Vorderschaft
   const w = WEAPONS[s.guns[s.cur].id];
   mCopy(TG, TR); mTrans(TG, 0, hipY + 0.5, 0);
+  if (s.sliding) mRotX(TG, -SLIDE_LEAN);            // Rutschen: die Waffe bleibt im Anschlag
   mRotX(TG, fall ? -0.9 * fall : s.pitch - (s.sprinting ? 0.55 : 0) - (s.reloadT > 0 ? 0.3 : 0));
   mTrans(TG, 0.13, -0.07, -0.36);
   if (!fall) drawGun(I, TG, w.model);
@@ -2214,6 +5541,39 @@ function drawSoldier(I, s, pal, fall = 0, dir = 1) {
   s.mx = TG[0] * mz[0] + TG[4] * mz[1] + TG[8] * mz[2] + TG[12];
   s.my = TG[1] * mz[0] + TG[5] * mz[1] + TG[9] * mz[2] + TG[13];
   s.mzz = TG[2] * mz[0] + TG[6] * mz[1] + TG[10] * mz[2] + TG[14];
+}
+
+/**
+ * Federn der Waffe in der Hand (view.gun: Versatz z in m, Drehungen rx, ry, rz in rad, je mit Geschwindigkeit) und der Kamera bei der Landung
+ * (view.land in m). Bewegungsgleichung a = −K·x − C·v: K = 260, C = 18 für Wege, K = 300, C = 20 für Drehungen; Teilschritte ≤ 1/120 s.
+ */
+function viewSprings(vs, dt) {
+  const g = vs.gun, n = Math.max(1, Math.ceil(dt * 120)), h = dt / n;
+  for (let i = 0; i < n; i++) {
+    g.zv += (-260 * g.z - 18 * g.zv) * h; g.z += g.zv * h;
+    g.rxv += (-300 * g.rx - 20 * g.rxv) * h; g.rx += g.rxv * h;
+    g.ryv += (-300 * g.ry - 20 * g.ryv) * h; g.ry += g.ryv * h;
+    g.rzv += (-300 * g.rz - 20 * g.rzv) * h; g.rz += g.rzv * h;
+    vs.landV += (-260 * vs.land - 18 * vs.landV) * h; vs.land += vs.landV * h;
+  }
+  vs.punch = damp(vs.punch, 0, 18, dt);
+}
+/** Stoß je eigenem Schuss (k wie der Zuwachs von kickAnim) in die Federn, dazu der Sichtfeld-Stoß (0,45° je Schuss, höchstens 1,5°). */
+function viewKick(vs, k) {
+  const g = vs.gun;
+  g.zv += 1.8 * k; g.rxv += 3.5 * k; g.ryv += rnd(-1, 1) * 1.2 * k; g.rzv += rnd(-1, 1) * 0.8 * k;
+  vs.punch = Math.min(1.5, vs.punch + 0.45);
+}
+/** Landung (k = 0 … 1): Waffe nickt nach unten, Kamera federt bis 6 cm tiefer. */
+function viewLand(vs, k) {
+  vs.gun.rxv -= 2.4 * k; vs.gun.zv += 0.5 * k;
+  vs.landV -= 1.9 * k;
+}
+/** Weiches 1-D-Rauschen −1 … 1 (Wertrauschen mit glatter Überblendung); seed trennt unabhängige Kurven. */
+function noise1(x, seed) {
+  const hv = (i) => { let q = Math.imul(i ^ Math.imul(seed, 0x9e3779b9), 0x85ebca6b); q ^= q >>> 13; q = Math.imul(q, 0xc2b2ae35); q ^= q >>> 16; return ((q >>> 0) / 4294967296) * 2 - 1; };
+  const i = Math.floor(x), f = x - i;
+  return lerp(hv(i), hv(i + 1), f * f * (3 - 2 * f));
 }
 
 const VM = mat4(), VK = mat4();
@@ -2230,12 +5590,12 @@ function drawView(V, s, cam, vs, mainFov) {
   const low = Math.max(vs.lowK, s.mantle ? 1 : 0);
   let x = lerp(w.hold[0], 0, a) + (vs.swayX + Math.cos(vs.bobT) * 0.007 * vs.bobAmp) * hip - sp * 0.05;
   let y = lerp(w.hold[1], -w.sight, a) + (vs.swayY - Math.abs(Math.sin(vs.bobT)) * 0.011 * vs.bobAmp) * hip + vs.jumpY - low * 0.26 - rel * 0.09 - sp * 0.03;
-  const z = lerp(w.hold[2], w.adsZ, a) + s.kickAnim * 0.055 * (1 - a * 0.45) + sp * 0.05;
+  const G = vs.gun, z = lerp(w.hold[2], w.adsZ, a) + G.z * (1 - a * 0.45) + sp * 0.05;
   if (s.meleeT > 0) { x += 0.06; y -= 0.08; }
   mTrans(VM, x, y, z);
-  mRotY(VM, -vs.swayX * 2.2 * hip + sp * 0.75);
-  mRotX(VM, s.kickAnim * 0.075 * (1 - a * 0.5) + vs.swayY * 2.4 * hip - low * 0.9 - rel * 0.5 - sp * 0.3);
-  mRotZ(VM, rel * 0.45 - vs.swayX * 1.4 * hip + sp * 0.2);
+  mRotY(VM, -vs.swayX * 2.2 * hip + sp * 0.75 + G.ry * (1 - a * 0.5));
+  mRotX(VM, G.rx * (1 - a * 0.5) + vs.swayY * 2.4 * hip - low * 0.9 - rel * 0.5 - sp * 0.3);
+  mRotZ(VM, rel * 0.45 - vs.swayX * 1.4 * hip + sp * 0.2 + G.rz * (1 - a * 0.5));
   drawGun(V, VM, w.model);
   // Arme: rechts am Griff, links am Vorderschaft (beim Nachladen am Magazin)
   arm(V, VM, 0.1, -0.16, 0.5, 0.008, -0.055, 0.04, PAL.friend, 1, 0.03);
@@ -2311,22 +5671,25 @@ const navCache = new WeakMap();        // Karte → Wegenetz: hängt nur von der
 
 function createMatch(cfg, hooks) {
   const world = buildWorld(cfg.map), phys = createPhysics(world);
+  hooks.snd.setWorld?.(phys, world);               // Klang: Verdeckung und Raumzonen brauchen die Welt
   // Netz: null (allein), sonst { role: 'host' | 'client', id, send(msg, to, reliable) }. Der Gastgeber rechnet die Partie samt Bots;
   // Mitspieler bewegen nur die eigene Figur und melden Treffer – alles andere kommt als Zustand vom Gastgeber.
   const net = cfg.net || null, client = net?.role === 'client', hosting = net?.role === 'host';
   if (!client && !navCache.has(world)) navCache.set(world, buildNav(world, phys));
   const nav = client ? null : navCache.get(world);
   const teams = MODES[cfg.mode].teams, skill = SKILLS[cfg.skill];
-  const fx = createFx(), I = instWriter(MAX_INST), V = instWriter(160);
+  const fx = createFx(hooks.prefs, phys, world), I = instWriter(MAX_INST), V = instWriter(160);
   const soldiers = [], corpses = [], nades = [], packs = [], feed = [];
   const S = hooks.snd, emit = hooks.emit;
   const L = { x: 0, y: 1.6, z: 0, yaw: 0 };          // Hörer (= Kamera)
   const cam = { x: 0, y: 1.6, z: 0, yaw: 0, pitch: 0, roll: 0, fov: 75 };
   const view = { swayX: 0, swayY: 0, bobT: 0, bobAmp: 0, jumpY: 0, lowK: 0, sprintK: 0, shake: 0, roll: 0, lookDX: 0, lookDY: 0 };
+  Object.assign(view, { gun: { z: 0, zv: 0, rx: 0, rxv: 0, ry: 0, ryv: 0, rz: 0, rzv: 0 }, punch: 0, land: 0, landV: 0 });     // Federn der Waffe, Sichtfeld-Stoß, Landung (viewSprings)
   const M = {
     world, phys, nav, fx, soldiers, corpses, feed, cfg, mode: cfg.mode, teams, cam, view, nades, net,
     time: 0, clock: cfg.minutes * 60, state: 'warmup', warm: 4.2, overT: 0, scores: [0, 0], winner: null, draw: false,
     flags: [], uav: [0, 0], me: null, firstBlood: false, flashT: 0, scoped: false, domT: 0, spec: null,
+    fixedCam: null,                                // Prüfhaken: feste Kamera [x, y, z, yaw, pitch, fov] (siehe _sz.probe)
   };
 
   const isEnemy = (a, b) => a !== b && (!teams || a.team !== b.team);
@@ -2344,6 +5707,9 @@ function createMatch(cfg, hooks) {
       kills: 0, deaths: 0, assists: 0, score: 0, streak: 0, best: 0, lastKillAt: -99, multi: 0, shots: 0, hits: 0, heads: 0, byWeapon: {},
       in: { mx: 0, mz: 0, jump: false, crouch: false, sprint: false, fire: false, ads: false, reload: false, swap: -1, nade: false, melee: false },
       mx: 0, my: 0, mzz: 0, vmx: 0, vmy: 0, vmz: 0, uavReady: false, uavT: 0, primary: 'falke', peer: null, ext: false, spawnAt: 0,
+      sliding: false, slideT: 0, slideCd: 0, slideDx: 0, slideDz: 0, slideFx: 0, crouchWas: false,       // Rutschen
+      gg: 0,                                                                                             // Waffenmeister: Stufe
+      strikeReady: false,                                                                                // Luftschlag bereit
     };
     soldiers.push(s);
     return s;
@@ -2363,6 +5729,7 @@ function createMatch(cfg, hooks) {
       else s.bot = newBot();
     }
     if (cfg.mode === 'dom') M.flags = world.flags.map((f) => ({ ...f, y: phys.floorBelow(f.x, 2, f.z, 0.3), owner: -1, prog: 0, capBy: -1, mine: false, contested: false }));
+    S.flags?.(M.flags);                            // Klang: die Fahnen der Stellungen flattern (ortsfeste Quellen)
   }
   const me = M.me;
   const friendly = (s) => (teams ? s.team === me.team : s === me);
@@ -2395,6 +5762,8 @@ function createMatch(cfg, hooks) {
     s.hp = 100; s.alive = true; s.protect = 1.6; s.crouching = false; s.crouchK = 0; s.h = STAND_H; s.ads = 0; s.sprinting = false;
     s.fireT = 0.25; s.reloadT = 0; s.switchT = 0; s.meleeT = 0; s.nadeT = 0; s.bloomK = 0; s.mantle = null; s.ground = true; s.stepOff = 0;
     s.damagers.clear(); s.spawnAt = M.time;
+    if (s.sliding) slideHush(s);
+    s.sliding = false; s.slideCd = 0;              // Rutschen
     Object.assign(s.in, { swap: -1, nade: false, melee: false, reload: false });      // nichts ausführen, was vor dem Einstieg gedrückt wurde
     guns = (Array.isArray(guns) ? guns : []).filter((id) => WEAPONS[id]).slice(0, 2);
     if (!guns.length) guns = ['falke', 'marder'];          // ohne Waffe gäbe es nichts zu zeichnen und nichts zu rechnen
@@ -2407,7 +5776,22 @@ function createMatch(cfg, hooks) {
     const p = pickSpawn(s);
     const prim = s.me ? cfg.loadout.primary : s.primary;
     place(s, p.x, phys.floorBelow(p.x, 2.5, p.z, BODY_R), p.z, teams ? p.yaw : Math.atan2(-p.x, p.z), [WEAPONS[prim] ? prim : 'falke', 'marder']);
+    if (gunGame) ggArm(s);                         // Waffenmeister: nur die Waffe der Stufe
     if (hosting) net.send({ t: 'spawn', id: s.id, x: s.x, y: s.y, z: s.z, yaw: s.yaw, g: s.guns.map((g) => g.id) }, null, true);
+  }
+
+  // ---------- Waffenmeister: Stufe und Waffe ----------
+  const gunGame = cfg.mode === 'gg';
+  /** Nur die Waffe der Stufe, keine Granaten */
+  function ggArm(s) {
+    const id = GG[Math.min(s.gg, GG.length - 1)], w = WEAPONS[id];
+    s.guns = [{ id, mag: w.mag, reserve: w.reserve }]; s.cur = 0; s.nades = 0;
+  }
+  /** Stufe setzen und gleich die neue Waffe in die Hand geben (der Gastgeber meldet es allen) */
+  function ggSet(s, l) {
+    s.gg = clamp(l, 0, GG.length);
+    if (s.gg < GG.length) { ggArm(s); s.reloadT = 0; s.ads = 0; s.bloomK = 0; s.switchT = 0.4; if (s.me) S.swap(); }
+    if (hosting) net.send({ t: 'gg', id: s.id, l: s.gg }, null, true);
   }
 
   // ---------- Treffer ----------
@@ -2460,11 +5844,13 @@ function createMatch(cfg, hooks) {
   /** Figur fällt: liegen bleiben, Meldung, Zähler (auf allen Geräten gleich) */
   function fall(v, a, weapon, head) {
     v.alive = false; v.hp = 0; v.deaths++; v.streak = 0; v.lastKiller = a; v.multi = 0;
+    fx.pool(v.x, v.y, v.z);                             // Blutfleck am Boden (nur mit Einstellung „Blut“)
     const toA = Math.sin(v.yaw) * (a.x - v.x) - Math.cos(v.yaw) * (a.z - v.z);
     corpses.push({ s: { x: v.x, y: v.y, z: v.z, yaw: v.yaw, pitch: 0, crouchK: v.crouchK, phase: v.phase, speed: 0, ground: true, sprinting: false, reloadT: 0, guns: v.guns, cur: v.cur }, t: 0, dir: toA >= 0 ? 1 : -1, pal: friendly(v) ? PAL.friend : PAL.foe });
     if (corpses.length > 14) corpses.shift();
     feed.push({ a: a === v ? null : a, v, weapon, head, t: M.time });
     if (feed.length > 6) feed.shift();
+    S.bodyfall(L, v.x, v.y + 0.3, v.z);
   }
   function kill(v, a, info) {
     fall(v, a, info.weapon, !!info.head);
@@ -2476,6 +5862,8 @@ function createMatch(cfg, hooks) {
     if (!self) {
       a.kills++; a.streak++; a.best = Math.max(a.best, a.streak);
       a.byWeapon[info.weapon] = (a.byWeapon[info.weapon] || 0) + 1;
+      // Waffenmeister: ein Abschuss mit der Waffe (oder dem Messer) hebt die Stufe; das Messer wirft das Opfer eine zurück
+      if (gunGame && (Object.hasOwn(WEAPONS, info.weapon) || info.weapon === 'knife')) { ggSet(a, a.gg + 1); if (info.weapon === 'knife') ggSet(v, v.gg - 1); }
       if (cfg.mode === 'tdm') M.scores[a.team]++;
       let pts = 100;
       const medals = [];
@@ -2488,6 +5876,7 @@ function createMatch(cfg, hooks) {
       if (info.dist > 45 && info.weapon !== 'nade') { pts += 25; medals.push('Fernschuss'); }
       if ([3, 5, 7, 10, 15, 20].includes(a.streak)) { pts += a.streak * 10; medals.push(`Serie ×${a.streak}`); }
       if (a.streak === 3) a.uavReady = true;
+      if (a.streak === LUFT.streak) a.strikeReady = true;          // Luftschlag
       a.score += pts;
       for (const [id, d] of v.damagers) {
         const hlp = soldiers[id];
@@ -2509,6 +5898,11 @@ function createMatch(cfg, hooks) {
     emit('end');
   }
   function leader() {
+    if (gunGame) {                                 // Waffenmeister: höchste Stufe, dann die meisten Abschüsse
+      let g = null, gt = false;
+      for (const s of soldiers) { if (!g || s.gg > g.gg || (s.gg === g.gg && s.kills > g.kills)) { g = s; gt = false; } else if (s.gg === g.gg && s.kills === g.kills) gt = true; }
+      return gt ? null : g;
+    }
     let top = null, tie = false;
     if (teams) { if (M.scores[0] === M.scores[1]) return null; return M.scores[0] > M.scores[1] ? 0 : 1; }
     for (const s of soldiers) { if (!top || s.kills > top.kills) { top = s; tie = false; } else if (s.kills === top.kills) tie = true; }
@@ -2516,6 +5910,7 @@ function createMatch(cfg, hooks) {
   }
   function checkEnd() {
     if (M.state !== 'live') return;
+    if (gunGame) { for (const s of soldiers) if (s.gg >= GG.length) { finish(s); break; } return; }      // Waffenmeister: Abschuss auf der letzten Stufe
     // Erreichen beide Teams das Ziel im selben Takt (Herrschaft), gewinnt das mit mehr Punkten – bei Gleichstand keines
     if (teams) { if (M.scores[0] >= cfg.limit || M.scores[1] >= cfg.limit) finish(leader()); }
     else { for (const s of soldiers) if (s.kills >= cfg.limit) { finish(s); break; } }
@@ -2527,20 +5922,21 @@ function createMatch(cfg, hooks) {
     if (s.reloadT > 0 || gun.mag >= w.mag || gun.reserve <= 0 || s.switchT > 0) return;
     s.reloadT = s.reloadMax = w.reload + (w.shells ? 0.2 : 0);
     s.reloadStage = 0;
-    if (s.me) S.reload('out');
+    if (s.me) S.reload('out', w.snd);
   }
   function fire(s) {
     const gun = s.guns[s.cur], w = WEAPONS[gun.id];
     gun.mag--; s.fireT = 60 / w.rpm; s.shotAt = M.time; s.reloadT = 0; s.shots++;
     s.protect = 0;                    // wer selbst angreift, gibt den Schutz nach dem Einstieg auf
     const move = clamp(s.speed / 4.6, 0, 1.5);
-    const hip = w.hip * (1 + move * 0.6) * (s.ground ? 1 : 1.9) * (s.crouching ? 0.78 : 1) + s.bloomK;
+    const hip = (s.sliding ? w.hip * SLIDE.spread : w.hip * (1 + move * 0.6) * (s.ground ? 1 : 1.9) * (s.crouching ? 0.78 : 1)) + s.bloomK;     // Rutschen: Hüfte mal 1,3
     const spread = lerp(hip, w.adsSpr + s.bloomK * 0.25, s.ads * s.ads) + (s.bot ? skill.err * 0.22 : 0);
     basis(s.yaw + s.kickY, s.pitch + s.kickP);
     const rx = B[0], ry = B[1], rz = B[2], ux = B[3], uy = B[4], uz = B[5], fwx = B[6], fwy = B[7], fwz = B[8];
     const ox = s.x, oy = s.y + eyeOf(s), oz = s.z, end = [0, 0, 0];
     let hitAny = false, endK = -1;
     claims.length = 0;
+    let fassClaim = -1, fassN = 0;                  // Fässer: Mitspieler melden das Fass, das die erste Kugel traf
     for (let p = 0; p < w.pellets; p++) {
       const a = Math.random() * TAU, r = Math.tan(Math.sqrt(Math.random()) * spread * DEG), sx = Math.cos(a) * r, sy = Math.sin(a) * r;
       let dx = fwx + rx * sx + ux * sy, dy = fwy + ry * sx + uy * sy, dz = fwz + rz * sx + uz * sy;
@@ -2564,12 +5960,18 @@ function createMatch(cfg, hooks) {
           if (p === 0) { S.impact(L, ex, ey, ez, kind); endK = hit.axis * 2 + (d > 0 ? 0 : 1) + 6 * Math.max(0, HIT_KINDS.indexOf(kind)); }
         }
       }
+      // Fässer: Kugeln ziehen ihren Waffenschaden ab (Mitspieler melden es dem Gastgeber)
+      if (!hit.s && hit.wall && hit.i >= 0 && world.barrelOf[hit.i] >= 0) {
+        const bi = world.barrelOf[hit.i];
+        if (!client) hitBarrel(bi, lerp(w.dmg, w.dmgFar, sstep(w.r0, w.r1, t)), s);
+        else if (p === 0 || bi === fassClaim) { fassClaim = bi; fassN++; }
+      }
       // Kugeln, die knapp am eigenen Kopf vorbeigehen, pfeifen
       if (p === 0 && !s.me && me.alive && hit.s !== me && isEnemy(s, me)) {
         const cx = me.x - ox, cy = me.y + 1.5 - oy, cz = me.z - oz, tc = cx * dx + cy * dy + cz * dz;
         if (tc > 2 && tc < t) {
           const qx = cx - dx * tc, qy = cy - dy * tc, qz = cz - dz * tc;
-          if (qx * qx + qy * qy + qz * qz < 2.2) S.whiz(clamp(-(qx * Math.cos(L.yaw) + qz * Math.sin(L.yaw)), -1, 1));
+          if (qx * qx + qy * qy + qz * qz < 2.2) S.whiz(clamp(-(qx * Math.cos(L.yaw) + qz * Math.sin(L.yaw)), -1, 1), w.snd);
         }
       }
     }
@@ -2582,12 +5984,14 @@ function createMatch(cfg, hooks) {
       s.kickY += rnd(-1, 1) * w.kickH * DEG;
     }
     s.kickAnim = Math.min(1.6, s.kickAnim + (w.pellets > 1 || w.scope ? 1.5 : w.auto ? 0.75 : 1.1));
-    fx.light(s.mx, s.my, s.mzz, 7, [2.6, 1.8, 0.8], 0.05);
-    if (s.me) M.flashT = 0.04; else fx.muzzle(s.mx, s.my, s.mzz);
-    S.shot(w.snd, L, s.x, s.y + 1.4, s.z, s.me);
+    if (s.me) viewKick(view, w.pellets > 1 || w.scope ? 1.5 : w.auto ? 0.75 : 1.1);
+    fx.shot(s.mx, s.my, s.mzz, fwx, fwy, fwz, w.snd, s.me);
+    if (s.me) M.flashT = 0.04;
+    S.shot(w.snd, L, s.x, s.y + 1.4, s.z, s.me, gun.mag / w.mag);
+    if (s.me) S.shell(phys.surface(s.x, s.y + 0.05, s.z, 0.4), w.snd);
     if (net) {
       const e = end.map((v) => Math.round(v * 100) / 100);
-      if (client) net.send({ t: 'fire', w: gun.id, h: claims.slice(0, 8), e, k: endK }, null, true);
+      if (client) net.send({ t: 'fire', w: gun.id, h: claims.slice(0, 8), e, k: endK, ...(fassClaim >= 0 ? { b: fassClaim, bn: fassN } : {}) }, null, true);
       else net.send({ t: 'shot', id: s.id, w: gun.id, e, k: endK }, null, false);
     }
   }
@@ -2597,14 +6001,14 @@ function createMatch(cfg, hooks) {
     if (!w || !s || !Array.isArray(e)) return;
     s.shotAt = M.time; s.kickAnim = Math.min(1.6, s.kickAnim + 0.8);
     fx.tracer(s.mx, s.my, s.mzz, e[0], e[1], e[2], false);
-    fx.light(s.mx, s.my, s.mzz, 7, [2.6, 1.8, 0.8], 0.05);
-    fx.muzzle(s.mx, s.my, s.mzz);
+    basis(s.yaw, s.pitch);
+    fx.shot(s.mx, s.my, s.mzz, B[6], B[7], B[8], w.snd, false);
     S.shot(w.snd, L, s.x, s.y + 1.4, s.z, false);
     if (k >= 0) { const kind = HIT_KINDS[Math.floor(k / 6)] || 'concrete'; fx.impact(e[0], e[1], e[2], (k % 6) >> 1, k % 2 ? 1 : -1, kind); S.impact(L, e[0], e[1], e[2], kind); }
   }
   function melee(s) {
     s.meleeT = MELEE.time; s.reloadT = 0; s.protect = 0;
-    if (s.me) S.swing();
+    if (s.me) S.knife('schwung');
     basis(s.yaw, s.pitch);
     const fwx = B[6], fwy = B[7], fwz = B[8], ey = s.y + eyeOf(s);
     let best = null, bd = MELEE.range;
@@ -2614,9 +6018,10 @@ function createMatch(cfg, hooks) {
       if (d < bd && (dx * fwx + dy * fwy + dz * fwz) / d > 0.5 && phys.los(s.x, ey, s.z, e.x, e.y + 1, e.z)) { best = e; bd = d; }
     }
     if (best) {
-      fx.flesh(best.x, best.y + 1.2, best.z, fwx, 0, fwz); S.impact(L, best.x, best.y + 1, best.z, 'body');
+      fx.flesh(best.x, best.y + 1.2, best.z, fwx, 0, fwz);
+      if (s.me) S.knife('treffer'); else S.impact(L, best.x, best.y + 1, best.z, 'body');
       if (client) net.send({ t: 'melee', v: best.id }, null, true); else damage(best, s, MELEE.dmg, { weapon: 'knife', dist: bd });
-    }
+    } else if (s.me && phys.raycast(s.x, ey, s.z, fwx, fwy, fwz, MELEE.range) !== Infinity) S.knife('wand');      // Klinge trifft die Wand
   }
   function throwNade(s) {
     s.nades--; s.nadeT = 1; s.protect = 0;
@@ -2633,17 +6038,30 @@ function createMatch(cfg, hooks) {
     const dm = Math.hypot(me.x - x, me.y + 1 - y, me.z - z);
     if (dm < 22) view.shake = Math.min(1.4, view.shake + (1 - dm / 22) * 1.1);
   }
-  function explode(g) {
-    boom(g.x, g.y, g.z);
-    if (hosting) net.send({ t: 'boom', p: [g.x, g.y, g.z] }, null, true);
+  /**
+   * Explosion mit Schaden (Granate, Fass, Luftschlag). o = { radius, dmg, cover }: cover = Anteil des Schadens hinter Deckung (Vorgabe 0,12; 0 = Deckung schützt ganz).
+   * Getroffen werden der Urheber selbst (zu 70 %) und seine Gegner – wie bei Granaten. Fässer in Reichweite verlieren FASS.chain Lebenspunkte.
+   */
+  function blast(x, y, z, owner, o, weapon) {
+    boom(x, y, z);
+    if (hosting) net.send({ t: 'boom', p: [x, y, z] }, null, true);
+    const cover = o.cover ?? 0.12;
     for (const s of soldiers) {
-      if (!s.alive || !(s === g.owner || isEnemy(g.owner, s))) continue;
-      const d = Math.hypot(s.x - g.x, s.y + 0.9 - g.y, s.z - g.z);
-      if (d >= NADE.radius) continue;
-      const open = phys.los(g.x, g.y + 0.3, g.z, s.x, s.y + 1.1, s.z) || phys.los(g.x, g.y + 0.3, g.z, s.x, s.y + 0.3, s.z);
-      damage(s, g.owner, NADE.dmg * (1 - d / NADE.radius) ** 1.15 * (open ? 1 : 0.12) * (s === g.owner ? 0.7 : 1), { weapon: 'nade', dist: d });
+      if (!s.alive || !(s === owner || isEnemy(owner, s))) continue;
+      const d = Math.hypot(s.x - x, s.y + 0.9 - y, s.z - z);
+      if (d >= o.radius) continue;
+      const open = phys.los(x, y + 0.3, z, s.x, s.y + 1.1, s.z) || phys.los(x, y + 0.3, z, s.x, s.y + 0.3, s.z);
+      if (!open && !cover) continue;
+      damage(s, owner, o.dmg * (1 - d / o.radius) ** 1.15 * (open ? 1 : cover) * (s === owner ? 0.7 : 1), { weapon, dist: d });
+    }
+    for (let i = 0; i < barrels.length; i++) {
+      const b = barrels[i];
+      if (b.st !== 0 || Math.hypot(b.x - x, b.y + 0.46 - y, b.z - z) >= o.radius) continue;
+      if (!cover && !phys.los(x, y + 0.3, z, b.x, b.y + 1.05, b.z)) continue;
+      hitBarrel(i, FASS.chain, owner);
     }
   }
+  function explode(g) { blast(g.x, g.y, g.z, g.owner, NADE, 'nade'); }
   function stepNades(dt) {
     for (let i = nades.length - 1; i >= 0; i--) {
       const g = nades[i];
@@ -2662,9 +6080,97 @@ function createMatch(cfg, hooks) {
         g.x += dx * adv; g.y += dy * adv; g.z += dz * adv;
         rem -= adv / sp;
         g.vx *= ax === 0 ? -0.4 : 0.72; g.vy *= ax === 1 ? -0.36 : 0.72; g.vz *= ax === 2 ? -0.4 : 0.72;
-        if (sp > 2.5) S.bounce(L, g.x, g.y, g.z);
+        if (sp > 2.5) S.bounce(L, g.x, g.y, g.z, RAY.i === -2 ? world.groundHit : MAT_DEF[world.colMat[RAY.i]]?.hit);
         if (ax === 1 && Math.abs(g.vy) < 1.2 && Math.hypot(g.vx, g.vz) < 0.7) { g.rest = true; break; }
       }
+    }
+  }
+
+  // ---------- Rutschen: Untergrund und Staub (auch für Figuren, die anderswo gerechnet werden) ----------
+  /** Untergrund unter einer Figur: Einschlag-Art des Materials ('concrete', 'metal', 'wood', 'sand', 'cloth') – wie bei Schritten über phys.surface */
+  function groundKind(s) { return phys.surface(s.x, s.y + 0.05, s.z, s.r); }
+  /** Rutsch-Klang ausblenden, wenn das Rutschen vor seinem Ende abbricht (Sprung, Anstoß, Kante, neuer Einstieg) */
+  function slideHush(s) { if (s.slideV) { s.slideV.stop?.(0.08); s.slideV = null; } }
+  function slideDust(s, dt) {
+    if ((s.slideFx -= dt) > 0) return;
+    s.slideFx = SLIDE.dust;
+    fx.dust?.(s.x - s.slideDx * 0.3, s.y, s.z - s.slideDz * 0.3, groundKind(s));
+  }
+
+  // ---------- Fässer: 0 steht, 1 zischt, 2 ausgebrannt (nach FASS.back Sekunden steht ein neues da) ----------
+  const barrels = world.barrels.map((b) => ({ x: b.x, y: b.y, z: b.z, col: b.col, hp: FASS.hp, st: 0, t: 0, by: null, fx: 0 }));
+  M.barrels = barrels;
+  /** Zustand eines Fasses setzen (auf allen Geräten; der Gastgeber meldet ihn weiter) */
+  function fassState(i, st) {
+    const b = barrels[i];
+    b.st = st; b.fx = 0;
+    if (st === 0) { b.hp = FASS.hp; b.by = null; b.t = 0; }
+    else if (st === 1) { b.t = rnd(FASS.fuse[0], FASS.fuse[1]); S.fuse?.(L, b.x, b.y + 0.9, b.z, b.t); }
+    else b.t = FASS.back;
+    if (hosting) net.send({ t: 'fass', i, s: st }, null, true);
+  }
+  /** Schaden an einem Fass – rechnet nur, wer die Partie rechnet. by = wer es zuletzt getroffen hat (dem gehört die Explosion) */
+  function hitBarrel(i, dmg, by) {
+    const b = barrels[i];
+    if (client || !b || b.st !== 0 || !by || M.state !== 'live') return;
+    b.hp -= dmg; b.by = by;
+    if (b.hp <= 0) fassState(i, 1);
+  }
+  function stepBarrels(dt) {
+    for (let i = 0; i < barrels.length; i++) {
+      const b = barrels[i];
+      if (b.st === 1) {
+        if ((b.fx -= dt) <= 0) { b.fx = 0.03; fx.glow?.(b.x + rnd(-0.12, 0.12), b.y + 0.95, b.z + rnd(-0.12, 0.12), rnd(0.08, 0.16), [1, 0.62, 0.25], 0.09); }
+        if ((b.t -= dt) <= 0 && !client) { fassState(i, 2); blast(b.x, b.y + 0.35, b.z, b.by, FASS, 'fass'); }
+      } else if (b.st === 2) {
+        b.t -= dt;
+        if (FASS.back - b.t < FASS.smoke && (b.fx -= dt) <= 0) { b.fx = 0.18; fx.smoke?.(b.x + rnd(-0.1, 0.1), b.y + 0.7, b.z + rnd(-0.1, 0.1), [0.13, 0.12, 0.11], 0.5 * (1 - (FASS.back - b.t) / FASS.smoke) + 0.15, 0.3); }
+        if (b.t <= 0 && !client) fassState(i, 0);
+      }
+    }
+  }
+  /** Bots: ein stehendes Fass höchstens 4 m neben dem Ziel, frei zu sehen und mehr als 7 m vom Bot entfernt (sonst −1) */
+  function fassNear(s, tg) {
+    if (!tg) return -1;
+    for (let i = 0; i < barrels.length; i++) if (fassOk(s, tg, i)) return i;
+    return -1;
+  }
+  function fassOk(s, tg, i) {
+    const b = barrels[i];
+    if (!b || !tg || !tg.alive || b.st !== 0 || Math.hypot(b.x - tg.x, b.z - tg.z) >= 4 || Math.hypot(b.x - s.x, b.z - s.z) <= 7) return false;
+    const ey = s.y + eyeOf(s), dx = b.x - s.x, dy = b.y + 0.5 - ey, dz = b.z - s.z, l = Math.hypot(dx, dy, dz);
+    return phys.raycast(s.x, ey, s.z, dx / l, dy / l, dz / l, l) === Infinity || RAY.i === b.col;      // freie Sicht: der erste Treffer ist das Fass selbst
+  }
+
+  // ---------- Luftschlag: Leuchtfleck sofort, Überflug nach 1,2 s, ab 3,0 s fünf Bomben in einer Linie durchs Ziel ----------
+  const strikes = [];
+  M.strikes = strikes;
+  /** Luftschlag beginnen: auf allen Geräten Fleck und Klang; die Bomben rechnet nur, wer die Partie rechnet (sichtbar über „boom“) */
+  function startStrike(s, x, y, z, yaw) {
+    s.strikeReady = false;
+    strikes.push({ x, y, z, yaw, owner: s, t: 0, jet: false, n: 0, fx: 0 });
+    if (strikes.length > 8) strikes.shift();
+    if (hosting) net.send({ t: 'luft', id: s.id, p: [r2(x), r2(y), r2(z)], yaw: r3(yaw) }, null, true);
+    emit('luft', { s });
+  }
+  function stepStrikes(dt) {
+    for (let i = strikes.length - 1; i >= 0; i--) {
+      const k = strikes[i], end = LUFT.drop + LUFT.n * LUFT.gap;
+      k.t += dt;
+      if (k.t < end + 0.4 && (k.fx -= dt) <= 0) {           // roter Leuchtfleck mit Rauchsäule
+        k.fx = 0.07;
+        fx.glow?.(k.x + rnd(-0.08, 0.08), k.y + 0.18, k.z + rnd(-0.08, 0.08), rnd(0.3, 0.5), [1, 0.1, 0.05], 0.12);
+        fx.smoke?.(k.x + rnd(-0.15, 0.15), k.y + 0.3, k.z + rnd(-0.15, 0.15), [0.72, 0.17, 0.13], 0.42, 0.3);
+        if (Math.random() < 0.35) fx.light(k.x, k.y + 0.7, k.z, 9, [2.4, 0.3, 0.15], 0.22);
+      }
+      if (!k.jet && k.t >= LUFT.jet) { k.jet = true; S.jet?.(L, k.x, k.y, k.z, k.yaw); }
+      while (!client && k.n < LUFT.n && k.t >= LUFT.drop + k.n * LUFT.gap) {
+        const off = (k.n - (LUFT.n - 1) / 2) * LUFT.step, bx = k.x + Math.sin(k.yaw) * off, bz = k.z - Math.cos(k.yaw) * off;
+        k.n++;
+        const d = phys.raycast(bx, LUFT.height, bz, 0, -1, 0, LUFT.height + 1);        // fällt senkrecht: Dächer fangen die Bombe ab
+        blast(bx, d === Infinity ? 0 : LUFT.height - d, bz, k.owner, LUFT, 'luft');
+      }
+      if (k.t > end + 3) strikes.splice(i, 1);
     }
   }
 
@@ -2676,6 +6182,7 @@ function createMatch(cfg, hooks) {
     s.bloomK = damp(s.bloomK, 0, 7, dt);
     s.kickP = damp(s.kickP, 0, 8, dt); s.kickY = damp(s.kickY, 0, 8, dt); s.kickAnim = damp(s.kickAnim, 0, 13, dt);
     s.stepOff = damp(s.stepOff, 0, 13, dt);
+    if (gunGame) { s.nades = 0; if (gun.reserve <= 0) gun.reserve = w.mag * 2; }      // Waffenmeister: keine Granaten, leere Reserve auf zwei Magazine
     if (!client && s.hp < 100 && M.time - s.hurtAt > 4.5) s.hp = Math.min(100, s.hp + 38 * dt);
 
     // Klettern über eine Kante
@@ -2690,6 +6197,18 @@ function createMatch(cfg, hooks) {
       return;
     }
 
+    // Rutschen: Sprint plus Ducken (Flanke von inp.crouch) – geduckt und schnell in die Richtung, die beim Start galt
+    s.slideCd -= dt;
+    const crouchEdge = inp.crouch && !s.crouchWas;
+    s.crouchWas = inp.crouch;
+    if (crouchEdge && !s.sliding && s.slideCd <= 0 && s.ground && !frozen && (s.sprinting || (s.sprintOut > 0.1 && s.speed > 5.5))) {
+      const sp = Math.hypot(s.vx, s.vz);
+      s.sliding = true; s.slideT = 0; s.slideFx = 0; s.sprinting = false; s.sprintOut = 0;      // Schießen ist erlaubt
+      s.slideDx = sp > 1 ? s.vx / sp : Math.sin(s.yaw); s.slideDz = sp > 1 ? s.vz / sp : -Math.cos(s.yaw);
+      s.slideV = S.slide?.(L, s.x, s.y, s.z, s.me, groundKind(s)) || null;
+    }
+    if (s.sliding) inp.crouch = true;              // Trefferfläche und Augenhöhe wie geduckt, solange gerutscht wird
+
     // Haltung
     if (inp.crouch) s.crouching = true;
     else if (s.crouching && !phys.bodyBlocked(s.x, s.y, s.z, s.r, STAND_H)) s.crouching = false;
@@ -2697,6 +6216,8 @@ function createMatch(cfg, hooks) {
     s.h = s.crouching ? CROUCH_H : STAND_H;
     const wantAds = inp.ads && s.reloadT <= 0 && s.switchT <= 0 && s.meleeT <= 0;
     s.ads = approach(s.ads, wantAds ? 1 : 0, dt / w.ads);
+    if (s.me && wantAds !== !!s.adsOn) { s.adsOn = wantAds; S.ads(wantAds); }            // Klang: Anlegen und Absetzen
+    if (s.me && s.crouching !== !!s.crouchWas) { s.crouchWas = s.crouching; S.cloth(); }
 
     // Bewegung
     let mx = inp.mx, mz = inp.mz;
@@ -2710,7 +6231,17 @@ function createMatch(cfg, hooks) {
     const wx = (cy * mx + sy * mz) * top, wz = (sy * mx - cy * mz) * top;
     const k = Math.min(1, dt * (s.ground ? 11 : 1.6));
     s.vx += (wx - s.vx) * k; s.vz += (wz - s.vz) * k;
-    if (inp.jump && !s.jumpHeld && s.ground && !frozen && !s.crouching) { s.vy = 6.4; s.ground = false; }
+    // Rutschen: Tempo fällt von 8 auf 4 m/s (mal w.move); Springen bricht ab und behält 85 % davon
+    if (s.sliding) {
+      s.slideT += dt;
+      const q = Math.min(1, s.slideT / SLIDE.dur), v = lerp(SLIDE.v0, SLIDE.v1, q * q) * w.move;
+      s.vx = s.slideDx * v; s.vz = s.slideDz * v;
+      if (inp.jump && !s.jumpHeld && s.ground && !frozen && !phys.bodyBlocked(s.x, s.y, s.z, s.r, STAND_H)) {
+        s.sliding = false; s.slideCd = SLIDE.cd; s.crouching = false; s.h = STAND_H; slideHush(s);
+        s.vx *= SLIDE.keep; s.vz *= SLIDE.keep; s.vy = 6.4; s.ground = false; s.jumpHeld = true;
+      }
+    }
+    if (inp.jump && !s.jumpHeld && s.ground && !frozen && !s.crouching) { s.vy = 6.4; s.ground = false; if (s.me) S.jump(); }
     s.jumpHeld = inp.jump;
     s.vy -= GRAVITY * dt;
     for (const o of soldiers) {          // nicht ineinander stehen
@@ -2722,18 +6253,23 @@ function createMatch(cfg, hooks) {
     }
     s.landed = 0;
     phys.moveBody(s, s.vx * dt, s.vy * dt, s.vz * dt);
-    if (s.landed > 6 && s.me) { S.land(); view.jumpY = -0.03; }
+    if (s.landed > 6 && s.me) { S.land(phys.surface(s.x, s.y + 0.05, s.z, s.r), (s.landed - 6) / 8); view.jumpY = -0.03; }
+    if (s.landed > 2 && s.me) viewLand(view, clamp((s.landed - 2) / 10, 0, 1));
     if (s.landed > 14) damage(s, s, (s.landed - 14) * 7, { weapon: 'fall', dist: 0 });
     if (!s.alive) return;
     s.speed = Math.hypot(s.vx, s.vz);
+    // Rutschen: Ende nach 0,75 s, unter 3,2 m/s, beim Anstoßen oder ohne Boden – danach 0,6 s Sperre; Staub statt Schritten
+    if (s.sliding && (s.slideT >= SLIDE.dur || s.speed < SLIDE.min || s.bump || !s.ground || frozen)) { if (s.slideT < SLIDE.dur - 0.05) slideHush(s); s.sliding = false; s.slideCd = SLIDE.cd; s.slideV = null; }
+    if (s.sliding) { s.stepAcc = 0; slideDust(s, dt); }
     s.phase += s.speed * dt * 2.4;
-    if (s.ground && (s.stepAcc += s.speed * dt) > (s.sprinting ? 2.3 : 1.75)) { s.stepAcc = 0; S.step(L, s.x, s.y, s.z, s.me, s.sprinting ? 1.3 : s.crouching ? 0.35 : 1); }
+    if (s.ground && (s.stepAcc += s.speed * dt) > (s.sprinting ? 2.3 : 1.75)) { s.stepAcc = 0; S.step(L, s.x, s.y, s.z, s.me, s.sprinting ? 1.3 : s.crouching ? 0.35 : 1, phys.surface(s.x, s.y + 0.05, s.z, s.r)); }
     // Kante vor der Brust: hochziehen
     if (inp.jump && s.bump && !frozen) {
       const fx2 = s.x + sy * 0.55, fz2 = s.z - cy * 0.55, topY = phys.floorBelow(fx2, s.y + 1.75, fz2, 0.2), hh = topY - s.y;
       if (hh > STEP_H && hh <= 1.65 && !phys.bodyBlocked(fx2, topY, fz2, s.r, STAND_H) && !phys.blocked(s.x - s.r, s.y + s.h, s.z - s.r, s.x + s.r, topY + STAND_H, s.z + s.r)) {
         s.mantle = { t: 0, dur: 0.34 + hh * 0.16, x0: s.x, y0: s.y, z0: s.z, x1: fx2, y1: topY, z1: fz2 };
         s.reloadT = 0;
+        if (s.me) S.mantle();
       }
     }
     if (frozen) { s.held = inp.fire; return; }
@@ -2749,16 +6285,16 @@ function createMatch(cfg, hooks) {
     // Nachladen
     if (s.reloadT > 0) {
       s.reloadT -= dt;
-      if (!w.shells && s.reloadStage === 0 && s.reloadT < s.reloadMax * 0.45) { s.reloadStage = 1; if (s.me) S.reload('in'); }
+      if (!w.shells && s.reloadStage === 0 && s.reloadT < s.reloadMax * 0.45) { s.reloadStage = 1; if (s.me) S.reload('in', w.snd); }
+      if (!w.shells && s.reloadStage === 1 && s.reloadT < s.reloadMax * 0.1) { s.reloadStage = 2; if (s.me) S.reload('bolt', w.snd); }      // Stufe 2: Verschluss bei 90 %
       if (s.reloadT <= 0) {
         if (w.shells) {
           gun.mag++; gun.reserve--;
-          if (s.me) S.reload('shell');
-          if (gun.mag < w.mag && gun.reserve > 0 && !inp.fire) s.reloadT = s.reloadMax = w.reload; else if (s.me) S.reload('bolt');
+          if (s.me) S.reload('shell', w.snd);
+          if (gun.mag < w.mag && gun.reserve > 0 && !inp.fire) s.reloadT = s.reloadMax = w.reload; else if (s.me) S.reload('bolt', w.snd);
         } else {
           const n = Math.min(w.mag - gun.mag, gun.reserve);
           gun.mag += n; gun.reserve -= n;
-          if (s.me) S.reload('bolt');
         }
       }
     }
@@ -2829,6 +6365,9 @@ function createMatch(cfg, hooks) {
       }
       b.last = { x: best.x, y: best.y, z: best.z }; b.lastT = M.time;
     } else if (b.target) { b.target = null; b.seeT = 0; b.goal = null; b.repath = 0; b.lostAt = M.time; b.lostDir = b.strafe; }
+    // Fässer: steht das Ziel neben einem Fass, zielt der Bot jedes zweite Mal darauf (neu gewürfelt je Ziel)
+    if (b.target !== b.fassFor) { b.fassFor = b.target; b.fass = b.target && Math.random() < 0.5 ? fassNear(s, b.target) : -1; }
+    else if (b.fass >= 0 && !fassOk(s, b.target, b.fass)) b.fass = -1;
     if (!b.target && cfg.mode !== 'dom' && (!b.last || M.time - b.lastT > 2)) {              // Schüsse in der Nähe hören
       for (const e of soldiers) {
         if (!e.alive || !isEnemy(s, e) || M.time - e.shotAt > 0.5) continue;
@@ -2842,6 +6381,15 @@ function createMatch(cfg, hooks) {
       const dx = b.last.x - s.x, dz = b.last.z - s.z, d = Math.hypot(dx, dz), q = (15 * d) / (NADE.speed * NADE.speed);
       if (d > 9 && d < 17 && q < 1 && Math.random() < 0.35) { b.nade = { yaw: Math.atan2(dx, -dz), pitch: 0.5 * Math.asin(q) + 0.02, t: 0.45 }; b.nadeCd = rnd(14, 28); }
     }
+
+    // Luftschlag: bereit und eine letzte Gegnerposition bekannt – nach 1–4 s dorthin rufen (nur, wenn sie mehr als 10 m entfernt ist)
+    if (s.strikeReady && M.state === 'live') {
+      if (!b.strikeAt) b.strikeAt = M.time + rnd(1, 4);
+      else if (M.time >= b.strikeAt && b.last && Math.hypot(b.last.x - s.x, b.last.z - s.z) > 10) {
+        b.strikeAt = 0;
+        startStrike(s, b.last.x, b.last.y || 0, b.last.z, Math.atan2(b.last.x - s.x, -(b.last.z - s.z)));
+      }
+    } else b.strikeAt = 0;
 
     // Wohin gehen?
     b.repath -= THINK;
@@ -2885,6 +6433,10 @@ function createMatch(cfg, hooks) {
       const aimY = t.y + lerp(1.2, 0.8, t.crouchK) + (cfg.skill === 2 ? 0.15 : 0);
       lookYaw = Math.atan2(dx, -dz) + b.ex;
       lookPitch = Math.atan2(aimY - (s.y + eyeOf(s)), dist) + b.ey;
+      if (b.fass >= 0 && barrels[b.fass]?.st === 0) {        // Fässer: auf das Fass neben dem Ziel halten
+        const f = barrels[b.fass], qx = f.x - s.x, qz = f.z - s.z;
+        lookYaw = Math.atan2(qx, -qz) + b.ex; lookPitch = Math.atan2(f.y + 0.5 - (s.y + eyeOf(s)), Math.hypot(qx, qz)) + b.ey;
+      }
       const off = Math.abs(angDiff(s.yaw, lookYaw)) + Math.abs(lookPitch - s.pitch);
       if (b.seeT > skill.react && off < Math.atan2(0.5, dist) * 2 + 0.05) {
         if (b.rest > 0) b.rest -= dt;
@@ -2920,6 +6472,11 @@ function createMatch(cfg, hooks) {
         if (b.last && Math.hypot(b.last.x - s.x, b.last.z - s.z) < 14) lookYaw = Math.atan2(b.last.x - s.x, -(b.last.z - s.z));
         else if (ax * ax + az * az > 0.3) lookYaw = Math.atan2(ax, -az);
         inp.sprint = !b.last && p.length - b.pi > 5;
+        // Rutschen: im Sprint auf langer, freier Strecke ab und zu (ein Bild lang ducken)
+        if (inp.sprint && p.length - b.pi > 6 && Math.random() < dt * SLIDE.botRate) {
+          const n6 = p[b.pi + 6];
+          if (Math.abs(nav.Y[n6] - s.y) < 0.3 && nav.walkable(s.x, s.y, s.z, nav.X[n6], nav.Z[n6])) inp.crouch = true;
+        }
         turn *= 0.7;
       } else {
         if ((b.scanT -= dt) <= 0) { b.scanT = rnd(0.7, 1.8); b.scanYaw = s.yaw + rnd(-1.7, 1.7); }
@@ -2933,6 +6490,8 @@ function createMatch(cfg, hooks) {
       const dx = s.x - g.x, dz = s.z - g.z, d = Math.hypot(dx, dz);
       if (d < 6.5 && g.fuse < 1.7 && d > 0.05) { wx = dx / d; wz = dz / d; inp.sprint = !t; inp.crouch = false; break; }
     }
+    // Rutschen: auch beim Ausweichen vor einer Granate
+    if (!t && Math.random() < dt * SLIDE.botRate && nades.some((g) => g.fuse < 1.7 && Math.hypot(s.x - g.x, s.z - g.z) < 6.5)) inp.crouch = true;
     if (lookYaw !== null) {
       s.yaw += clamp(angDiff(s.yaw, lookYaw) * Math.min(1, dt * 10), -turn * dt, turn * dt);
       s.pitch += clamp((lookPitch - s.pitch) * Math.min(1, dt * 10), -turn * dt, turn * dt);
@@ -2989,8 +6548,9 @@ function createMatch(cfg, hooks) {
     s.ground = Math.abs(s.ty - s.y) < 0.25;
     s.crouchK = approach(s.crouchK, s.crouching ? 1 : 0, dt * 7);
     s.kickAnim = damp(s.kickAnim, 0, 13, dt);
-    if (s.ground && (s.stepAcc += s.speed * dt) > (s.sprinting ? 2.3 : 1.75)) { s.stepAcc = 0; S.step(L, s.x, s.y, s.z, false, s.sprinting ? 1.3 : s.crouching ? 0.35 : 1); }
+    if (s.ground && (s.stepAcc += s.speed * dt) > (s.sprinting ? 2.3 : 1.75)) { s.stepAcc = 0; S.step(L, s.x, s.y, s.z, false, s.sprinting ? 1.3 : s.crouching ? 0.35 : 1, phys.surface(s.x, s.y + 0.05, s.z, s.r)); }
     if (!client) { s.protect -= dt; if (s.hp < 100 && M.time - s.hurtAt > 4.5) s.hp = Math.min(100, s.hp + 38 * dt); }
+    if (s.sliding) slideDust(s, dt);               // Rutschen
   }
   const r2 = (v) => Math.round(v * 100) / 100, r3 = (v) => Math.round(v * 1000) / 1000;
   /** Zahl aus dem Netz – oder der Ersatz, wenn dort keine endliche Zahl steht */
@@ -2998,7 +6558,8 @@ function createMatch(cfg, hooks) {
   /** Drei endliche Zahlen aus dem Netz, dem Betrag nach begrenzt – sonst null */
   const vec3 = (a, lim) => (Array.isArray(a) && Number.isFinite(a[0]) && Number.isFinite(a[1]) && Number.isFinite(a[2])
     ? [clamp(a[0], -lim, lim), clamp(a[1], -lim, lim), clamp(a[2], -lim, lim)] : null);
-  const bits = (s) => (s.alive ? 1 : 0) | (s.crouching ? 2 : 0) | (s.sprinting ? 4 : 0) | (s.ads > 0.5 ? 8 : 0) | (s.reloadT > 0 ? 16 : 0) | (s.protect > 0 ? 32 : 0) | (s.uavT > M.time ? 64 : 0) | (s.uavReady ? 128 : 0);
+  const bits = (s) => (s.alive ? 1 : 0) | (s.crouching ? 2 : 0) | (s.sprinting ? 4 : 0) | (s.ads > 0.5 ? 8 : 0) | (s.reloadT > 0 ? 16 : 0) | (s.protect > 0 ? 32 : 0) | (s.uavT > M.time ? 64 : 0) | (s.uavReady ? 128 : 0)
+    | (s.sliding ? 256 : 0) | (s.strikeReady ? 512 : 0);      // Phase 8: 256 rutscht, 512 Luftschlag bereit
   function sendTable() { net.send({ t: 'tbl', r: soldiers.map((s) => [s.id, s.kills, s.deaths, s.assists, s.score, s.best]) }, null, true); }
   let netAcc = 0, tblAcc = 0;
   function netTick(dt) {
@@ -3013,6 +6574,15 @@ function createMatch(cfg, hooks) {
     }, null, false);
     if ((tblAcc += 0.05) >= 1) { tblAcc = 0; sendTable(); }
   }
+  /** Rutschen einer Figur, die anderswo gerechnet wird: Haltung zeigen, beim Beginn Klang, Richtung aus der Bewegung */
+  function remoteSlide(s, on) {
+    if (on && !s.sliding) {
+      const dx = s.tx - s.x, dz = s.tz - s.z, d = Math.hypot(dx, dz);
+      s.slideDx = d > 0.05 ? dx / d : Math.sin(s.yaw); s.slideDz = d > 0.05 ? dz / d : -Math.cos(s.yaw); s.slideFx = 0;
+      s.slideV = S.slide?.(L, s.x, s.y, s.z, false, groundKind(s)) || null;
+    } else if (!on && s.sliding) slideHush(s);
+    s.sliding = on;
+  }
   /** Nachricht aus dem Netz. from = Absender (beim Mitspieler immer der Gastgeber). */
   M.onNet = (from, m) => {
     if (!net || !m || typeof m.t !== 'string') return;
@@ -3024,6 +6594,7 @@ function createMatch(cfg, hooks) {
         if (!s.alive || ![x, y, z, yaw, pitch].every(Number.isFinite) || (M.time - s.spawnAt < 1 && Math.hypot(x - s.x, z - s.z) > 5)) return;
         s.tx = clamp(x, world.bounds.x0, world.bounds.x1); s.ty = clamp(y, 0, 40); s.tz = clamp(z, world.bounds.z0, world.bounds.z1); s.tyaw = yaw; s.tpitch = clamp(pitch, -1.55, 1.55);
         s.crouching = !!(fl & 2); s.sprinting = !!(fl & 4); s.ads = fl & 8 ? 1 : 0; s.reloadT = fl & 16 ? 1 : 0;
+        remoteSlide(s, !!(fl & 256));               // Rutschen
         if (s.guns[c]) s.cur = c;
       } else if (m.t === 'fire') {
         const w = s.guns.some((g) => g.id === m.w) ? WEAPONS[m.w] : null;       // nur Waffen, die die Figur wirklich trägt
@@ -3037,6 +6608,11 @@ function createMatch(cfg, hooks) {
           if (damage(v, s, lerp(w.dmg, w.dmgFar, sstep(w.r0, w.r1, dist)) * (zone === 0 ? w.head : zone === 2 ? 0.85 : 1), { head: zone === 0, zone, weapon: m.w, dist })) any = true;
         }
         if (any) s.hits++;
+        // Fässer: die erste Kugel traf ein Fass – geglaubt, wenn es steht und der gemeldete Endpunkt höchstens 2 m daneben liegt
+        if (Number.isInteger(m.b) && barrels[m.b]) {
+          const f = barrels[m.b], fe = vec3(m.e, 600), n = Number.isInteger(m.bn) ? clamp(m.bn, 1, w.pellets) : 1, d = Math.hypot(f.x - s.x, f.z - s.z);
+          if (fe && f.st === 0 && d < 240 && Math.hypot(fe[0] - f.x, fe[1] - (f.y + 0.46), fe[2] - f.z) < 2) hitBarrel(m.b, lerp(w.dmg, w.dmgFar, sstep(w.r0, w.r1, d)) * n, s);
+        }
         const e = vec3(m.e, 600), k = Number.isInteger(m.k) ? m.k : -1;
         if (!e) return;                           // ohne brauchbaren Endpunkt gibt es weder Bild noch Ton
         shotFx(s, m.w, e, k);
@@ -3052,11 +6628,18 @@ function createMatch(cfg, hooks) {
           nades.push({ x: p[0], y: p[1], z: p[2], vx: v[0], vy: v[1], vz: v[2], fuse: NADE.fuse, owner: s, rot: 0, rest: false });
         }
       } else if (m.t === 'lo') {
+        if (gunGame) return;                       // Waffenmeister: die Stufe bestimmt die Waffe
         if (!PRIMARIES.includes(m.p)) return;
         s.primary = m.p;
         if (M.state === 'warmup' && s.guns[0]?.id !== m.p) spawn(s);          // vor dem Start gleich mit der gewählten Waffe
       }
       else if (m.t === 'uav') useUav(s);
+      else if (m.t === 'luft') {                   // Luftschlag: bereit, lebt, Ziel in der Karte und höchstens 130 m entfernt
+        const p = vec3(m.p, 600), bd = world.bounds;
+        if (!p || !Number.isFinite(m.yaw) || !s.strikeReady || !s.alive || M.state !== 'live') return;
+        if (p[0] < bd.x0 || p[0] > bd.x1 || p[2] < bd.z0 || p[2] > bd.z1 || Math.hypot(p[0] - s.x, p[1] - s.y, p[2] - s.z) > LUFT.netRange) return;
+        startStrike(s, p[0], clamp(p[1], 0, bd.y1 || 12), p[2], m.yaw);
+      }
       return;
     }
     // ----- Mitspieler: Zustand und Ereignisse vom Gastgeber -----
@@ -3081,11 +6664,13 @@ function createMatch(cfg, hooks) {
         if (!s) continue;
         const fl = a[6] | 0, hp = clamp(fin(a[7], s.hp), 0, 100);
         s.uavT = fl & 64 ? M.time + 0.5 : 0; s.protect = fl & 32 ? 0.3 : 0;
+        if (s === me) me.strikeReady = !!(fl & 512);              // Luftschlag
         if (s === me) { me.hp = hp; me.uavReady = !!(fl & 128); continue; }
         const p = vec3(a.slice(1, 4), 600);
         if (!p || !Number.isFinite(a[4]) || !Number.isFinite(a[5])) continue;
         s.tx = p[0]; s.ty = p[1]; s.tz = p[2]; s.tyaw = a[4]; s.tpitch = clamp(a[5], -1.55, 1.55);
         s.crouching = !!(fl & 2); s.sprinting = !!(fl & 4); s.ads = fl & 8 ? 1 : 0; s.reloadT = fl & 16 ? 1 : 0; s.hp = hp;
+        remoteSlide(s, !!(fl & 256));               // Rutschen
         if (Number.isInteger(a[8]) && s.guns[a[8]]) s.cur = a[8];
       }
       nades.length = 0;
@@ -3117,6 +6702,9 @@ function createMatch(cfg, hooks) {
     }
     else if (m.t === 'pts') { const pts = fin(m.p, 0); me.score += pts; emit('points', { label: String(m.l), pts }); }
     else if (m.t === 'boom') { const p = vec3(m.p, 600); if (p) boom(p[0], p[1], p[2]); }
+    else if (m.t === 'luft') { const s = Number.isInteger(m.id) ? soldiers[m.id] : null, p = vec3(m.p, 600); if (s && p && Number.isFinite(m.yaw)) startStrike(s, p[0], p[1], p[2], m.yaw); }
+    else if (m.t === 'gg') { const s = Number.isInteger(m.id) ? soldiers[m.id] : null; if (gunGame && s && Number.isInteger(m.l) && m.l >= 0 && m.l <= GG.length) ggSet(s, m.l); }
+    else if (m.t === 'fass') { const i = Number.isInteger(m.i) ? m.i : -1; if (barrels[i] && (m.s === 0 || m.s === 1 || m.s === 2) && barrels[i].st !== m.s) fassState(i, m.s); }
     else if (m.t === 'flag') { const f = Number.isInteger(m.i) ? M.flags[m.i] : null; if (f && (m.o === 0 || m.o === 1)) { f.owner = m.o; emit('flag', { f, was: m.was }); } }
     else if (m.t === 'tbl') {
       for (const r of Array.isArray(m.r) ? m.r : []) {
@@ -3151,6 +6739,8 @@ function createMatch(cfg, hooks) {
       if (M.state === 'over') M.overT += dt;
       if (me.alive) stepSoldier(me, dt, M.state !== 'live'); else me.respawnT -= dt;
       for (const s of soldiers) if (s.ext && s.alive) extStep(s, dt);
+      stepBarrels(dt);                             // Fässer
+      stepStrikes(dt);                             // Luftschlag
       fx.update(dt);
       stepCorpses(dt);
       netTick(dt);
@@ -3171,6 +6761,8 @@ function createMatch(cfg, hooks) {
     }
     if (hosting) netTick(dt);
     stepNades(dt);
+    stepBarrels(dt);                               // Fässer
+    stepStrikes(dt);                               // Luftschlag
     stepFlags(dt);
     fx.update(dt);
     stepCorpses(dt);
@@ -3181,8 +6773,12 @@ function createMatch(cfg, hooks) {
   M.aim = (dt, fovBase) => {
     const s = me, v = view;
     v.shake = damp(v.shake, 0, 5, dt);
-    const sh = v.shake * 0.02, tt = M.time * 47;
-    if (M.spec) {                                   // Zuschauer: schräg hinter einer anderen Figur
+    viewSprings(v, dt);
+    const sk = v.shake * v.shake, tt = M.time * 22;          // Wackeln: Stärke shake², weiches Rauschen statt Sinus
+    if (M.fixedCam) {                               // Prüfhaken: feste Kamera, ohne Wackeln und ohne Waffe
+      const p = M.fixedCam;
+      cam.x = p[0]; cam.y = p[1]; cam.z = p[2]; cam.yaw = p[3]; cam.pitch = p[4]; cam.roll = 0; cam.fov = p[5]; M.scoped = false;
+    } else if (M.spec) {                            // Zuschauer: schräg hinter einer anderen Figur
       const o = M.spec;
       basis(o.yaw, o.pitch * 0.5);
       cam.x = o.x - B[6] * 3.2 + B[0] * 0.5; cam.y = o.y + 2 - B[7] * 3.2; cam.z = o.z - B[8] * 3.2 + B[2] * 0.5;
@@ -3199,13 +6795,16 @@ function createMatch(cfg, hooks) {
       v.lookDX = 0; v.lookDY = 0;
       v.roll = damp(v.roll, -s.in.mx * 0.012 * (s.ground ? 1 : 0.3), 8, dt);
       cam.x = s.x; cam.z = s.z;
-      cam.y = s.y + eyeOf(s) + s.stepOff - Math.abs(Math.sin(s.phase)) * 0.028 * v.bobAmp * (1 - s.ads * 0.7);
-      cam.yaw = s.yaw + s.kickY + Math.sin(tt) * sh;
-      cam.pitch = clamp(s.pitch + s.kickP + Math.sin(tt * 1.3 + 1) * sh, -1.55, 1.55);
-      cam.roll = v.roll + Math.sin(tt * 0.9 + 2) * sh * 0.8;
+      cam.y = s.y + eyeOf(s) + s.stepOff - Math.abs(Math.sin(s.phase)) * 0.028 * v.bobAmp * (1 - s.ads * 0.7) + v.land;
+      cam.yaw = s.yaw + s.kickY + noise1(tt, 1) * 0.02 * sk;
+      cam.pitch = clamp(s.pitch + s.kickP + noise1(tt, 2) * 0.02 * sk, -1.55, 1.55);
+      cam.roll = v.roll + noise1(tt, 3) * 0.016 * sk;
       const z = lerp(1, w.zoom, s.ads * s.ads * (3 - 2 * s.ads));
-      cam.fov = (2 * Math.atan(Math.tan((fovBase * DEG) / 2) / z)) / DEG + v.sprintK * 4;
+      cam.fov = (2 * Math.atan(Math.tan((fovBase * DEG) / 2) / z)) / DEG + v.sprintK * 4 + v.punch;
       M.scoped = !!w.scope && s.ads > 0.86;
+      // Rutschen: Kamera rollt leicht, Sichtfeld etwas weiter
+      v.slideK = damp(v.slideK || 0, s.sliding ? 1 : 0, 12, dt);
+      cam.roll += v.slideK * SLIDE.roll; cam.fov += v.slideK * SLIDE.fov;
     } else {
       // gefallen: die Kamera sinkt und dreht sich zum Schützen
       const kx = s.lastKiller && s.lastKiller !== s ? s.lastKiller : null;
@@ -3217,11 +6816,33 @@ function createMatch(cfg, hooks) {
       M.scoped = false;
     }
     L.x = cam.x; L.y = cam.y; L.z = cam.z; L.yaw = cam.yaw;
+    S.listen?.(L, dt);
   };
 
   const FLAG_COL = { n: [0.85, 0.85, 0.85, K_MATTE], f: [0.1, 0.42, 1, K_GLOW], e: [1, 0.12, 0.06, K_GLOW] };
+  const FASS_C = { red: [0.42, 0.04, 0.025, K_METAL], band: [0.8, 0.52, 0.03, K_MATTE], burnt: [0.028, 0.026, 0.024, K_MATTE], burntBand: [0.07, 0.05, 0.035, K_MATTE] };
   const PACK = [0.2, 0.24, 0.14, K_MATTE], PACK_L = [1, 0.75, 0.2, K_GLOW], NADE_C = [0.13, 0.17, 0.1, K_MATTE], POLE = [0.1, 0.1, 0.11, K_METAL];
-  const lightsOut = [];
+  const lightsOut = [], flickOut = [0, 0, 0, 0, 0, 0, 0];
+  /**
+   * Bildwirkungen für den Schlussschritt (Vertrag V4). ripples: [sx, sy, r, k] – Bildort und Radius in halben Bildhöhen ab der Mitte
+   * (der Renderer rechnet das Seitenverhältnis ein), k = Stärke. hurt kommt aus der App (Trefferrahmen), alles andere aus der Partie.
+   */
+  const post = { hurt: 0, lowHp: 0, chroma: 0, flash: 0, scope: 0, ripples: [] };
+  /** Explosionen → Bildwelle (wächst über 0,5 s, schwächer mit dem Abstand), näher als 12 m Farbsaum (0,4 s) und doppeltes Glühen (0,3 s) */
+  function postFx() {
+    basis(cam.yaw, cam.pitch, cam.roll || 0);
+    const th = Math.tan((cam.fov * DEG) / 2);
+    post.ripples.length = 0; post.chroma = 0; post.flash = 0;
+    post.scope = M.scoped ? 1 : 0;
+    post.lowHp = me.alive && !M.spec && !M.fixedCam ? clamp((40 - me.hp) / 30, 0, 1) : 0;   // ab 40 Lebenspunkten, voll bei 10
+    for (const b of fx.booms) {
+      const dx = b.x - cam.x, dy = b.y - cam.y, dz = b.z - cam.z, d = Math.hypot(dx, dy, dz);
+      if (d < 12) { post.chroma = Math.max(post.chroma, 1 - b.t / 0.4); if (b.t < 0.3) post.flash = Math.max(post.flash, 1 - b.t / 0.3); }
+      const vz = dx * B[6] + dy * B[7] + dz * B[8], k = b.t / 0.5;
+      if (k >= 1 || vz < 0.5 || post.ripples.length >= 4) continue;
+      post.ripples.push([(dx * B[0] + dy * B[1] + dz * B[2]) / (vz * th), (dx * B[3] + dy * B[4] + dz * B[5]) / (vz * th), (1.5 + 16 * k) / (vz * th), (1 - k) * clamp(1 - d / 45, 0, 1)]);
+    }
+  }
   /** Sammelt alles Bewegliche für den Renderer. */
   M.frame = (shadows) => {
     I.reset(); V.reset();
@@ -3230,7 +6851,18 @@ function createMatch(cfg, hooks) {
       const k = Math.min(1, c.t / 0.5);
       drawSoldier(I, c.s, c.pal, 1 - (1 - k) * (1 - k), c.dir);
     }
+    for (const c of fx.chunks) { mIdent(TA); mTrans(TA, c.x, c.y, c.z); mRotY(TA, c.ry); mRotX(TA, c.rx); I.box(TA, c.sx, c.sy, c.sz, c.col); }
     for (const g of nades) { mIdent(TA); mTrans(TA, g.x, g.y, g.z); mRotY(TA, g.rot); mRotX(TA, g.rot * 0.7); I.box(TA, 0.085, 0.11, 0.085, NADE_C); part(I, TA, 0, 0.07, 0, 0.03, 0.04, 0.03, GUN.s); }
+    // Fässer: zwei um 45° verdrehte Körper und ein gelbes Warnband aus zwei Ringen; ausgebrannt dunkel, niedriger und gekippt
+    barrels.forEach((b, i) => {
+      const dead = b.st === 2, hh = dead ? 0.92 * 0.7 : 0.92, body = dead ? FASS_C.burnt : FASS_C.red, band = dead ? FASS_C.burntBand : FASS_C.band;
+      mIdent(TA); mTrans(TA, b.x, b.y, b.z); mRotY(TA, i * 1.7);
+      if (dead) mRotX(TA, 0.2); else if (b.st === 1) mRotY(TA, Math.sin(M.time * 70) * 0.06);
+      part(I, TA, 0, hh / 2, 0, 0.56, hh, 0.56, body);
+      part(I, TA, 0, hh / 2, 0, 0.56, hh, 0.56, body, 0, Math.PI / 4);
+      part(I, TA, 0, hh * 0.64, 0, 0.585, 0.13, 0.585, band);
+      part(I, TA, 0, hh * 0.64, 0, 0.585, 0.13, 0.585, band, 0, Math.PI / 4);
+    });
     for (const p of packs) { mIdent(TA); mTrans(TA, p.x, p.y + 0.16 + Math.sin(M.time * 2.5 + p.x) * 0.04, p.z); mRotY(TA, M.time * 1.3 + p.z); I.box(TA, 0.34, 0.2, 0.22, PACK); part(I, TA, 0, 0.04, 0, 0.35, 0.04, 0.23, PACK_L); }
     for (const f of M.flags) {
       const col = f.owner < 0 ? FLAG_COL.n : f.owner === me.team ? FLAG_COL.f : FLAG_COL.e;
@@ -3238,21 +6870,34 @@ function createMatch(cfg, hooks) {
       part(I, TA, 0, 1.7, 0, 0.07, 3.4, 0.07, POLE);
       part(I, TA, 0.42, 3.05, 0, 0.78, 0.5, 0.03, col, 0, 0, Math.sin(M.time * 2 + f.x) * 0.04);
     }
-    if (M.spec) { /* keine Waffe im Bild */ } else if (me.alive && !M.scoped) drawView(V, me, cam, view, cam.fov);
+    // eigene Figur nur für die Schattenkarte (hinter instCount); vor drawView, weil beide die Mündung s.mx/my/mzz setzen
+    const instCount = I.count;
+    if (me.alive && !M.spec && !M.fixedCam) drawSoldier(I, me, PAL.friend);
+    if (M.spec || M.fixedCam) { /* keine Waffe im Bild */ } else if (me.alive && !M.scoped) drawView(V, me, cam, view, cam.fov);
     else if (me.alive) { basis(cam.yaw, cam.pitch); me.mx = cam.x + B[6] * 0.9 - B[3] * 0.08; me.my = cam.y + B[7] * 0.9 - B[4] * 0.08; me.mzz = cam.z + B[8] * 0.9 - B[5] * 0.08; }
     const quadCount = fx.build(cam, () => {
       for (const f of M.flags) {
         const c = f.owner < 0 ? [0.9, 0.9, 0.9] : f.owner === me.team ? [0.2, 0.5, 1] : [1, 0.2, 0.12];
         fx.disc(f.x, f.y + 0.03, f.z, 3.4, c, 0.22 + (f.capBy >= 0 ? 0.12 * Math.sin(M.time * 8) : 0));
       }
+      for (const l of world.lamps) fx.lamp(l, l[7] ? lampFlicker(M.time) : 1);
+      // Luftschlag: roter Leuchtfleck am Ziel
+      for (const k of strikes) if (k.t < LUFT.drop + LUFT.n * LUFT.gap) fx.disc(k.x, k.y + 0.04, k.z, 1.2 + Math.sin(M.time * 11) * 0.18, [1, 0.12, 0.06], 0.55);
     });
-    const vmQuadCount = me.alive && M.flashT > 0 && V.count ? fx.flash(me.vmx, me.vmy, me.vmz, 0.085 + Math.random() * 0.03) : 0;
+    const vmQuadCount = me.alive && M.flashT > 0 && V.count ? fx.flash(me.vmx, me.vmy, me.vmz) : 0;
     lightsOut.length = 0;
     for (const l of fx.lights) { const k = l.life / l.max; lightsOut.push([l.x, l.y, l.z, l.r, l.c[0] * k, l.c[1] * k, l.c[2] * k]); }
     const lamps = world.lamps.length > MAX_LIGHTS - lightsOut.length
       ? [...world.lamps].sort((p, q) => Math.hypot(p[0] - cam.x, p[2] - cam.z) - Math.hypot(q[0] - cam.x, q[2] - cam.z)) : world.lamps;
-    for (const l of lamps) { if (lightsOut.length >= MAX_LIGHTS) break; lightsOut.push(l); }
-    return { cam, inst: I.buf, instCount: I.count, vm: V.buf, vmCount: V.count, vmFov: VM_FOV, quads: fx.quads, quadCount, vmQuadCount, lights: lightsOut, time: M.time, shadows };
+    for (const l of lamps) {
+      if (lightsOut.length >= MAX_LIGHTS) break;
+      if (!l[7]) { lightsOut.push(l); continue; }
+      const k = lampFlicker(M.time);                    // flackernde Lampe: Licht wie Fleck und Kegel
+      flickOut[0] = l[0]; flickOut[1] = l[1]; flickOut[2] = l[2]; flickOut[3] = l[3]; flickOut[4] = l[4] * k; flickOut[5] = l[5] * k; flickOut[6] = l[6] * k;
+      lightsOut.push(flickOut);
+    }
+    postFx();
+    return { cam, inst: I.buf, instCount, instShadowCount: I.count, vm: V.buf, vmCount: V.count, vmFov: VM_FOV, quads: fx.quads, quadCount, vmQuadCount, lights: lightsOut, time: M.time, shadows, post };
   };
 
   /** Aufklärung einsetzen (ab drei Abschüssen in Folge): Gegner erscheinen eine Weile auf dem Radar. */
@@ -3268,6 +6913,18 @@ function createMatch(cfg, hooks) {
     emit('uav');
     return true;
   };
+  /** Luftschlag rufen (ab fünf Abschüssen in Folge): Ziel ist, was in der Bildmitte liegt, höchstens 120 m. Kein Ziel: nichts geschieht, die Serie bleibt bereit. */
+  M.useStrike = () => {
+    if (!me.strikeReady || !me.alive || M.state !== 'live') return false;
+    basis(cam.yaw, cam.pitch);
+    const d = phys.raycast(cam.x, cam.y, cam.z, B[6], B[7], B[8], LUFT.range), bd = world.bounds;
+    if (d === Infinity) return false;
+    const x = cam.x + B[6] * d, z = cam.z + B[8] * d, y = phys.floorBelow(x, cam.y + B[7] * d + 0.1, z, 0.05);
+    if (x < bd.x0 || x > bd.x1 || z < bd.z0 || z > bd.z1) return false;
+    if (client) net.send({ t: 'luft', p: [r2(x), r2(y), r2(z)], yaw: r3(cam.yaw) }, null, true);
+    else startStrike(me, x, y, z, cam.yaw);
+    return true;
+  };
   /** Sekunden, die die eigene Aufklärung noch läuft */
   M.uavLeft = () => Math.max(0, (teams ? M.uav[me.team] : me.uavT) - M.time);
   /** Wer steht gerade im Fadenkreuz? (Gegner oder null) */
@@ -3275,6 +6932,7 @@ function createMatch(cfg, hooks) {
   /** Rangliste für Punktetafel und Abschluss */
   // „Frei für alle“ wird über Abschüsse entschieden – also ordnet die Tafel dort zuerst nach Abschüssen, sonst nach Punkten
   M.table = () => [...soldiers].sort((a, b) => (teams ? 0 : b.kills - a.kills) || b.score - a.score || b.kills - a.kills);
+  if (gunGame) M.table = () => [...soldiers].sort((a, b) => b.gg - a.gg || b.kills - a.kills || b.score - a.score);      // Waffenmeister: nach Stufe
   M.place = () => M.table().indexOf(me) + 1;
 
   for (const s of soldiers) spawn(s);
@@ -3287,6 +6945,8 @@ function createMatch(cfg, hooks) {
 // Wer ein Spiel eröffnet, ist die Mitte eines Sterns: alle anderen verbinden sich nur mit ihm.
 // Zusammengefunden wird über zwei Codes, die sich die Spieler selbst schicken – die Einladung hin, die Antwort zurück.
 // ==========================================================================
+/** Protokollversion: steht in den Vorgaben der Nachricht „start“. Mitspieler mit einer anderen Version lehnen die Partie ab. */
+const NET_V = 2;
 const NET_CSS = `
 .szn { container: szn / inline-size; display: flex; flex-direction: column; gap: 14px; min-width: 0; min-height: 0; font-size: 13px; color: var(--fg); }
 .szn-head { display: flex; align-items: center; gap: 10px; min-width: 0; }
@@ -4209,6 +7869,26 @@ const MENU_CSS = `
 .szm-dlg p { font-size: .92em; color: var(--fg-2); text-wrap: pretty; }
 .szm-dlg div { display: flex; justify-content: flex-end; gap: .6em; margin-top: .7em; }
 
+/* ---------- Hörprobe ---------- */
+.szm-hear-dim { grid-template: minmax(0, 1fr) / minmax(0, 1fr); }
+.szm-hear { display: grid; grid-template-rows: auto auto auto minmax(0, 1fr) auto; gap: .7em; width: min(42em, 100%); max-height: min(40em, 100%); padding: 1.2em 1.3em 1.1em; border-radius: 1.1em;
+  background: rgba(14, 17, 26, .96); box-shadow: inset 0 0 0 .5px var(--glass-edge), 0 2em 5em -1.5em rgba(0, 0, 0, .9); animation: szm-rise .3s var(--ease-out) both; }
+.szm-hear > b { font-size: 1.15em; font-weight: 800; }
+.szm-hear-opts { display: flex; flex-wrap: wrap; align-items: center; gap: .5em 1.4em; font-size: .9em; color: var(--fg-2); }
+.szm-hear-opts > span { display: inline-flex; align-items: center; gap: .6em; }
+.szm-hear-list { min-height: 0; overflow: auto; overscroll-behavior: contain; padding-right: .3em; }
+.szm-hear-tools { display: flex; flex-wrap: wrap; align-items: center; gap: .5em .8em; }
+.szm-hear-find { flex: 1 1 10em; min-width: 8em; padding: .4em .7em; font-size: .9em; }
+.szm-hear-chips { display: flex; flex-wrap: wrap; gap: .35em; }
+.szm-hear-chips .szm-chip { cursor: pointer; border: 0; font: inherit; font-size: .8em; }
+.szm-hear-chips .szm-chip[aria-pressed="true"] { background: var(--accent, #3b82f6); color: #fff; box-shadow: none; }
+.szm-hear-grp > b { display: block; position: sticky; top: 0; z-index: 1; padding: .45em 0 .25em; background: rgb(14, 17, 26); font-size: .85em; font-weight: 800; letter-spacing: .02em; color: var(--fg-2); }
+.szm-hear-grp[hidden], .szm-hear-row[hidden] { display: none; }
+.szm-hear-row { display: flex; align-items: center; gap: .5em; padding: .3em 0; border-top: .5px solid var(--line); }
+.szm-hear-row > span { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; font-size: .92em; }
+.szm-hear-row small { margin-left: .6em; color: var(--fg-3); }
+.szm-hear-foot { display: flex; align-items: center; justify-content: space-between; gap: .8em; font-size: .86em; color: var(--fg-3); }
+
 /* ---------- Auswertung ---------- */
 .szm-end { align-items: center; justify-content: center; padding: 1.5em; background: radial-gradient(120% 100% at 50% 0%, rgba(var(--szm-ink), .5), rgba(var(--szm-ink), .9)); }
 .szm-end .szm-panel { flex: none; width: min(100%, 66em); max-height: 100%; }
@@ -4349,7 +8029,8 @@ function createMenus(root, api) {
   const pct = (v) => `${Math.round(v * 100)} %`;
   const reduced = matchMedia('(prefers-reduced-motion: reduce)');
   const snd = (kind) => { try { api.snd?.(kind); } catch { /* ohne Ton */ } };
-  const DEFAULTS = { sens: 1, adsSens: 0.8, invertY: false, fov: 75, volume: 0.8, quality: 'auto', shadows: true, fps: false, toggleAds: false, toggleCrouch: true };
+  const DEFAULTS = { sens: 1, adsSens: 0.8, invertY: false, fov: 75, volume: 0.8, quality: 'auto', shadows: true, fps: false, toggleAds: false, toggleCrouch: true, volFx: 1, volAmb: 0.7, volMusic: 0.6, hrtf: false, night: false };
+  DEFAULTS.blood = true;                               // Bild: dezentes Blut bei Treffern
   const STAT_NAMES = ['Schaden', 'Feuerrate', 'Reichweite', 'Beweglichkeit'];
   const TIPS = [
     'Wer rennt, kann nicht schießen – nimm rechtzeitig Tempo heraus.',
@@ -4362,11 +8043,15 @@ function createMenus(root, api) {
     'Aus der Hüfte triffst du nur auf kurze Entfernung – leg mit Rechtsklick an.',
     'Schüsse verraten deine Stellung auf der Karte der Gegner.',
     'Das Messer (V) erledigt Gegner in Reichweite mit einem einzigen Hieb.',
+    'Duck dich aus dem Sprint heraus (C), dann rutschst du ein Stück – schießen kannst du dabei.',
+    'Rote Fässer explodieren nach ein paar Treffern – und reißen Fässer daneben mit.',
+    'Waffenmeister: Jeder Abschuss bringt die nächste Waffe. Ein Messerangriff wirft den Gegner eine Stufe zurück.',
+    'Fünf Abschüsse in Folge bringen dir den Luftschlag – Taste 4. Unter einem Dach bist du davor sicher.',
   ];
   const KEYS = [
     [['W', 'A', 'S', 'D'], 'Bewegen'], [['Maus'], 'Zielen'], [['Linksklick'], 'Feuern'], [['Rechtsklick'], 'Anlegen'], [['R'], 'Nachladen'],
-    [['Umschalt'], 'Sprinten'], [['C'], 'Ducken'], [['Leertaste'], 'Springen, Klettern'], [['1', '2', 'Q', 'Mausrad'], 'Waffe wechseln'],
-    [['G'], 'Granate'], [['V'], 'Messer'], [['3'], 'Aufklärung'], [['Tab'], 'Punktetafel'], [['Esc'], 'Pause'],
+    [['Umschalt'], 'Sprinten'], [['C'], 'Ducken'], [['Umschalt', 'C'], 'Rutschen (aus dem Sprint)'], [['Leertaste'], 'Springen, Klettern'], [['1', '2', 'Q', 'Mausrad'], 'Waffe wechseln'],
+    [['G'], 'Granate'], [['V'], 'Messer'], [['3'], 'Aufklärung'], [['4', 'X'], 'Luftschlag'], [['Tab'], 'Punktetafel'], [['Esc'], 'Pause'],
   ];
   const NAV = {
     main: [['play', 'Einsatz'], ['multi', 'Mehrspieler'], ['loadout', 'Ausrüstung'], ['career', 'Laufbahn'], ['settings', 'Einstellungen']],
@@ -4545,6 +8230,75 @@ function createMenus(root, api) {
     root.append(el);
     bNo.focus({ preventScroll: true });
   }
+  /**
+   * Hörprobe: alle Rezepte aus dem Register, je Variante ein Knopf. Raum (Aus, Hof, Halle, Gasse, Raum) und Entfernung (direkt, 5, 30, 80 m)
+   * lassen sich umschalten; Entfernung gilt nur für ortsgebundene Klänge (mit Hörweite). Liegt wie eine Rückfrage über dem Menü (Esc schließt).
+   */
+  function hearing() {
+    const K = api.klang;
+    if (!K || dlg) return;
+    const before = document.activeElement;
+    let dist = 0;
+    const note = h('span', 'Knopf = Variante');
+    const loops = new Map();                       // laufende Schleifen: Knopf → Stimme (Start und Stopp mit demselben Knopf)
+    const off = () => { K.room(null); for (const v of loops.values()) v?.stop?.(0.3); loops.clear(); };
+    const close = () => { off(); dlg?.el.remove(); dlg = null; if (before?.isConnected) before.focus({ preventScroll: true }); };
+    // Gegliedert nach Gruppen (Waffen, Mechanik, Hülsen …), mit Suche und Gruppenwahl: so lässt sich alles in wenigen Minuten durchhören
+    const names = K.names(), groups = KLANG_GRUPPEN.filter((g) => names.some((n) => klangGruppe(n) === g));
+    let grp = 'alle', find = '';
+    const rowOf = (n) => {
+      const m = K.meta(n);
+      return h('div.szm-hear-row', { dataset: { name: n, grp: klangGruppe(n) } }, h('span', n, h('small', [m.bus, m.reach ? `${m.reach} m` : '', m.loop ? 'Schleife' : ''].filter(Boolean).join(' · '))),
+        Array.from({ length: m.n }, (_, v) => {
+          const b = btn('.small', m.loop ? `${v + 1} ▶` : String(v + 1), () => {
+            if (m.loop) {                          // Schleife: Start und Stopp
+              if (loops.has(b)) { loops.get(b)?.stop?.(0.3); loops.delete(b); b.textContent = `${v + 1} ▶`; note.textContent = `${n} · gestoppt`; return; }
+              loops.set(b, null);
+              b.textContent = `${v + 1} ■`;
+              note.textContent = `${n} · wird berechnet …`;
+              K.loop(n, v, dist).then((voice) => {
+                if (!loops.has(b) || !dlg) { voice?.stop?.(0.3); return; }
+                loops.set(b, voice);
+                note.textContent = !voice ? `${n}: nicht zu hören (außer Hörweite oder Ton aus)` : `${n} · Schleife läuft – derselbe Knopf hält sie an`;
+              });
+              return;
+            }
+            const ok = K.play(n, v, dist);
+            note.textContent = !ok ? `${n}: nicht zu hören (außer Hörweite oder Ton aus)` : `${n} · Variante ${v + 1}${dist && !m.reach ? ' · nicht ortsgebunden, direkt' : dist ? ` · ${dist} m` : ''}`;
+          });
+          return b;
+        }));
+    };
+    const list = h('div.szm-hear-list', groups.map((g) => h('div.szm-hear-grp', { dataset: { grp: g } }, h('b', g), ...names.filter((n) => klangGruppe(n) === g).map(rowOf))));
+    const filter = () => {
+      const q = find.trim().toLowerCase();
+      for (const sec of list.children) {
+        let any = false;
+        for (const r of sec.querySelectorAll('.szm-hear-row')) { const on = (grp === 'alle' || r.dataset.grp === grp) && (!q || r.dataset.name.includes(q)); r.hidden = !on; any ||= on; }
+        sec.hidden = !any;
+      }
+    };
+    const search = h('input.kit-field.szm-hear-find', { type: 'search', placeholder: 'Suchen …', 'aria-label': 'Rezepte suchen', spellcheck: false, autocomplete: 'off' });
+    search.addEventListener('input', () => { find = search.value; filter(); });
+    const chips = h('div.szm-hear-chips', { role: 'group', 'aria-label': 'Gruppe' }, ['alle', ...groups].map((g) => {
+      const b = h('button.szm-chip', { type: 'button', 'aria-pressed': String(g === grp) }, g === 'alle' ? 'Alle' : g);
+      b.addEventListener('click', () => { grp = g; for (const x of chips.children) x.setAttribute('aria-pressed', String(x === b)); filter(); });
+      return b;
+    }));
+    const el = h('div.szm-dim.szm-hear-dim', { role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Hörprobe' },
+      h('div.szm-hear',
+        h('b', 'Hörprobe'),
+        h('div.szm-hear-opts',
+          h('span', 'Raum', seg('Raum', [['aus', 'Aus'], ['hof', 'Hof'], ['halle', 'Halle'], ['gasse', 'Gasse'], ['raum', 'Raum']], 'aus', (v) => K.room(v))),
+          h('span', 'Entfernung', seg('Entfernung', [[0, 'Direkt'], [5, '5 m'], [30, '30 m'], [80, '80 m']], 0, (v) => { dist = v; }))),
+        h('div.szm-hear-tools', search, chips),
+        list,
+        h('div.szm-hear-foot', note, btn('', 'Schließen', () => { snd('back'); close(); }))));
+    dlg = { el, close, off };
+    root.append(el);
+    K.room('aus');
+    focusIn(el);
+  }
   function playerCard() {
     const xp = api.profile.xp || 0, lvl = levelOf(xp);
     return h('div.szm-me', { 'aria-label': 'Dein Profil' },
@@ -4582,7 +8336,7 @@ function createMenus(root, api) {
     };
     function paintOpts() {
       const m = MODES[s.mode], hint = h('small', SKILLS[s.skill].about);
-      const unit = s.mode === 'ffa' ? 'Abschüsse' : 'Punkte';
+      const unit = { ffa: 'Abschüsse', gg: 'Stufen' }[s.mode] || 'Punkte';
       opts.replaceChildren(lab('Regeln'),
         h('div.szm-row', h('div.szm-row-t', h('b', 'Schwierigkeit'), hint),
           h('div.szm-ctl', seg('Schwierigkeit', SKILLS.map((k, i) => [i, k.name]), s.skill, (v) => { s.skill = v; hint.textContent = SKILLS[v].about; changed(); }))),
@@ -4742,12 +8496,19 @@ function createMenus(root, api) {
           row('Ducken umschalten', 'C wechselt, statt gehalten zu werden', toggle('Ducken umschalten', P.toggleCrouch, live('toggleCrouch')))),
         sec('Bild',
           row('Sichtfeld', '', slider('Sichtfeld', 60, 100, 1, P.fov, (v) => `${Math.round(v)}°`, live('fov'))),
-          row('Qualität', 'Auto passt die Auflösung an die Bildrate an', seg('Qualität', [['auto', 'Auto'], ['low', 'Niedrig'], ['medium', 'Mittel'], ['high', 'Hoch']], P.quality, live('quality'))),
+          row('Qualität', 'Auto passt Auflösung und Effekte an die Bildrate an', seg('Qualität', [['auto', 'Auto'], ['low', 'Niedrig'], ['medium', 'Mittel'], ['high', 'Hoch']], P.quality, live('quality'))),
           row('Schatten', '', toggle('Schatten', P.shadows, live('shadows'))),
+          row('Blut', 'Treffer zeigen dezente Blutspuren', toggle('Blut', P.blood, live('blood'))),
           row('Bildrate anzeigen', '', toggle('Bildrate anzeigen', P.fps, live('fps'))),
           row('Vollbild', 'Das Spiel füllt den ganzen Bildschirm', bFull)),
         sec('Ton',
-          row('Lautstärke', 'Zusätzlich zur Lautstärke des Systems', slider('Lautstärke', 0, 1, 0.05, P.volume, pct, live('volume')))),
+          row('Lautstärke', 'Zusätzlich zur Lautstärke des Systems', slider('Lautstärke', 0, 1, 0.05, P.volume, pct, live('volume'))),
+          row('Effekte', 'Waffen, Schritte, Treffer und Funk', slider('Effekte', 0, 1, 0.05, P.volFx, pct, live('volFx'))),
+          row('Umgebung', 'Wind, Hafen, Zikaden, Lampen und Brunnen', slider('Umgebung', 0, 1, 0.05, P.volAmb, pct, live('volAmb'))),
+          row('Musik', 'Im Menü und an den großen Momenten – im Einsatz keine Dauermusik', slider('Musik', 0, 1, 0.05, P.volMusic, pct, live('volMusic'))),
+          row('Kopfhörer-Modus', 'Richtungen räumlich (HRTF) – nur mit Kopfhörern sinnvoll', toggle('Kopfhörer-Modus', P.hrtf, live('hrtf'))),
+          row('Nachtmodus', 'Schüsse und Explosionen stark gedämpft, Leises bleibt', toggle('Nachtmodus', P.night, live('night'))),
+          row('Hörprobe', 'Jeden Klang einzeln anhören, mit Raum und Entfernung', btn('.small', 'Öffnen', () => { snd('ok'); hearing(); }, 'play'))),
         sec('Tastenbelegung', h('div.szm-keys', KEYS.map(([keys, what]) => h('div', keys.map((k) => h('kbd', k)), h('span', what))))),
         h('div.szm-sec', { style: { display: 'flex', justifyContent: 'flex-end' } },
           btn('.small', 'Standard wiederherstellen', () => { Object.assign(P, DEFAULTS); snd('ok'); clearTimeout(saveT); saveT = 0; api.save('prefs'); paint(); focusables(body).pop()?.focus({ preventScroll: true }); }, 'reload')));
@@ -4829,13 +8590,14 @@ function createMenus(root, api) {
   function buildEnd(d = {}) {
     const mode = MODES[d.mode] || MODES.tdm, map = MAPS.find((m) => m.id === d.map);
     const kind = d.win ? 'win' : /unentschieden/i.test(d.title || '') ? 'draw' : 'loss';
-    const rows = [...(d.rows || [])].sort((a, b) => (mode.teams ? 0 : b.kills - a.kills) || b.score - a.score || b.kills - a.kills);
+    const gg = d.mode === 'gg';                    // Waffenmeister: nach Stufe, eigene Spalte
+    const rows = [...(d.rows || [])].sort((a, b) => (gg ? (b.gg || 0) - (a.gg || 0) : 0) || (mode.teams ? 0 : b.kills - a.kills) || b.score - a.score || b.kills - a.kills);
     const secs = Math.max(0, Math.round(d.time || 0));
     const table = (list, cls, name) => h(`table.szm-tab${cls}`,
-      h('thead', h('tr', h('th'), h('th.szm-team', name), h('th', 'Punkte'), h('th', { title: 'Abschüsse' }, 'Absch.'), h('th', 'Tode'), h('th', { title: 'Vorlagen' }, 'Vorl.'))),
+      h('thead', h('tr', h('th'), h('th.szm-team', name), gg ? h('th', 'Stufe') : null, h('th', 'Punkte'), h('th', { title: 'Abschüsse' }, 'Absch.'), h('th', 'Tode'), h('th', { title: 'Vorlagen' }, 'Vorl.'))),
       h('tbody', list.map((r, i) => h(`tr${r.me ? '.is-me' : ''}`,
         h('td', String(i + 1)), h(`td${!r.bot && !r.me ? '.is-human' : ''}`, String(r.name), r.me ? h('em', 'Du') : null),
-        h('td', nf(r.score)), h('td', nf(r.kills)), h('td', nf(r.deaths)), h('td', nf(r.assists))))));
+        gg ? h('td', nf(r.gg)) : null, h('td', nf(r.score)), h('td', nf(r.kills)), h('td', nf(r.deaths)), h('td', nf(r.assists))))));
     const board = mode.teams
       ? [table(rows.filter((r) => r.team === 0), '.own', 'Dein Team'), table(rows.filter((r) => r.team !== 0), '.foe', 'Gegner')]
       : [table(rows, '', 'Alle gegen alle')];
@@ -4920,6 +8682,7 @@ function createMenus(root, api) {
   }
 
   function clearScreen() {
+    dlg?.off?.();
     dlg?.el.remove();
     dlg = null;
     closePage();
@@ -5114,10 +8877,12 @@ const HUD_CSS = `
 @media (prefers-reduced-motion: reduce) { .szh-flag.on, .szh-streak { animation: none; } }
 `;
 
-const WNAME = { nade: 'Granate', knife: 'Messer', fall: 'Sturz' };
+const WNAME = { nade: 'Granate', knife: 'Messer', fall: 'Sturz', fass: 'Fass', luft: 'Luftschlag' };
 const weaponLabel = (id) => WNAME[id] || WEAPONS[id]?.name || '';
 const mmss = (t) => { t = Math.max(0, Math.ceil(t)); return `${Math.floor(t / 60)}:${String(t % 60).padStart(2, '0')}`; };
-const SCALES = { low: 0.6, medium: 0.8, high: 1 }, SHADOW_RES = { low: 1024, medium: 2048, high: 4096, auto: 2048 };
+const SHADOW_RES = { low: 1024, medium: 2048, high: 4096, auto: 2048 };
+// „Auto“: Merkmale wie „Mittel“. Zuerst sinkt die Auflösung bis 0,7, dann fallen SSAO und Sonnenstrahlen weg (ab AUTO_LITE), erst danach sinkt sie weiter.
+const AUTO = [1, 0.94, 0.88, 0.82, 0.76, 0.7, 0.7, 0.64, 0.58, 0.52, 0.5], AUTO_LITE = 6;
 
 function createApp(win) {
   style('shooter', HUD_CSS + MENU_CSS + NET_CSS);
@@ -5125,12 +8890,16 @@ function createApp(win) {
   // Gespeichertes kann alt, von Hand verändert oder beschädigt sein: erst auf gültige Werte bringen, dann benutzen.
   const stored = (key) => { const v = db.get(key, {}); return v && typeof v === 'object' && !Array.isArray(v) ? v : {}; };
   const num = (v, d, lo, hi) => (typeof v === 'number' && Number.isFinite(v) ? clamp(v, lo, hi) : d);
-  const PREFS = { sens: 1, adsSens: 0.8, invertY: false, fov: 75, volume: 0.8, quality: 'auto', shadows: true, fps: false, toggleAds: false, toggleCrouch: true };
+  const PREFS = { sens: 1, adsSens: 0.8, invertY: false, fov: 75, volume: 0.8, quality: 'auto', shadows: true, fps: false, toggleAds: false, toggleCrouch: true, volFx: 1, volAmb: 0.7, volMusic: 0.6, hrtf: false, night: false };
+  PREFS.blood = true;                                  // Bild: dezentes Blut bei Treffern
   const prefs = { ...PREFS, ...stored('prefs') };
   prefs.sens = num(prefs.sens, PREFS.sens, 0.2, 3); prefs.adsSens = num(prefs.adsSens, PREFS.adsSens, 0.3, 1.5);
   prefs.fov = num(prefs.fov, PREFS.fov, 60, 100); prefs.volume = num(prefs.volume, PREFS.volume, 0, 1);
   if (!Object.hasOwn(SHADOW_RES, prefs.quality)) prefs.quality = PREFS.quality;
   for (const k of ['invertY', 'shadows', 'fps', 'toggleAds', 'toggleCrouch']) if (typeof prefs[k] !== 'boolean') prefs[k] = PREFS[k];
+  for (const k of ['volFx', 'volAmb', 'volMusic']) prefs[k] = num(prefs[k], PREFS[k], 0, 1);          // Ton (Phase 7)
+  for (const k of ['hrtf', 'night']) if (typeof prefs[k] !== 'boolean') prefs[k] = PREFS[k];
+  if (typeof prefs.blood !== 'boolean') prefs.blood = PREFS.blood;
   const profile = { xp: 0, kills: 0, deaths: 0, assists: 0, headshots: 0, matches: 0, wins: 0, bestStreak: 0, shots: 0, hits: 0, time: 0, byWeapon: {}, ...stored('profile') };
   for (const k of ['xp', 'kills', 'deaths', 'assists', 'headshots', 'matches', 'wins', 'bestStreak', 'shots', 'hits', 'time']) profile[k] = Math.round(num(profile[k], 0, 0, 1e9));
   profile.hits = Math.min(profile.hits, profile.shots);       // mehr Treffer als Schüsse kann es nicht geben
@@ -5173,20 +8942,34 @@ function createApp(win) {
     stage.append(el('sz-err', h('b', 'Sperrzone braucht WebGL 2'), h('span', 'Dieser Browser oder diese Grafikkarte stellt es gerade nicht bereit.')));
     return { onClose() {} };
   }
-  const S = createSound(() => prefs.volume);
+  const S = createSound(() => prefs);
+  S.bake(null, [loadout.primary, loadout.secondary].map((id) => `schuss.${WEAPONS[id]?.snd}.ich`));      // Klänge in Scheiben berechnen, die eigenen Waffen zuerst
 
   // ---------- Zustand ----------
   let M = null, paused = false, closed = false, locked = false, menuWorld = null, menuT = Math.random() * 50;
   let net = null, lobbyOff = null, starting = false, startSeq = 0, startNet = false;
   const netQueue = [];            // Nachrichten, die eintreffen, während die Karte noch gebaut wird
+  let forceLdr = false;           // Rückfall ohne Float-Ziele erzwungen (_sz.bild.ldr)
+  let autoLvl = 0, lastQuality = '';   // Stufe auf der Leiter AUTO
   let scale = 1, slow = 0, fast = 0, fpsAcc = 0, fpsN = 0, endTimer = 0, faults = 0, wheelAt = 0, lostEl = null, bg = null, simAt = performance.now();
+  let hurtOut = 0;                                     // Stärke des Trefferrahmens für den Schlussschritt (f.post.hurt)
+  let ovClip = false;                                  // Auflage gerade auf den Kreis des Zielfernrohrs beschnitten
   let hitT = 0, hitKill = false, hitHead = false, hurtK = 0, lastWarm = 9, boardT = 0, hudT = 0, crouchOn = false, adsOn = false, radarMap = null;
   const arcs = [], keys = new Set(), P3 = [0, 0, 0];
+  const tense = new WeakSet();                     // Partien, in denen das Motiv „Spannung“ schon lief
   const playing = () => !!M && !paused && M.state !== 'over';
 
   function applyPrefs() {
     R.setShadowSize(SHADOW_RES[prefs.quality] || 2048);
-    if (prefs.quality !== 'auto') scale = SCALES[prefs.quality];
+    if (prefs.quality === 'auto') {
+      if (lastQuality !== 'auto') autoLvl = 0;          // „Auto“ beginnt mit voller Auflösung
+      scale = AUTO[autoLvl];
+      R.setTier(autoLvl >= AUTO_LITE ? { ...TIERS.medium, ssao: 0, rays: false } : TIERS.medium);
+    } else {
+      scale = TIERS[prefs.quality].scale;
+      R.setTier(TIERS[prefs.quality]);
+    }
+    lastQuality = prefs.quality;
     fpsEl.hidden = !prefs.fps;
     size();
   }
@@ -5219,6 +9002,15 @@ function createApp(win) {
     toggleFullscreen() { if (document.fullscreenElement) document.exitFullscreen?.(); else stage.requestFullscreen?.().catch(() => {}); },
     isFullscreen: () => document.fullscreenElement === stage,
     snd: (kind) => S.ui(kind),
+    /** Hörprobe: Register lesen und Varianten abspielen – dist 0 direkt, sonst so weit vor einem gedachten Hörer, ohne Verdeckung. */
+    klang: {
+      names: () => Object.keys(KLANG),
+      meta: (n) => KLANG[n],
+      room: (z) => S.room(z),
+      play: (n, v, dist = 0) => !!S.play(n, dist ? { v, L: { x: 0, y: 1.6, z: 0, yaw: 0 }, x: 0, y: 1.6, z: -dist, free: true } : { v }),
+      /** Schleife starten (erst berechnen, falls nötig): liefert ein Promise mit der Stimme ({ stop(fade) }) oder null. */
+      loop: (n, v, dist = 0) => klangLater([n]).then(() => S.play(n, dist ? { v, bed: true, L: { x: 0, y: 1.6, z: 0, yaw: 0 }, x: 0, y: 1.6, z: -dist, free: true } : { v, bed: true })),
+    },
     inMatch: () => !!M && M.state !== 'over',
     /** Liegt dieses Fenster vorn? (Nur dann dürfen Menüs den Tastaturfokus an sich ziehen.) */
     active: () => mine(),
@@ -5258,6 +9050,8 @@ function createApp(win) {
   }
   /** Vorgaben des Gastgebers prüfen – nur was hier ankommt, erreicht die Partie. Liefert null, wenn sie nicht zu gebrauchen sind. */
   function remoteCfg(c) {
+    // Protokollversion: wer anders rechnet, spielt nicht mit (ältere Fassungen kennen diese Prüfung nicht)
+    if (c && typeof c === 'object' && c.v !== NET_V) { notice('Sperrzone', 'Der Gastgeber nutzt eine andere Version von Sperrzone. Ladet beide die Seite neu.', 'close'); return null; }
     if (!c || typeof c !== 'object' || !MAPS.some((x) => x.id === c.map) || !Object.hasOwn(MODES, c.mode) || !Array.isArray(c.roster)) return null;
     const teams = MODES[c.mode].teams;
     const roster = c.roster.slice(0, 24).filter((r) => r && typeof r === 'object').map((r) => ({
@@ -5294,6 +9088,7 @@ function createApp(win) {
     if (hosting) {
       const base = { map: cfg.map, mode: cfg.mode, limit: cfg.limit, minutes: cfg.minutes, size: cfg.size, skill: cfg.skill };
       base.roster = makeRoster(base, net.peers.map((p) => ({ id: p.id, name: p.name })));
+      base.v = NET_V;                                // Protokollversion
       net.send({ t: 'start', cfg: base }, null, true);
       cfg.roster = base.roster;
       cfg.net = { role: 'host', id: 0, send: (msg, to, rel) => net.send(msg, to, rel) };
@@ -5306,11 +9101,15 @@ function createApp(win) {
     menus.show('loading', { map: cfg.map, mode: cfg.mode });
     menus.setLoading(map.name, 0.2);
     hud.hidden = true;
-    setTimeout(() => {
+    setTimeout(function begin() {
       if (closed || seq !== startSeq) return;       // inzwischen verlassen, geschlossen oder getrennt
+      if (!S.ready()) {                              // Klänge, die noch fehlen, vorher fertig rechnen (Fortschritt im Ladebild)
+        S.bake((p) => { if (seq === startSeq) menus.setLoading('Klänge werden berechnet', 0.2 + 0.6 * p); }).then(() => { if (seq === startSeq) menus.setLoading(map.name, 0.8); setTimeout(begin, 0); });
+        return;
+      }
       starting = false;
       try {
-        M = createMatch(cfg, { snd: S, emit });
+        M = createMatch(cfg, { snd: S, emit, prefs });
       } catch (err) {
         console.error('[Sperrzone]', err);
         if (cfg.net?.role === 'host') net?.send({ t: 'bye' }, null, true);      // die Mitspieler laden schon – sie sollen nicht vergeblich warten
@@ -5331,9 +9130,12 @@ function createApp(win) {
       flagsEl.replaceChildren(...M.flags.map((f) => { f.el = el('szh-flag', h('i'), h('b', f.name)); return f.el; }));
       labOwn.textContent = M.teams ? 'Dein Team' : 'Du';
       labFoe.textContent = M.teams ? 'Gegner' : 'Führender';
+      if (M.mode === 'gg') labOwn.textContent = 'Deine Stufe';      // Waffenmeister
       clockL.textContent = `${MODES[M.mode].name.split('-')[0]} · ${M.cfg.limit}`;
       menus.show(null);
       hud.hidden = false;
+      S.music?.(null);                           // im Einsatz keine Dauermusik (auch wenn das Ladebild in keinem Bild zu sehen war)
+      S.motif?.('start');
       keys.clear();
       simAt = performance.now();                 // die Ladezeit zählt nicht als Spielzeit
       if (M.net) bgStart();
@@ -5404,7 +9206,7 @@ function createApp(win) {
     match.result = {
       title, win: good, won, place, levelUp: l1 > l0, mode: match.mode, map: match.cfg.map, time: match.time,
       scores: match.teams ? [match.scores[me.team], match.scores[1 - me.team]] : null,
-      rows: match.table().map((s) => ({ name: s.name, team: match.friendly(s) ? 0 : 1, kills: s.kills, deaths: s.deaths, assists: s.assists, score: s.score, me: s.me, bot: !!s.bot })),
+      rows: match.table().map((s) => ({ name: s.name, team: match.friendly(s) ? 0 : 1, gg: s.gg, kills: s.kills, deaths: s.deaths, assists: s.assists, score: s.score, me: s.me, bot: !!s.bot })),
       xp, xpBefore: before, xpAfter: profile.xp, unlocks: PRIMARIES.filter((id) => WEAPONS[id].level > l0 && WEAPONS[id].level <= l1),
       medals: Object.entries(medalCount).sort((a, b) => b[1] - a[1]),
     };
@@ -5413,7 +9215,7 @@ function createApp(win) {
   /** Partie vorbei: kurz ausklingen lassen, dann Abrechnung und Abschlussbild. */
   function onEnd() {
     const match = M, me = match.me, { draw, good, title } = verdict(match);
-    big(title.toUpperCase(), 0, good ? 'win' : draw ? '' : 'lose', match.teams ? `${match.scores[me.team]} : ${match.scores[1 - me.team]}` : `${me.kills} Abschüsse`);
+    big(title.toUpperCase(), 0, good ? 'win' : draw ? '' : 'lose', match.teams ? `${match.scores[me.team]} : ${match.scores[1 - me.team]}` : match.mode === 'gg' ? `Stufe ${me.gg} von ${GG.length}` : `${me.kills} Abschüsse`);
     S.jingle(good ? 'win' : 'lose');
     clearTimeout(endTimer);
     endTimer = setTimeout(() => {
@@ -5424,7 +9226,8 @@ function createApp(win) {
       g2.clearRect(0, 0, fxc.width, fxc.height);
       M = null;
       bgStop();
-      if (result.levelUp) S.jingle('level');
+      S.motif?.(result.win ? 'sieg' : 'niederlage');
+      if (result.levelUp) S.motif?.('stufe', 2.6);
       menus.show('end', result);
     }, 4600);
   }
@@ -5455,11 +9258,11 @@ function createApp(win) {
       for (const m of d.medals) { pop(m, 0, 'medal'); medalCount[m] = (medalCount[m] || 0) + 1; }
       if (d.medals.some((m) => m.startsWith('Serie'))) S.jingle('streak');
     } else if (type === 'points') pop(d.label, d.pts);
-    else if (type === 'pack') pop('Munition aufgenommen', 0);
+    else if (type === 'pack') { pop('Munition aufgenommen', 0); S.pickup(); }
     else if (type === 'died') {
       adsOn = false; crouchOn = false;
       const self = d.by === M.me;
-      deadEl.replaceChildren(h('small', self ? 'Ausgeschaltet' : 'Ausgeschaltet von'), h('b', self ? (d.weapon === 'fall' ? 'Sturz' : 'eigene Granate') : d.by.name), self ? '' : h('span', weaponLabel(d.weapon)));
+      deadEl.replaceChildren(h('small', self ? 'Ausgeschaltet' : 'Ausgeschaltet von'), h('b', self ? ({ fall: 'Sturz', fass: 'Fass', luft: 'eigener Luftschlag' }[d.weapon] || 'eigene Granate') : d.by.name), self ? '' : h('span', weaponLabel(d.weapon)));
       deadEl.hidden = false;
     } else if (type === 'spawn') { if (d.me) deadEl.hidden = true; }
     else if (type === 'feed') paintFeed();
@@ -5468,6 +9271,7 @@ function createApp(win) {
       big(`Stellung ${d.f.name}`, 1.6, mine ? 'win' : 'lose', mine ? 'erobert' : 'verloren');
       S.jingle(mine ? 'capture' : 'lost');
     } else if (type === 'uav') { pop('Aufklärung aktiv', 0, 'medal'); S.jingle('uav'); }
+    else if (type === 'luft') pop(d.s === M.me ? 'Luftschlag angefordert' : M.friendly(d.s) ? `Luftschlag von ${d.s.name}` : 'Feindlicher Luftschlag!', 0, 'medal');
     else if (type === 'end') onEnd();
   }
   function paintFeed() {
@@ -5526,8 +9330,10 @@ function createApp(win) {
   /** Fadenkreuz, Treffermarken, Schadensrichtung, Namen, Stellungen, Granatenwarnung */
   function drawOverlay(dt) {
     const W = fxc.width, H = fxc.height, me = M.me, cam = M.cam, u = H / 720;
+    if (ovClip) { g2.restore(); ovClip = false; }
     g2.setTransform(1, 0, 0, 1, 0, 0);
     g2.clearRect(0, 0, W, H);
+    if (M.scoped) { g2.save(); g2.beginPath(); g2.arc(W / 2, H / 2, 0.42 * H, 0, TAU); g2.clip(); ovClip = true; }   // Zielfernrohr (Schlussschritt): Schilder nur im Kreis
     if (!me.alive && M.state !== 'over') return;
     const cx = W / 2, cy = H / 2;
     g2.textAlign = 'center';
@@ -5641,8 +9447,8 @@ function createApp(win) {
   function drawHud(dt) {
     const me = M.me;
     hurtK = damp(hurtK, 0, 1.6, dt);
-    hurtEl.style.opacity = clamp(hurtK * 0.75 + (me.alive ? (1 - me.hp / 100) ** 1.6 * 0.85 : 0.5), 0, 1).toFixed(3);
-    scopeEl.hidden = !M.scoped;
+    // Trefferrahmen und Zielfernrohr zeichnet der Schlussschritt (f.post.hurt, f.post.scope); .szh-hurt und .szh-scope bleiben leer im Baum
+    hurtOut = clamp(hurtK * 0.75 + (me.alive ? (1 - me.hp / 100) ** 1.6 * 0.85 : 0.5), 0, 1);
     drawOverlay(dt);
     drawRadar();
     if ((hudT -= dt) > 0) return;
@@ -5651,7 +9457,9 @@ function createApp(win) {
     let own, foe, lim = M.cfg.limit;
     if (M.teams) { own = M.scores[me.team]; foe = M.scores[1 - me.team]; }
     else { own = me.kills; foe = 0; for (const s of M.soldiers) if (s !== me && s.kills > foe) foe = s.kills; }
+    if (M.mode === 'gg') { own = me.gg; foe = 0; for (const s of M.soldiers) if (s !== me && s.gg > foe) foe = s.gg; }      // Waffenmeister: Stufen
     scoreOwn.textContent = own; scoreFoe.textContent = foe;
+    if (!tense.has(M) && M.state === 'live' && (M.clock < 60 || Math.max(own, foe) >= 0.9 * lim)) { tense.add(M); S.motif?.('spannung'); }     // Musik: die Partie wird knapp
     teamOwn.style.setProperty('--p', clamp(own / lim, 0, 1));
     teamFoe.style.setProperty('--p', clamp(foe / lim, 0, 1));
     clockT.textContent = mmss(M.clock);
@@ -5659,9 +9467,11 @@ function createApp(win) {
       f.el.className = `szh-flag${f.owner < 0 ? '' : f.owner === me.team ? ' own' : ' foe'}${f.mine && f.owner !== me.team ? ' on' : ''}`;
       f.el.style.setProperty('--p', f.prog.toFixed(2));
       f.el.style.setProperty('--k', f.capBy === me.team ? '#4d9bff' : '#ff5a48');
+      S.progress?.(f, f.mine && f.capBy === me.team && f.owner !== me.team ? f.prog : -1);      // Funk-Klick je 10 % Eroberung
     }
     // Gesundheit, Munition
     const hp = Math.max(0, Math.ceil(me.hp));
+    S.state?.({ hp: me.alive ? hp : 100 });       // Klang: wenig Leben (Herzschlag, dumpfe Welt)
     hpNum.textContent = hp;
     hpBar.parentNode.style.setProperty('--p', hp / 100);
     hpEl.classList.toggle('low', hp < 40);
@@ -5671,8 +9481,13 @@ function createApp(win) {
     numEl.className = `num${gun.mag === 0 ? ' out' : gun.mag <= w.mag * 0.25 ? ' low' : ''}`;
     const other = me.guns[1 - me.cur];
     rowEl.replaceChildren(other ? h('span', { style: { opacity: 0.7 } }, WEAPONS[other.id].name) : '', h('span', [0, 1].map((i) => h(`i.nade${i < me.nades ? '' : '.off'}`))));
-    streakEl.hidden = !me.uavReady;
-    if (me.uavReady && !streakEl.firstChild) streakEl.append('Aufklärung bereit', h('kbd', '3'));
+    // Serien: Aufklärung (3) und Luftschlag (4), je eine Zeile
+    const ready = (me.uavReady ? 1 : 0) | (me.strikeReady ? 2 : 0);
+    streakEl.hidden = !ready;
+    if (ready !== streakEl._ready) {
+      streakEl._ready = ready;
+      streakEl.replaceChildren(...(ready & 1 ? [h('div', 'Aufklärung bereit', h('kbd', '3'))] : []), ...(ready & 2 ? [h('div', 'Luftschlag bereit', h('kbd', '4'))] : []));
+    }
     const uavLeft = M.uavLeft();
     uavEl.hidden = uavLeft <= 0;
     if (uavLeft > 0) uavEl.textContent = `Aufklärung ${Math.ceil(uavLeft)} s`;
@@ -5698,17 +9513,18 @@ function createApp(win) {
     if (!boardEl.hidden && (boardT -= 0.1) <= 0) { boardT = 0.5; paintBoard(); }
   }
   function paintBoard() {
-    const rows = M.table();
+    const rows = M.table(), gg = M.mode === 'gg';      // Waffenmeister: eigene Spalte für die Stufe
     const table = (list, cls, title) => h(`table.${cls}`, h('caption', title),
-      h('tr', h('th', 'Name'), h('th', 'Punkte'), h('th', 'A'), h('th', 'T'), h('th', 'V')),
-      list.map((s) => h(`tr${s.me ? '.me' : ''}${s.alive ? '' : '.dead'}`, h('td', s.name), h('td', String(s.score)), h('td', String(s.kills)), h('td', String(s.deaths)), h('td', String(s.assists)))));
+      h('tr', h('th', 'Name'), gg ? h('th', 'St') : null, h('th', 'Punkte'), h('th', 'A'), h('th', 'T'), h('th', 'V')),
+      list.map((s) => h(`tr${s.me ? '.me' : ''}${s.alive ? '' : '.dead'}`, h('td', s.name), gg ? h('td', String(s.gg)) : null, h('td', String(s.score)), h('td', String(s.kills)), h('td', String(s.deaths)), h('td', String(s.assists)))));
     if (M.teams) {
       const t = M.me.team;
       boardEl.replaceChildren(table(rows.filter((s) => s.team === t), 'own', `Dein Team · ${M.scores[t]}`), table(rows.filter((s) => s.team !== t), 'foe', `Gegner · ${M.scores[1 - t]}`));
-    } else boardEl.replaceChildren(table(rows, 'own', `Frei für alle · bis ${M.cfg.limit}`));
+    } else boardEl.replaceChildren(table(rows, 'own', `${MODES[M.mode].name} · bis ${M.cfg.limit}`));
   }
 
   // ---------- Eingabe ----------
+  let slideTap = false;           // Rutschen: Ducken im Sprint gedrückt (mit „Ducken umschalten“ setzt der Sprint es sonst gleich wieder zurück)
   function readInput() {
     const me = M.me, inp = me.in;
     const k = (c) => keys.has(c);
@@ -5718,6 +9534,7 @@ function createApp(win) {
     inp.sprint = k('ShiftLeft') || k('ShiftRight');
     if (inp.sprint && inp.mz > 0) crouchOn = false;
     inp.crouch = prefs.toggleCrouch ? crouchOn : k('KeyC');
+    if (slideTap) { inp.crouch = true; slideTap = false; }       // Rutschen: im Sprint ist „Ducken“ nur ein Anstoß
     inp.fire = k('Mouse0');
     inp.ads = prefs.toggleAds ? adsOn : k('Mouse2');
   }
@@ -5726,8 +9543,9 @@ function createApp(win) {
     const me = M.me, inp = me.in;
     if (!me.alive) {                  // gefallen: nichts vormerken, was beim Wiedereinstieg von selbst losginge (Granate, Waffenwechsel …)
       if (code === 'Tab') { boardEl.hidden = false; boardT = 0; }
-      return /^(Key[WASDCRQGVFE]|Digit[123]|Arrow|Shift|Mouse|Tab|Space)/.test(code);
+      return /^(Key[WASDCRQGVFEX]|Digit[1234]|Arrow|Shift|Mouse|Tab|Space)/.test(code);
     }
+    if (code === 'KeyC' && inp.sprint && inp.mz > 0) slideTap = true;       // Rutschen
     if (code === 'KeyC') { if (prefs.toggleCrouch) crouchOn = !crouchOn; }
     else if (code === 'Space') { if (crouchOn) { crouchOn = false; keys.delete('Space'); return true; } }
     else if (code === 'KeyR') inp.reload = true;
@@ -5737,6 +9555,7 @@ function createApp(win) {
     else if (code === 'KeyG') inp.nade = true;
     else if (code === 'KeyV' || code === 'KeyF') inp.melee = true;
     else if (code === 'Digit3' || code === 'KeyE') M.useUav();
+    else if (code === 'Digit4' || code === 'KeyX') M.useStrike();       // Luftschlag
     else if (code === 'Mouse2') { if (prefs.toggleAds) adsOn = !adsOn; }
     else if (code === 'Tab') { boardEl.hidden = false; boardT = 0; }
     else return /^(Key[WASD]|Arrow|Shift|Mouse)/.test(code);
@@ -5820,7 +9639,7 @@ function createApp(win) {
   gl.addEventListener('webglcontextrestored', () => {
     if (closed) return;
     let fresh = null;
-    try { fresh = createRenderer(gl); } catch (err) { console.error(err); }
+    try { fresh = createRenderer(gl, { ldr: forceLdr }); } catch (err) { console.error(err); }
     if (!fresh) { lostNote('Die Grafik ließ sich nicht wiederherstellen', 'Bitte schließe Sperrzone und öffne es erneut.'); return; }
     R = fresh;
     lostEl?.remove(); lostEl = null;
@@ -5863,11 +9682,11 @@ function createApp(win) {
   function draw(dt) {
     const real = elapsed();
     if (devicePixelRatio !== dprSeen) { dprSeen = devicePixelRatio; size(); }       // anderer Monitor oder Zoom: die Fenstergröße bleibt, die Pixeldichte nicht
-    // Auflösung der Leistung anpassen
+    // Auflösung und Merkmale der Leistung anpassen (Leiter AUTO)
     if (prefs.quality === 'auto') {
       if (dt > 1 / 45) { slow += dt; fast = 0; } else if (dt < 1 / 57) { fast += dt; slow = Math.max(0, slow - dt * 0.5); }
-      if (slow > 1.5 && scale > 0.5) { scale = Math.max(0.5, scale - 0.12); slow = 0; size(); }
-      else if (fast > 8 && scale < 1) { scale = Math.min(1, scale + 0.06); fast = 0; size(); }
+      if (slow > 1.5 && autoLvl < AUTO.length - 1) { autoLvl = Math.min(AUTO.length - 1, autoLvl + 2); slow = 0; applyPrefs(); }
+      else if (fast > 8 && autoLvl > 0) { autoLvl--; fast = 0; applyPrefs(); }
     }
     if (prefs.fps) { fpsAcc += dt; fpsN++; if (fpsAcc > 0.5) { fpsEl.textContent = `${Math.round(fpsN / fpsAcc)} B/s · ${Math.round(scale * 100)} %`; fpsAcc = 0; fpsN = 0; } }
     if (M) {
@@ -5875,9 +9694,12 @@ function createApp(win) {
       if (live) simulate(real, paused);
       if (!M) return;
       M.aim(live ? real : 0.0001, prefs.fov);
-      R.render(M.frame(prefs.shadows));
+      const fr = M.frame(prefs.shadows);
+      fr.post.hurt = hud.hidden ? 0 : hurtOut;      // Trefferrahmen aus der App (hurtK, in drawHud abklingend)
+      R.render(fr);
       if (!hud.hidden) drawHud(live ? real : 0);
     } else if (menuWorld) {
+      S.music?.(menus.screen === 'main' ? 'menue' : null);      // Musik nur im Hauptmenü, im Einsatz keine Dauermusik
       menuT += dt;
       const b = menuWorld.bounds, r = Math.max(b.x1 - b.x0, b.z1 - b.z0) * 0.36, a = menuT * 0.045;
       const x = Math.sin(a) * r, z = Math.cos(a) * r, y = 9 + Math.sin(menuT * 0.11) * 2.5;
@@ -5916,7 +9738,45 @@ function createApp(win) {
   menus.show('main');
   if (matchMedia('(hover: none) and (pointer: coarse)').matches) sys.notify({ title: 'Sperrzone', body: 'Zum Spielen brauchst du Maus und Tastatur – eine Steuerung für Touch-Geräte gibt es noch nicht.', icon: 'info', app: 'shooter' });
   ticker.add(frame);
-  stage._sz = { get M() { return M; }, get net() { return net; }, api, keys, press, start: startMatch };      // für Tests und zum Nachsehen in der Konsole
+  stage._sz = { get M() { return M; }, get net() { return net; }, api, keys, press, start: startMatch, snd: S };      // für Tests und zum Nachsehen in der Konsole
+  // Prüfhaken: cam([x, y, z, yaw, pitch, fov] | null) setzt oder löst die feste Kamera, freeze(true) hält die Partie im Aufwärmen
+  stage._sz.probe = {
+    cam(pose) { if (M) M.fixedCam = pose ? [...pose] : null; },
+    freeze(on) { if (M) M.warm = on ? 999 : 0; },
+  };
+  // Prüfhaken Klang (klang.mjs): Rechenkern, Rezepte (data: berechnete Variante, fresh: neu berechnet, meta: Rezept ohne make)
+  const klangOut = (d) => (d.data.length === 1 ? d.data[0] : { ch: d.data });
+  stage._sz.klang = {
+    forge: (sr) => forge(sr),
+    names: () => Object.keys(KLANG),
+    data: (name, v = 0) => klangOut(klangGet(name, v)),
+    fresh: (name, v = 0) => klangOut(klangMake(name, v)),
+    meta: (name) => { const { make, ...m } = KLANG[name]; return { ...m, lvl: BANK.get(name)?.map((d) => d?.lvl) || [] }; },
+    get bakeMs() { return KBAKE.ms; },
+    bake: () => ({ ...KBAKE }),
+    /** Alles vergessen und neu berechnen (prüft das Ladebild): löscht die berechneten Varianten, die Raumantworten bleiben. */
+    reset() { BANK.clear(); loopWait.clear(); bakeJob = null; Object.assign(KBAKE, { ms: 0, maxSlice: 0, maxStep: 0, slices: 0, done: false, wall: 0 }); Object.assign(KLOOP, { ms: 0, maxSlice: 0, maxStep: 0, slices: 0, by: {} }); S.bake(); },
+    voices: () => S.voices(),
+    play: (name, o) => !!S.play(name, o),
+    stats: () => S.stats(),
+    tap: () => S.out(),
+    zone: () => S.zone(),
+    room: (z) => S.room(z),
+    ir: (zone, sr = KSR) => raumIR(sr)[zone],
+    /** Schleifen im Hintergrund berechnen (Promise) und ihre Rechenzeit (KLOOP). */
+    later: (names) => klangLater(names),
+    beds: () => S.beds(),
+    busse: () => S.busse(),
+    loops: () => ({ ...KLOOP, by: { ...KLOOP.by } }),
+  };
+  // Prüfhaken Bild: tier('high'|'medium'|'low'|'auto') stellt die Qualität (ohne zu speichern), ldr(true) erzwingt den Rückfall ohne Float-Ziele,
+  // hurt(k) setzt die Trefferstärke der Anzeige (f.post.hurt)
+  stage._sz.bild = {
+    tier(name) { if (Object.hasOwn(SHADOW_RES, name)) { prefs.quality = name; applyPrefs(); } },
+    ldr(on) { forceLdr = !!on; R.setLdr(forceLdr); },
+    stats: () => ({ tier: prefs.quality, scale, ...R.stats() }),
+    hurt(k) { hurtK = clamp(k, 0, 1); },             // Trefferrahmen auslösen wie ein Treffer (klingt in drawHud ab)
+  };
 
   return {
     onFocus: () => { if (menus.screen) menus.focus(); else if (!stage.contains(document.activeElement)) stage.focus({ preventScroll: true }); },
