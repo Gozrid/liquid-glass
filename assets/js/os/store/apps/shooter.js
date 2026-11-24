@@ -179,7 +179,9 @@ defMat('asphalt', 4, 'concrete', (u, v, o, N) => {
   let c = 0.17 + (n - 0.5) * 0.1 + (f - 0.5) * 0.05 + (w - 0.5) * 0.08;
   let h = (f - 0.5) * 0.5 + (w - 0.5) * 0.12;                               // Korn
   if (w > 0.982) c += 0.13;
-  if (Math.abs(N.fbm(u, v, 3, 3, 4) - 0.5) < 0.0045) { c *= 0.5; h = -1; }   // Risse
+  const cr = Math.abs(N.fbm(u, v, 3, 3, 4) - 0.5);
+  if (cr < 0.0045) c *= 0.5;
+  h -= 0.9 * (1 - sstep(0.002, 0.007, cr));                                 // Risse (weich auslaufende Rinne)
   o[0] = c; o[1] = c; o[2] = c * 1.04; o[3] = 0.1 + 0.3 * n;
   o[4] = hgt(h); o[5] = 0.82 + (n - 0.5) * 0.2;
 });
@@ -231,7 +233,9 @@ defMat('brick', 2, 'concrete', (u, v, o, N) => {
 defMat('plaster', 3, 'concrete', (u, v, o, N) => {
   const n = N.fbm(u, v, 3, 3, 5), f = N.at(4, u * 64, v * 64, 64, 64);
   let c = 0.8 + (n - 0.5) * 0.24 + (f - 0.5) * 0.05, h = (n - 0.5) * 2 * 0.3 + (f - 0.5) * 0.2;
-  if (Math.abs(N.fbm(u, v, 5, 5, 3) - 0.5) < 0.0028) { c *= 0.9; h -= 0.6; }   // Riss
+  const cr = Math.abs(N.fbm(u, v, 5, 5, 3) - 0.5);
+  if (cr < 0.0028) c *= 0.9;
+  h -= 0.6 * (1 - sstep(0.001, 0.006, cr)) * 0.5;                           // Riss (weich auslaufend, halbe Tiefe)
   o[0] = c; o[1] = c * 0.97; o[2] = c * 0.92; o[3] = 0.03;
   o[4] = hgt(h); o[5] = 0.92 + (n - 0.5) * 0.2;
 });
@@ -458,8 +462,24 @@ const Q_FLAT = 0.25;     // zur Art addiert: flach auf einer Fläche (Zeichen am
 // kommen erst im Schlussschritt. Nur im Rückfall ohne Float-Ziele (uLdr = 1) wenden shade() und der Himmel die Kurve selbst an.
 const GLSL_ACES = `
 vec3 aces(vec3 c) { return (c * (2.51 * c + .03)) / (c * (2.43 * c + .59) + .14); }`;
+// Himmel ohne Wolken: Verlauf vom Dunst am Horizont zum Zenit und Sonnenhof. Gemeinsam für FS_SKY und die Spiegelung in shade();
+// braucht die Uniforms uSunDir, uSunCol, uFogCol, uZenith.
+const GLSL_HIMMEL = `
+vec3 nebel(vec3 d) { return uFogCol; }
+vec3 himmel(vec3 d) {
+  float up = max(d.y, 0.), sd = max(dot(d, uSunDir), 0.);
+  return mix(nebel(d), uZenith, 1. - pow(1. - up, 3.5)) + uSunCol * (pow(sd, 420.) * 2.2 + pow(sd, 14.) * .14 + pow(sd, 3.) * .03);
+}`;
+// Tangentenraum aus den Ableitungen von Ort und Texturkoordinate (kein eigenes Attribut nötig)
+const GLSL_TBN = `
+mat3 tbn(vec3 N, vec3 p, vec2 uv) {
+  vec3 dp1 = dFdx(p), dp2 = dFdy(p); vec2 d1 = dFdx(uv), d2 = dFdy(uv);
+  vec3 a = cross(dp2, N), b = cross(N, dp1), T = a * d1.x + b * d2.x, B = a * d1.y + b * d2.y;
+  float s = inversesqrt(max(max(dot(T, T), dot(B, B)), 1e-20));
+  return mat3(T * s, B * s, N);
+}`;
 const GLSL_LIGHT = `
-uniform vec3 uCam, uSunDir, uSunCol, uSkyCol, uGndCol, uFogCol;
+uniform vec3 uCam, uSunDir, uSunCol, uSkyCol, uGndCol, uFogCol, uZenith;
 uniform float uFogDen, uExposure, uShadowTexel, uShadowOn, uLdr;
 uniform mat4 uShadowMat;
 uniform highp sampler2DShadow uShadow;
@@ -476,27 +496,56 @@ float sunShadow(vec3 wp, vec3 n, float ndl) {
   return (texture(uShadow, c + vec3(-t, -t, 0.)) + texture(uShadow, c + vec3(t, -t, 0.))
         + texture(uShadow, c + vec3(-t, t, 0.)) + texture(uShadow, c + vec3(t, t, 0.))) * .25;
 }
+// Eine Abtastung: liegt der Punkt im Sonnenlicht? (Maß dafür, ob der Weg zum Himmel offen ist)
+float sunLit(vec3 p) {
+  if (uShadowOn < .5) return 1.;
+  vec3 c = (uShadowMat * vec4(p, 1.)).xyz;
+  if (c.x < 0. || c.x > 1. || c.y < 0. || c.y > 1. || c.z > 1.) return 1.;
+  return texture(uShadow, c - vec3(0., 0., .002));
+}
 ${GLSL_ACES}
+${GLSL_HIMMEL}
 vec3 tonemap(vec3 c) { return pow(clamp(aces(c * uExposure), 0., 1.), vec3(1. / 2.2)); }
-vec3 shade(vec3 albedo, vec3 n, vec3 wp, float spec, float ao, float emis) {
-  float ndl = max(dot(n, uSunDir), 0.);
-  float sh = ndl > 0. ? sunShadow(wp, n, ndl) : 0.;
-  vec3 light = mix(uGndCol, uSkyCol, n.y * .5 + .5) * ao + uSunCol * ndl * sh;
+/**
+ * Oberfläche: Grundfarbe, Normale n (mit Details), Flächennormale ng (Schatten), Glanzstärke spec (F0 = mix(0,04, 0,6, spec)), Rauheit,
+ * occ = Verdeckung für Glanz und Umgebungslicht aus der Vertiefung (1 = frei), ao = Verdeckung am Boden, emis = Leuchten.
+ * Sonne als GGX-Glanz (Trowbridge-Reitz, Smith nach Schlick, Fresnel nach Schlick); Himmel gespiegelt mal Fresnel, occ und (1 − Rauheit)²,
+ * gedämpft, wo der Weg zum Himmel im Schatten liegt (drinnen); Punktlichter mit Blinn-Glanz, Exponent aus der Rauheit.
+ */
+vec3 shadeS(vec3 albedo, vec3 n, vec3 ng, vec3 wp, float spec, float rough, float occ, float ao, float emis) {
+  vec3 view = uCam - wp;
+  float dist = length(view);
+  vec3 V = view / dist;
+  float ndg = dot(ng, uSunDir), ndl = ndg > 0. ? max(dot(n, uSunDir), 0.) : 0.;
+  float sh = ndg > 0. ? sunShadow(wp, ng, ndg) : 0.;
+  float F0 = mix(.04, .6, spec), ndv = max(dot(n, V), 1e-3);
+  vec3 light = mix(uGndCol, uSkyCol, n.y * .5 + .5) * ao * mix(.8, 1., occ) + uSunCol * ndl * sh, gl = vec3(0.);
+  float e = clamp(2. / max(rough * rough * rough * rough, 1e-4) - 2., 1., 256.);
   for (int i = 0; i < ${MAX_LIGHTS}; i++) {
     float r = uLights[i].w;
     if (r <= 0.) continue;
-    vec3 d = uLights[i].xyz - wp;
-    float a = max(0., 1. - dot(d, d) / (r * r));
-    light += uLightCol[i] * a * a * (.3 + .7 * max(dot(n, normalize(d)), 0.));
+    vec3 d = uLights[i].xyz - wp, l = normalize(d);
+    float a = max(0., 1. - dot(d, d) / (r * r)), nl = max(dot(n, l), 0.);
+    light += uLightCol[i] * a * a * (.3 + .7 * nl);
+    gl += uLightCol[i] * a * a * nl * pow(max(dot(n, normalize(l + V)), 0.), e) * F0 * (e + 2.) * .125;
   }
-  vec3 col = albedo * light;
-  vec3 view = uCam - wp;
-  float dist = length(view);
-  col += uSunCol * spec * sh * pow(max(dot(n, normalize(uSunDir + view / dist)), 0.), 48.);
+  vec3 col = albedo * light + gl * occ;
+  if (ndl > 0. && sh > 0.) {
+    vec3 hv = normalize(uSunDir + V);
+    float r = max(rough, .3), a2 = r * r * r * r, nh = max(dot(n, hv), 0.), dd = nh * nh * (a2 - 1.) + 1., k = (r + 1.) * (r + 1.) * .125;
+    float F = F0 + (1. - F0) * pow(1. - max(dot(hv, V), 0.), 5.);
+    col += uSunCol * sh * occ * min(a2 / (3.14159 * dd * dd) * F * .25 * ndl / ((ndv * (1. - k) + k) * (ndl * (1. - k) + k)), 8.);
+  }
+  vec3 R = reflect(-V, n);
+  float Fv = F0 + (1. - F0) * pow(1. - ndv, 5.);
+  float offen = (sunLit(wp + ng * .1 + R * 1.2) + sunLit(wp + ng * .1 + R * 2.4) + sunLit(wp + ng * .1 + R * 3.6)) / 3.;
+  col += himmel(R) * Fv * occ * (1. - rough) * (1. - rough) * mix(.1, 1., offen);
   col = mix(col, albedo * EMIS_K, emis);
   col = mix(col, uFogCol, clamp(1. - exp(-dist * uFogDen), 0., 1.));
   return uLdr > .5 ? tonemap(col) : col;
-}`;
+}
+// Ohne Detail-Texturen (Figuren, Waffen): Rauheit aus der Glanzstärke
+vec3 shade(vec3 albedo, vec3 n, vec3 wp, float spec, float ao, float emis) { return shadeS(albedo, n, n, wp, spec, mix(.85, .3, spec), 1., ao, emis); }`;
 
 const VS_WORLD = `#version 300 es
 layout(location=0) in vec3 aPos; layout(location=1) in vec3 aNor; layout(location=2) in vec3 aUV;
@@ -507,14 +556,18 @@ void main() { vPos = aPos; vNor = aNor; vUV = aUV; vTint = aTint; vH = aH; gl_Po
 const FS_WORLD = `#version 300 es
 precision highp float; precision highp sampler2DArray;
 #define EMIS_K 2.4
-uniform sampler2DArray uTex;
+uniform sampler2DArray uTex, uDetail;
 ${GLSL_LIGHT}
+${GLSL_TBN}
 in vec3 vPos, vNor, vUV; in vec4 vTint; in float vH;
 out vec4 o;
 void main() {
-  vec4 t = texture(uTex, vUV);
+  vec4 t = texture(uTex, vUV), d = texture(uDetail, vUV);         // d: Normale x, y · Rauheit · Vertiefung
+  vec3 ng = normalize(vNor);
+  vec2 q = d.rg * 2. - 1.;
+  vec3 n = normalize(tbn(ng, vPos, vUV.xy) * vec3(q, sqrt(max(0., 1. - dot(q, q)))));
   float ao = mix(.62, 1., smoothstep(0., .75, vH));
-  o = vec4(shade(t.rgb * vTint.rgb, normalize(vNor), vPos, t.a, ao, vTint.a), 1.);
+  o = vec4(shadeS(t.rgb * vTint.rgb, n, ng, vPos, t.a, d.b, clamp(d.a * 2., 0., 1.), ao, vTint.a), 1.);
 }`;
 const VS_INST = `#version 300 es
 layout(location=0) in vec3 aPos; layout(location=1) in vec3 aNor;
@@ -566,16 +619,15 @@ uniform vec3 uF, uR, uU, uSunDir, uSunCol, uZenith, uFogCol;
 uniform float uTime, uCloud, uExposure, uLdr;
 in vec2 vNdc; out vec4 o;
 ${GLSL_ACES}
+${GLSL_HIMMEL}
 float h2(vec2 p) { vec3 q = fract(vec3(p.xyx) * .1031); q += dot(q, q.yzx + 33.33); return fract((q.x + q.y) * q.z); }
 float vn(vec2 p) { vec2 i = floor(p), f = fract(p); f = f * f * (3. - 2. * f);
   return mix(mix(h2(i), h2(i + vec2(1, 0)), f.x), mix(h2(i + vec2(0, 1)), h2(i + vec2(1, 1)), f.x), f.y); }
 float fbm(vec2 p) { float s = 0., a = .5; for (int i = 0; i < 5; i++) { s += a * vn(p); p = p * 2.03 + 11.7; a *= .5; } return s; }
 void main() {
   vec3 d = normalize(uF + uR * vNdc.x + uU * vNdc.y);
-  float up = max(d.y, 0.);
-  vec3 col = mix(uFogCol, uZenith, 1. - pow(1. - up, 3.5));
+  vec3 col = himmel(d);
   float sd = max(dot(d, uSunDir), 0.);
-  col += uSunCol * (pow(sd, 420.) * 2.2 + pow(sd, 14.) * .14 + pow(sd, 3.) * .03);
   if (d.y > .005 && uCloud > 0.) {
     vec2 p = d.xz / (d.y + .14) * 1.3 + uTime * .004;
     float c = smoothstep(1. - uCloud, 1.22 - uCloud * .5, fbm(p) + .35 * fbm(p * 3.1 + 4.));
@@ -1062,6 +1114,7 @@ function createRenderer(canvas, { shadowSize = 2048, ldr: forceLdr = false } = {
     gl.uniform3fv(u.uSkyCol, env.skyCol);
     gl.uniform3fv(u.uGndCol, env.gndCol);
     gl.uniform3fv(u.uFogCol, env.fogCol);
+    gl.uniform3fv(u.uZenith, env.zenith);
     gl.uniform1f(u.uFogDen, env.fogDen);
     gl.uniform1f(u.uExposure, env.exposure);
     gl.uniform1f(u.uLdr, ldr ? 1 : 0);
