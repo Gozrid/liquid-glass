@@ -729,7 +729,7 @@ void main() {
   else if (k < 2.5) a = (1. - abs(p.y)) * smoothstep(0., .15, vUV.x) * smoothstep(1., .6, vUV.x);         // Leuchtspur
   else if (k < 3.5) { a = smoothstep(1., .35, d + .25 * vn(vUV * 9.)); add = 0.; }         // Einschussloch
   else if (k < 4.5) { float ang = atan(p.y, p.x); a = pow(max(0., 1. - d * (1.25 - .45 * cos(ang * 4.))), 1.6); }   // Mündungsfeuer
-  else if (k > 8.5) { float w = mix(1., .14, vUV.y); a = smoothstep(w, w * .2, abs(p.x)) * pow(vUV.y, 1.3) * smoothstep(1., .9, vUV.y); }   // Lichtkegel: oben schmal und hell
+  else if (k > 8.5 && k < 9.5) { float w = mix(1., .14, vUV.y); a = smoothstep(w, w * .2, abs(p.x)) * pow(vUV.y, 1.3) * smoothstep(1., .9, vUV.y); }   // Lichtkegel: oben schmal und hell
   else { a = smoothstep(1., .1, d) * .8; add = 0.; }                                       // Staub
   a *= vCol.a;
   if (uTest > .5 && !flach && (k == 0. || k == 1. || k == 5. || k == 9.)) a *= clamp((szene - ich) / .4, 0., 1.);   // Rauch, Staub, Glühen, Lichtkegel: weiche Kante an Flächen
