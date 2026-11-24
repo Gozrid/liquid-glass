@@ -493,6 +493,7 @@ const GLSL_LIGHT = `
 uniform vec3 uCam, uSunDir, uSunCol, uSkyCol, uGndCol, uFogCol, uZenith;
 uniform float uFogDen, uExposure, uShadowTexel, uShadowOn, uLdr;
 uniform float uShadowTaps, uShadowRad, uShadowShift;     // Abtastungen (4, 9, 16), Radius in Texeln, Versatz zur Sonne (Waffe in der Hand)
+uniform float uWolken;                                   // mittlere Wolkendecke für die Spiegelung (env.cloud · 0,7)
 uniform mat4 uShadowMat;
 uniform highp sampler2DShadow uShadow;
 uniform vec4 uLights[${MAX_LIGHTS}];
@@ -562,7 +563,8 @@ vec3 shadeS(vec3 albedo, vec3 n, vec3 ng, vec3 wp, float spec, float rough, floa
   vec3 R = reflect(-V, n);
   float Fv = F0 + (1. - F0) * pow(1. - ndv, 5.);
   float offen = (sunLit(wp + ng * .1 + R * 1.2) + sunLit(wp + ng * .1 + R * 2.4) + sunLit(wp + ng * .1 + R * 3.6)) / 3.;
-  col += himmel(R) * Fv * occ * (1. - rough) * (1. - rough) * mix(.1, 1., offen);
+  vec3 sp = mix(himmel(R), vec3(1.05) + uSunCol * .1, uWolken * smoothstep(.005, .16, R.y));   // Wolken nur als mittlere Helligkeit
+  col += sp * Fv * occ * (1. - rough) * (1. - rough) * mix(.1, 1., offen);
   col = mix(col, albedo * EMIS_K, emis);
   col = mix(col, nebel(-V), clamp(1. - exp(-dist * uFogDen), 0., 1.));
   return uLdr > .5 ? tonemap(col) : col;
@@ -597,9 +599,11 @@ void main() {
   vec3 n = normalize(tbn(ng, vPos, vUV.xy) * vec3(q, sqrt(max(0., 1. - dot(q, q)))));
   float ao = mix(.62, 1., smoothstep(0., .75, vH)), spec = t.a, rough = d.b, occ = clamp(d.a * 2., 0., 1.);
   vec3 alb = t.rgb * vTint.rgb * (.9 + .2 * vn(vPos.xz * .07)) * mix(.78, 1., smoothstep(0., .6, vH));   // Großvariation, Schmutz am Wandfuß
-  if (uWet > 0. && abs(vUV.z - ASPHALT) < .5) {                   // Pfützen: glatt, eben, dunkler
-    float m = smoothstep(.55, .7, vn(vPos.xz * .12) * .65 + vn(vPos.xz * .324 + 5.3) * .35) * uWet;
-    rough = mix(rough, .05, m); n = normalize(mix(n, ng, m)); alb *= 1. - .4 * m; occ = mix(occ, 1., m); spec *= 1. - m;
+  if (uWet > 0. && abs(vUV.z - ASPHALT) < .5) {                   // Pfützen: glatt, eben, dunkel; ringsum feuchter Rand
+    float r = vn(vPos.xz * .12) * .65 + vn(vPos.xz * .324 + 5.3) * .35 + (vn(vPos.xz * 2.1) - .5) * .05;
+    float w = fwidth(r), m = smoothstep(.6 - w, .625 + w, r) * uWet, f = smoothstep(.5, .6, r) * uWet;   // scharfer Rand (in der Ferne weich), davor feucht
+    rough = mix(mix(rough, .45, f), .05, m); n = normalize(mix(n, ng, m)); occ = mix(occ, 1., m); spec *= 1. - m;
+    alb *= (1. - .3 * f) * (1. - .7 * m);                          // nasser Asphalt ist dunkler, unter Wasser fast nur Spiegelung
   }
   vec3 dn = fwidth(n);                                             // Glanz ohne Flimmern: wo die Normale je Pixel stark wechselt, rauer
   rough = sqrt(min(rough * rough + min(2. * dot(dn, dn), .25), 1.));
@@ -1272,6 +1276,7 @@ function createRenderer(canvas, { shadowSize = 2048, ldr: forceLdr = false } = {
     gl.uniform1f(u.uShadowTaps, tier.shadowTaps || 4);
     gl.uniform1f(u.uShadowRad, SHADOW_RAD[tier.shadowTaps] || 1.2);
     gl.uniform1f(u.uShadowShift, 0);
+    gl.uniform1f(u.uWolken, (env.cloud || 0) * 0.7);
     gl.uniformMatrix4fv(u.uShadowMat, false, shadowMat);
     gl.uniform1i(u.uShadow, 1);
     gl.uniform4fv(u.uLights, lightPos);
