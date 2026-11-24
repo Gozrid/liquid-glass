@@ -3360,6 +3360,39 @@ function drawSoldier(I, s, pal, fall = 0, dir = 1) {
   s.mzz = TG[2] * mz[0] + TG[6] * mz[1] + TG[10] * mz[2] + TG[14];
 }
 
+/**
+ * Federn der Waffe in der Hand (view.gun: Versatz z in m, Drehungen rx, ry, rz in rad, je mit Geschwindigkeit) und der Kamera bei der Landung
+ * (view.land in m). Bewegungsgleichung a = −K·x − C·v: K = 260, C = 18 für Wege, K = 300, C = 20 für Drehungen; Teilschritte ≤ 1/120 s.
+ */
+function viewSprings(vs, dt) {
+  const g = vs.gun, n = Math.max(1, Math.ceil(dt * 120)), h = dt / n;
+  for (let i = 0; i < n; i++) {
+    g.zv += (-260 * g.z - 18 * g.zv) * h; g.z += g.zv * h;
+    g.rxv += (-300 * g.rx - 20 * g.rxv) * h; g.rx += g.rxv * h;
+    g.ryv += (-300 * g.ry - 20 * g.ryv) * h; g.ry += g.ryv * h;
+    g.rzv += (-300 * g.rz - 20 * g.rzv) * h; g.rz += g.rzv * h;
+    vs.landV += (-260 * vs.land - 18 * vs.landV) * h; vs.land += vs.landV * h;
+  }
+  vs.punch = damp(vs.punch, 0, 18, dt);
+}
+/** Stoß je eigenem Schuss (k wie der Zuwachs von kickAnim) in die Federn, dazu der Sichtfeld-Stoß (0,45° je Schuss, höchstens 1,5°). */
+function viewKick(vs, k) {
+  const g = vs.gun;
+  g.zv += 1.8 * k; g.rxv += 3.5 * k; g.ryv += rnd(-1, 1) * 1.2 * k; g.rzv += rnd(-1, 1) * 0.8 * k;
+  vs.punch = Math.min(1.5, vs.punch + 0.45);
+}
+/** Landung (k = 0 … 1): Waffe nickt nach unten, Kamera federt bis 6 cm tiefer. */
+function viewLand(vs, k) {
+  vs.gun.rxv -= 2.4 * k; vs.gun.zv += 0.5 * k;
+  vs.landV -= 1.9 * k;
+}
+/** Weiches 1-D-Rauschen −1 … 1 (Wertrauschen mit glatter Überblendung); seed trennt unabhängige Kurven. */
+function noise1(x, seed) {
+  const hv = (i) => { let q = Math.imul(i ^ Math.imul(seed, 0x9e3779b9), 0x85ebca6b); q ^= q >>> 13; q = Math.imul(q, 0xc2b2ae35); q ^= q >>> 16; return ((q >>> 0) / 4294967296) * 2 - 1; };
+  const i = Math.floor(x), f = x - i;
+  return lerp(hv(i), hv(i + 1), f * f * (3 - 2 * f));
+}
+
 const VM = mat4(), VK = mat4();
 const VM_FOV = 55;
 /**
@@ -3374,12 +3407,12 @@ function drawView(V, s, cam, vs, mainFov) {
   const low = Math.max(vs.lowK, s.mantle ? 1 : 0);
   let x = lerp(w.hold[0], 0, a) + (vs.swayX + Math.cos(vs.bobT) * 0.007 * vs.bobAmp) * hip - sp * 0.05;
   let y = lerp(w.hold[1], -w.sight, a) + (vs.swayY - Math.abs(Math.sin(vs.bobT)) * 0.011 * vs.bobAmp) * hip + vs.jumpY - low * 0.26 - rel * 0.09 - sp * 0.03;
-  const z = lerp(w.hold[2], w.adsZ, a) + s.kickAnim * 0.055 * (1 - a * 0.45) + sp * 0.05;
+  const G = vs.gun, z = lerp(w.hold[2], w.adsZ, a) + G.z * (1 - a * 0.45) + sp * 0.05;
   if (s.meleeT > 0) { x += 0.06; y -= 0.08; }
   mTrans(VM, x, y, z);
-  mRotY(VM, -vs.swayX * 2.2 * hip + sp * 0.75);
-  mRotX(VM, s.kickAnim * 0.075 * (1 - a * 0.5) + vs.swayY * 2.4 * hip - low * 0.9 - rel * 0.5 - sp * 0.3);
-  mRotZ(VM, rel * 0.45 - vs.swayX * 1.4 * hip + sp * 0.2);
+  mRotY(VM, -vs.swayX * 2.2 * hip + sp * 0.75 + G.ry * (1 - a * 0.5));
+  mRotX(VM, G.rx * (1 - a * 0.5) + vs.swayY * 2.4 * hip - low * 0.9 - rel * 0.5 - sp * 0.3);
+  mRotZ(VM, rel * 0.45 - vs.swayX * 1.4 * hip + sp * 0.2 + G.rz * (1 - a * 0.5));
   drawGun(V, VM, w.model);
   // Arme: rechts am Griff, links am Vorderschaft (beim Nachladen am Magazin)
   arm(V, VM, 0.1, -0.16, 0.5, 0.008, -0.055, 0.04, PAL.friend, 1, 0.03);
@@ -3468,6 +3501,7 @@ function createMatch(cfg, hooks) {
   const L = { x: 0, y: 1.6, z: 0, yaw: 0 };          // Hörer (= Kamera)
   const cam = { x: 0, y: 1.6, z: 0, yaw: 0, pitch: 0, roll: 0, fov: 75 };
   const view = { swayX: 0, swayY: 0, bobT: 0, bobAmp: 0, jumpY: 0, lowK: 0, sprintK: 0, shake: 0, roll: 0, lookDX: 0, lookDY: 0 };
+  Object.assign(view, { gun: { z: 0, zv: 0, rx: 0, rxv: 0, ry: 0, ryv: 0, rz: 0, rzv: 0 }, punch: 0, land: 0, landV: 0 });     // Federn der Waffe, Sichtfeld-Stoß, Landung (viewSprings)
   const M = {
     world, phys, nav, fx, soldiers, corpses, feed, cfg, mode: cfg.mode, teams, cam, view, nades, net,
     time: 0, clock: cfg.minutes * 60, state: 'warmup', warm: 4.2, overT: 0, scores: [0, 0], winner: null, draw: false,
@@ -3729,6 +3763,7 @@ function createMatch(cfg, hooks) {
       s.kickY += rnd(-1, 1) * w.kickH * DEG;
     }
     s.kickAnim = Math.min(1.6, s.kickAnim + (w.pellets > 1 || w.scope ? 1.5 : w.auto ? 0.75 : 1.1));
+    if (s.me) viewKick(view, w.pellets > 1 || w.scope ? 1.5 : w.auto ? 0.75 : 1.1);
     fx.light(s.mx, s.my, s.mzz, 7, [2.6, 1.8, 0.8], 0.05);
     if (s.me) M.flashT = 0.04; else fx.muzzle(s.mx, s.my, s.mzz);
     S.shot(w.snd, L, s.x, s.y + 1.4, s.z, s.me, gun.mag / w.mag);
@@ -3874,6 +3909,7 @@ function createMatch(cfg, hooks) {
     s.landed = 0;
     phys.moveBody(s, s.vx * dt, s.vy * dt, s.vz * dt);
     if (s.landed > 6 && s.me) { S.land(phys.surface(s.x, s.y + 0.05, s.z, s.r), (s.landed - 6) / 8); view.jumpY = -0.03; }
+    if (s.landed > 2 && s.me) viewLand(view, clamp((s.landed - 2) / 10, 0, 1));
     if (s.landed > 14) damage(s, s, (s.landed - 14) * 7, { weapon: 'fall', dist: 0 });
     if (!s.alive) return;
     s.speed = Math.hypot(s.vx, s.vz);
@@ -4333,7 +4369,8 @@ function createMatch(cfg, hooks) {
   M.aim = (dt, fovBase) => {
     const s = me, v = view;
     v.shake = damp(v.shake, 0, 5, dt);
-    const sh = v.shake * 0.02, tt = M.time * 47;
+    viewSprings(v, dt);
+    const sk = v.shake * v.shake, tt = M.time * 22;          // Wackeln: Stärke shake², weiches Rauschen statt Sinus
     if (M.fixedCam) {                               // Prüfhaken: feste Kamera, ohne Wackeln und ohne Waffe
       const p = M.fixedCam;
       cam.x = p[0]; cam.y = p[1]; cam.z = p[2]; cam.yaw = p[3]; cam.pitch = p[4]; cam.roll = 0; cam.fov = p[5]; M.scoped = false;
@@ -4354,12 +4391,12 @@ function createMatch(cfg, hooks) {
       v.lookDX = 0; v.lookDY = 0;
       v.roll = damp(v.roll, -s.in.mx * 0.012 * (s.ground ? 1 : 0.3), 8, dt);
       cam.x = s.x; cam.z = s.z;
-      cam.y = s.y + eyeOf(s) + s.stepOff - Math.abs(Math.sin(s.phase)) * 0.028 * v.bobAmp * (1 - s.ads * 0.7);
-      cam.yaw = s.yaw + s.kickY + Math.sin(tt) * sh;
-      cam.pitch = clamp(s.pitch + s.kickP + Math.sin(tt * 1.3 + 1) * sh, -1.55, 1.55);
-      cam.roll = v.roll + Math.sin(tt * 0.9 + 2) * sh * 0.8;
+      cam.y = s.y + eyeOf(s) + s.stepOff - Math.abs(Math.sin(s.phase)) * 0.028 * v.bobAmp * (1 - s.ads * 0.7) + v.land;
+      cam.yaw = s.yaw + s.kickY + noise1(tt, 1) * 0.02 * sk;
+      cam.pitch = clamp(s.pitch + s.kickP + noise1(tt, 2) * 0.02 * sk, -1.55, 1.55);
+      cam.roll = v.roll + noise1(tt, 3) * 0.016 * sk;
       const z = lerp(1, w.zoom, s.ads * s.ads * (3 - 2 * s.ads));
-      cam.fov = (2 * Math.atan(Math.tan((fovBase * DEG) / 2) / z)) / DEG + v.sprintK * 4;
+      cam.fov = (2 * Math.atan(Math.tan((fovBase * DEG) / 2) / z)) / DEG + v.sprintK * 4 + v.punch;
       M.scoped = !!w.scope && s.ads > 0.86;
     } else {
       // gefallen: die Kamera sinkt und dreht sich zum Schützen
