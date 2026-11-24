@@ -3,7 +3,7 @@
 //
 // Aufbau der Datei:
 //   1 Mathematik · 2 Texturen · 3 Geometrie · 4 Renderer · 5 Welt und Karten · 6 Kollision und Wege
-//   7 Waffen und Daten · 8 Klang (8a Klangschmiede: Rechenkern · 8b Rezepte) · 9 Spiel (Effekte, Figuren, Partie mit Bots und Abgleich im Netz)
+//   7 Waffen und Daten · 8 Klang (8a Klangschmiede: Rechenkern · 8b Rezepte · 8c Mischpult) · 9 Spiel (Effekte, Figuren, Partie mit Bots und Abgleich im Netz)
 //   10 Netz (Verbindung, Lobby) · 11 Menüs · 12 Oberfläche im Einsatz · 13 App
 
 import { h, clamp, lerp, TAU, ticker } from '../../../core/util.js';
@@ -1820,7 +1820,7 @@ const MODES = {
 };
 
 // ==========================================================================
-// 8 · Klang: alles wird im Augenblick erzeugt (Rauschen, Filter, ein paar Schwinger)
+// 8 · Klang: die Klangschmiede berechnet jeden Klang einmal (Rezepte mit Varianten), das Mischpult spielt sie ab
 // ==========================================================================
 
 // --------------------------------------------------------------------------
@@ -2242,161 +2242,187 @@ function klangGet(name, v) {
   return list[v];
 }
 
-function createSound(getVolume) {
-  let out = null, noiseBuf = null, ctx = null, shots = 0, shotsAt = 0, gone = false;
-  const ok = () => !gone && sfx.enabled && audioReady() && getVolume() > 0;
-  function chain(pan = 0, vol = 1) {
+// --------------------------------------------------------------------------
+// 8c · Mischpult: Stimmen-Pool, Busse, Begrenzer, Entfernung, Verdeckung und Raumhall.
+// Je Stimme: BufferSource → Tiefpass (ortsgebunden) → Gain → StereoPanner (ortsgebunden oder mit Seitenlage) → Bus, dazu Gain → Hall.
+// Busse und Hall → Summe (prefs.volume) → Begrenzer → audio().out. Die Klänge selbst kommen fertig berechnet aus der Klangschmiede.
+// --------------------------------------------------------------------------
+const VOICES_MAX = 28;
+/** Begrenzer an der Summe (DynamicsCompressor). */
+const LIMIT = { threshold: -4, knee: 2, ratio: 20, attack: 0.002, release: 0.09 };
+/**
+ * Der DynamicsCompressor hebt alles selbsttätig an (Aufholverstärkung, bei diesen Werten +1,94 dB in Chromium und Firefox gemessen).
+ * Der Ausgleich dahinter nimmt das zurück: unter der Schwelle bleibt jeder Klang so laut wie geliefert, darüber wird begrenzt.
+ */
+const LIMIT_TRIM = 10 ** (-1.94 / 20);
+const IMPACT_SND = { concrete: 'beton', metal: 'metall', wood: 'holz', body: 'koerper' };
+const RELOAD_SND = { out: 'raus', in: 'rein', shell: 'patrone', bolt: 'verschluss' };
+
+/**
+ * Klang des Spiels. getPrefs() liefert die Vorgaben (volume …). Alle alten Methoden (shot, explosion, …) bleiben mit ihren Signaturen
+ * und spielen über play(). Neu: play, setWorld, listen, bake, voices, state.
+ */
+function createSound(getPrefs) {
+  let ctx = null, sum = null, gone = false, phys = null, LL = { x: 0, y: 1.6, z: 0, yaw: 0 };
+  const bus = {}, pool = [], last = {}, stat = { plays: 0, steals: 0, drops: 0, max: 0 }, st = { hp: 100, boom: 0 };
+  const vol = () => getPrefs().volume;
+  const ok = () => !gone && sfx.enabled && audioReady() && vol() > 0;
+
+  function graph() {
+    if (ctx) return;
     const a = audio();
     ctx = a.ctx;
-    if (!out) { out = ctx.createGain(); out.connect(a.out); }
-    out.gain.value = getVolume();
-    if (!noiseBuf) {
-      noiseBuf = ctx.createBuffer(1, ctx.sampleRate, ctx.sampleRate);
-      const d = noiseBuf.getChannelData(0);
-      for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+    sum = ctx.createGain();
+    sum.gain.value = vol();
+    const lim = ctx.createDynamicsCompressor();
+    for (const k in LIMIT) lim[k].value = LIMIT[k];
+    const trim = ctx.createGain();
+    trim.gain.value = LIMIT_TRIM;
+    sum.connect(lim);
+    lim.connect(trim);
+    trim.connect(a.out);
+    for (const [b, db] of Object.entries(BUSSE)) { bus[b] = ctx.createGain(); bus[b].gain.value = 10 ** (db / 20); bus[b].connect(sum); }
+    S.tap = trim;
+  }
+
+  // ---------- Stimmen ----------
+  function release(v) {
+    if (v.off) return;
+    v.off = true;
+    const i = pool.indexOf(v);
+    if (i >= 0) pool.splice(i, 1);
+    for (const n of v.nodes) try { n.disconnect(); } catch { /* schon ab */ }
+  }
+  /** Stimme beenden: kurz ausblenden, dann anhalten; sie zählt sofort nicht mehr. */
+  function stop(v, fade = 0.012) {
+    if (v.off || v.ending) return;
+    v.ending = true;
+    const i = pool.indexOf(v);
+    if (i >= 0) pool.splice(i, 1);
+    const t = ctx.currentTime;
+    try { v.g.gain.cancelScheduledValues(t); v.g.gain.setTargetAtTime(0, t, fade / 3); v.src.stop(t + fade + 0.02); } catch { /* schon gestoppt */ }
+    setTimeout(() => release(v), (fade + 0.25) * 1000);
+  }
+  /** Stimmen, deren Ende verpasst wurde (Audio-Uhr stand), nach der Wanduhr räumen. */
+  function purge(now) { for (let i = pool.length - 1; i >= 0; i--) { const v = pool[i]; if (!v.loop && now > v.until) { stop(v); release(v); } } }
+  const loudness = (v, now) => v.vol * Math.max(0, 1 - (now - v.t0) / 1000 / v.len);
+  /** Wer zuerst weicht: niedrigste Priorität, dann die leiseste, dann die älteste. Eigene Schüsse nie. */
+  function weakest(list, now) {
+    let w = null, wl = 0;
+    for (const v of list) {
+      if (v.prot) continue;
+      const l = loudness(v, now);
+      if (!w || v.prio < w.prio || (v.prio === w.prio && (l < wl - 1e-6 || (Math.abs(l - wl) <= 1e-6 && v.t0 < w.t0)))) { w = v; wl = l; }
     }
-    const g = ctx.createGain();
-    g.gain.value = vol;
-    if (pan && ctx.createStereoPanner) { const p = ctx.createStereoPanner(); p.pan.value = clamp(pan, -1, 1); g.connect(p); p.connect(out); } else g.connect(out);
-    return g;
+    return w;
   }
-  /** Rauschstoß durch einen Filter. */
-  function burst(dest, { type = 'lowpass', f = 2000, f2 = 0, q = 0.7, dur = 0.1, vol = 0.5, rate = 1, when = 0, attack = 0.001 }) {
-    const t = ctx.currentTime + when, src = ctx.createBufferSource(), fl = ctx.createBiquadFilter(), g = ctx.createGain();
-    src.buffer = noiseBuf; src.loop = true; src.playbackRate.value = rate;
-    fl.type = type; fl.Q.value = q;
-    fl.frequency.setValueAtTime(f, t);
-    if (f2) fl.frequency.exponentialRampToValueAtTime(f2, t + dur);
-    g.gain.setValueAtTime(0.0001, t);
-    g.gain.exponentialRampToValueAtTime(vol, t + attack);
-    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
-    src.connect(fl); fl.connect(g); g.connect(dest);
-    src.start(t, Math.random() * 0.8); src.stop(t + dur + 0.03);
+  /** Platz schaffen. false: die neue Stimme ist zu unwichtig. */
+  function room(list, prio, prot, now) {
+    let w = weakest(list, now);
+    if (!w && prot) w = list.filter((v) => v.prot).sort((a, b) => a.t0 - b.t0)[0];     // ein eigener Schuss weicht nur einem neueren eigenen
+    if (!w || (w.prio > prio && !prot)) return false;
+    stop(w);
+    stat.steals++;
+    return true;
   }
-  function osc(dest, { type = 'sine', f = 440, f2 = 0, dur = 0.1, vol = 0.3, when = 0, attack = 0.003 }) {
-    const t = ctx.currentTime + when, o = ctx.createOscillator(), g = ctx.createGain();
-    o.type = type;
-    o.frequency.setValueAtTime(f, t);
-    if (f2) o.frequency.exponentialRampToValueAtTime(f2, t + dur);
-    g.gain.setValueAtTime(0.0001, t);
-    g.gain.exponentialRampToValueAtTime(vol, t + attack);
-    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
-    o.connect(g); g.connect(dest);
-    o.start(t); o.stop(t + dur + 0.03);
-  }
-  /** Lautstärke und Stereo-Lage eines Geräuschs in der Welt, vom Hörer aus. */
+
+  // ---------- Entfernung ----------
+  /** Lage einer Quelle vom Hörer aus: Pegel und Stereo (wie bisher) – oder null, wenn außer Hörweite. */
   function place(L, x, y, z, reach) {
     const dx = x - L.x, dz = z - L.z, d = Math.hypot(dx, y - L.y, dz);
     if (d > reach) return null;
-    const vol = 1 / (1 + (d / (reach * 0.16)) ** 2);
     const side = d < 0.5 ? 0 : (dx * Math.cos(L.yaw) + dz * Math.sin(L.yaw)) / d;
-    return { vol: vol * (1 - d / reach * 0.4), pan: side * 0.85, far: clamp(d / reach, 0, 1) };
+    return { d, vol: (1 - (0.4 * d) / reach) / (1 + (d / (0.16 * reach)) ** 2), fc: 0, pan: side * 0.85, delay: 0 };
   }
+
+  /**
+   * Spielt ein Rezept. o: { x, y, z (ohne: nicht ortsgebunden), gain (Faktor), rate, when (s), own,
+   *   L (Hörer, sonst der letzte aus listen), v (Variante), pan, bus, send, free (ohne Verdeckung) }.
+   * Liefert die Stimme ({ stop(fade) }) oder null.
+   */
+  function play(name, o = {}) {
+    const R = KLANG[name];
+    if (!R || !ok()) return null;
+    graph();
+    const now = performance.now(), L = o.L || LL;
+    purge(now);
+    const pl = o.x !== undefined && R.reach > 0 ? place(L, o.x, o.y ?? L.y, o.z ?? L.z, R.reach, o.free) : null;
+    if (o.x !== undefined && R.reach > 0 && !pl) return null;
+    const prio = R.prio, prot = !!o.own && R.bus === 'waffe';
+    const mine = pool.filter((v) => v.name === name);
+    if ((mine.length >= R.cap && !room(mine, prio, prot, now)) || (pool.length >= VOICES_MAX && !room(pool, prio, prot, now))) { stat.drops++; return null; }
+    let vi = o.v ?? (Math.random() * R.n) | 0;
+    if (o.v === undefined && R.n > 1 && vi === last[name]) vi = (vi + 1 + ((Math.random() * (R.n - 1)) | 0)) % R.n;
+    last[name] = vi;
+    const B = klangGet(name, vi);
+    if (!B.ab) {
+      B.ab = ctx.createBuffer(B.data.length, B.data[0].length, KSR);
+      B.data.forEach((c, i) => B.ab.copyToChannel(c, i));
+    }
+    const src = ctx.createBufferSource(), g = ctx.createGain(), nodes = [src, g];
+    src.buffer = B.ab;
+    src.loop = R.loop;
+    const rate = o.rate || 1;
+    src.playbackRate.value = rate;
+    const head = src;
+    head.connect(g);
+    const vol = 10 ** (R.gain / 20) * B.lvl * (o.gain ?? 1) * (pl ? pl.vol : 1);
+    g.gain.value = vol;
+    const pan = pl ? pl.pan : o.pan || 0;
+    if (pl || pan) { const p = ctx.createStereoPanner(); p.pan.value = clamp(pan, -1, 1); g.connect(p); p.connect(bus[o.bus || R.bus]); nodes.push(p); }
+    else g.connect(bus[o.bus || R.bus]);
+    const t = ctx.currentTime + (o.when || 0) + (pl ? pl.delay : 0), len = B.ab.duration / rate;
+    const v = { name, prio, prot, vol, t0: now, len, until: now + ((o.when || 0) + (pl ? pl.delay : 0) + len + 1.5) * 1000, loop: R.loop, src, g, nodes, off: false, ending: false };
+    v.stop = (fade) => stop(v, fade);
+    src.onended = () => release(v);
+    src.start(t);
+    pool.push(v);
+    stat.plays++;
+    stat.max = Math.max(stat.max, pool.length);
+    return v;
+  }
+
   const S = {
-    /** Schuss. L = Hörer {x, y, z, yaw}; own = die eigene Waffe (voll, mit Nachhall). */
+    play,
+    setWorld(p) { phys = p || null; },
+    listen(L) { LL = L; if (ctx && sum.gain.value !== vol()) sum.gain.setTargetAtTime(vol(), ctx.currentTime, 0.02); },
+    voices() { purge(performance.now()); return pool.length; },
+    state(o) { Object.assign(st, o); },
+    stats: () => ({ ...stat, voices: pool.length }),
+    tap: null,
+    /** Summe hinter Begrenzer und Ausgleich (für Mitschnitte in Prüfungen). */
+    out() { graph(); return S.tap; },
+    /** Schuss. L = Hörer {x, y, z, yaw}; own = die eigene Waffe. magK (Füllstand des Magazins) nutzt erst Phase 2. */
     shot(kind, L, x, y, z, own = false) {
-      if (!ok()) return;
-      const p = SHOT_SND[kind] || SHOT_SND.rifle;
-      let pl = { vol: 1, pan: 0, far: 0 };
-      if (!own) {
-        pl = place(L, x, y, z, 110);
-        if (!pl) return;
-        const now = performance.now();
-        if (now - shotsAt > 100) { shotsAt = now; shots = 0; }
-        if (++shots > 3) return;                    // dichtes Feuergefecht: nicht jeden Schuss einzeln
-      }
-      const g = chain(pl.pan, (own ? 0.5 : 0.42) * pl.vol);
-      const cut = p.cut * (1 - pl.far * 0.75);
-      burst(g, { f: cut, f2: Math.max(200, cut * 0.14), dur: p.dur * (1 + pl.far), vol: p.noise, rate: p.rate });
-      osc(g, { type: 'triangle', f: p.f, f2: p.f * 0.32, dur: p.dur * 0.7, vol: p.body });
-      if (pl.far < 0.5) burst(g, { type: 'highpass', f: 3500, dur: 0.035, vol: 0.4 * (1 - pl.far * 2) });
-      if (own || pl.far < 0.3) burst(g, { f: 900, f2: 240, dur: 0.5 + p.dur, vol: p.noise * 0.14, attack: 0.03, rate: 0.6 });
+      const k = SHOT_SND[kind] ? kind : 'rifle';
+      if (own) play(`schuss.${k}.ich`, { own: true });
+      else play(`schuss.${k}.nah`, { L, x, y, z });
     },
-    explosion(L, x, y, z) {
-      if (!ok()) return;
-      const pl = place(L, x, y, z, 140);
-      if (!pl) return;
-      const g = chain(pl.pan, 0.9 * pl.vol);
-      burst(g, { f: 1800 * (1 - pl.far * 0.6), f2: 90, dur: 1.1, vol: 1.3, rate: 0.5 });
-      osc(g, { f: 82, f2: 30, dur: 0.75, vol: 1.3 });
-      burst(g, { type: 'highpass', f: 2200, dur: 0.07, vol: 0.5 });
-      burst(g, { f: 500, f2: 120, dur: 2, vol: 0.22, attack: 0.1, rate: 0.4 });
-    },
-    impact(L, x, y, z, kind) {
-      if (!ok()) return;
-      const pl = place(L, x, y, z, 26);
-      if (!pl) return;
-      const g = chain(pl.pan, 0.28 * pl.vol);
-      if (kind === 'metal') { osc(g, { type: 'square', f: rnd(1500, 2600), f2: 900, dur: 0.07, vol: 0.2 }); burst(g, { type: 'bandpass', f: 4200, q: 4, dur: 0.05, vol: 0.5 }); }
-      else if (kind === 'wood') burst(g, { type: 'bandpass', f: 700, q: 2, dur: 0.07, vol: 0.9 });
-      else if (kind === 'body') burst(g, { f: 500, dur: 0.08, vol: 0.9 });
-      else burst(g, { type: 'bandpass', f: rnd(1400, 2200), q: 1.2, dur: 0.06, vol: 0.8 });
-    },
+    explosion(L, x, y, z) { play('explosion.nah', { L, x, y, z }); },
+    impact(L, x, y, z, kind) { play(`einschlag.${IMPACT_SND[kind] || 'beton'}`, { L, x, y, z }); },
     step(L, x, y, z, own, loud = 1) {
-      if (!ok()) return;
-      const pl = own ? { vol: 1, pan: 0 } : place(L, x, y, z, 18);
-      if (!pl) return;
-      const g = chain(pl.pan, (own ? 0.1 : 0.16) * pl.vol * loud);
-      burst(g, { f: rnd(260, 420), f2: 110, dur: 0.09, vol: 1, rate: 0.7 });
-      burst(g, { type: 'bandpass', f: rnd(1800, 2600), q: 1.5, dur: 0.03, vol: 0.2 });
+      if (own) play('schritt.stein', { own: true, bus: 'foley', gain: loud * (0.1 / 0.16) * 10 ** ((BUSSE.welt - BUSSE.foley) / 20) });
+      else play('schritt.stein', { L, x, y, z, gain: loud });
     },
-    land() { if (ok()) { const g = chain(0, 0.3); burst(g, { f: 300, f2: 80, dur: 0.16, vol: 1, rate: 0.6 }); osc(g, { f: 90, f2: 45, dur: 0.14, vol: 0.5 }); } },
-    reload(part) {
-      if (!ok()) return;
-      const g = chain(0.1, 0.3);
-      if (part === 'out') { burst(g, { type: 'bandpass', f: 1900, q: 3, dur: 0.05, vol: 0.9 }); osc(g, { type: 'square', f: 420, f2: 210, dur: 0.05, vol: 0.12 }); }
-      else if (part === 'in') { burst(g, { type: 'bandpass', f: 1300, q: 2.5, dur: 0.07, vol: 1 }); osc(g, { type: 'square', f: 260, f2: 150, dur: 0.07, vol: 0.2 }); }
-      else if (part === 'shell') { burst(g, { type: 'bandpass', f: 1500, q: 3, dur: 0.05, vol: 0.8 }); osc(g, { type: 'triangle', f: 520, f2: 300, dur: 0.05, vol: 0.2 }); }
-      else { burst(g, { type: 'bandpass', f: 2600, q: 4, dur: 0.04, vol: 0.9 }); burst(g, { type: 'bandpass', f: 1700, q: 4, dur: 0.05, vol: 0.9, when: 0.09 }); }
-    },
-    dry() { if (ok()) burst(chain(0, 0.2), { type: 'bandpass', f: 3200, q: 5, dur: 0.03, vol: 0.9 }); },
-    swap() { if (ok()) burst(chain(0, 0.14), { type: 'bandpass', f: 900, q: 0.8, dur: 0.16, vol: 0.9, attack: 0.05 }); },
-    swing() { if (ok()) burst(chain(0, 0.25), { type: 'bandpass', f: 1200, f2: 3200, q: 1.2, dur: 0.16, vol: 0.9, attack: 0.04 }); },
-    hit(head, kill) {
-      if (!ok()) return;
-      const g = chain(0, 0.34);
-      burst(g, { type: 'bandpass', f: head ? 3600 : 2500, q: 6, dur: 0.045, vol: 1 });
-      osc(g, { type: 'triangle', f: head ? 1900 : 1300, dur: 0.05, vol: 0.3 });
-      if (kill) { osc(g, { f: 880, dur: 0.12, vol: 0.28, when: 0.05 }); osc(g, { f: 1318, dur: 0.2, vol: 0.26, when: 0.12 }); }
-    },
-    hurt() { if (ok()) { const g = chain(0, 0.4); burst(g, { f: 420, f2: 120, dur: 0.14, vol: 1 }); osc(g, { f: 120, f2: 60, dur: 0.13, vol: 0.6 }); } },
-    whiz(pan) { if (ok()) burst(chain(pan, 0.2), { type: 'bandpass', f: 2800, f2: 900, q: 3, dur: 0.11, vol: 0.9, attack: 0.02 }); },
-    bounce(L, x, y, z) { const pl = ok() && place(L, x, y, z, 30); if (pl) osc(chain(pl.pan, 0.2 * pl.vol), { type: 'triangle', f: rnd(900, 1300), f2: 500, dur: 0.06, vol: 0.6 }); },
-    pin() { if (ok()) { const g = chain(0, 0.25); osc(g, { type: 'square', f: 2400, f2: 1600, dur: 0.03, vol: 0.3 }); burst(g, { type: 'bandpass', f: 800, q: 1, dur: 0.2, vol: 0.5, when: 0.06, attack: 0.06 }); } },
-    ui(kind = 'tick') {
-      if (!ok()) return;
-      const g = chain(0, 0.22);
-      if (kind === 'tick') osc(g, { type: 'triangle', f: 1500, f2: 1100, dur: 0.03, vol: 0.25 });
-      else if (kind === 'ok') { osc(g, { f: 620, f2: 930, dur: 0.09, vol: 0.4 }); }
-      else if (kind === 'back') osc(g, { f: 700, f2: 420, dur: 0.09, vol: 0.35 });
-      else if (kind === 'beep') osc(g, { type: 'square', f: 880, dur: 0.09, vol: 0.14 });
-      else if (kind === 'go') { osc(g, { type: 'square', f: 1320, dur: 0.3, vol: 0.14 }); }
-    },
+    land() { play('landung.stein', { own: true }); },
+    reload(part) { play(`nachladen.${RELOAD_SND[part] || 'verschluss'}`, { own: true, pan: 0.1 }); },
+    dry() { play('leer', { own: true }); },
+    swap() { play('wechsel', { own: true }); },
+    swing() { play('messer.schwung', { own: true }); },
+    hit(head, kill) { play(head ? 'kopfschuss' : 'treffer'); if (kill) play('abschuss'); },
+    hurt() { play('schaden', { own: true }); },
+    whiz(pan) { play('pfeifen', { pan }); },
+    bounce(L, x, y, z) { play('granate.aufprall.stein', { L, x, y, z }); },
+    pin() { play('granate.splint', { own: true }); },
+    ui(kind = 'tick') { play(`ui.${kind}`); },
     /** Kurze Tonfolgen für Ereignisse */
-    jingle(kind) {
-      if (!ok()) return;
-      const g = chain(0, 0.3);
-      const seq = {
-        win: [[392, 0], [523, 0.14], [659, 0.28], [784, 0.42], [1046, 0.62]],
-        lose: [[392, 0], [349, 0.2], [311, 0.4], [261, 0.62]],
-        level: [[523, 0], [659, 0.1], [784, 0.2], [1046, 0.32], [1318, 0.46]],
-        streak: [[659, 0], [988, 0.1]],
-        uav: [[1175, 0], [1175, 0.16], [1568, 0.32]],
-        capture: [[523, 0], [784, 0.12]],
-        lost: [[523, 0], [370, 0.14]],
-        medal: [[880, 0], [1175, 0.08]],
-      }[kind] || [];
-      seq.forEach(([f, when], i) => {
-        osc(g, { type: 'triangle', f, dur: i === seq.length - 1 ? 0.6 : 0.24, vol: 0.4, when, attack: 0.01 });
-        osc(g, { f: f * 2, dur: 0.2, vol: 0.08, when, attack: 0.01 });
-      });
-    },
+    jingle(kind) { play(`signal.${kind}`); },
     /** App geschlossen: nichts mehr spielen, den eigenen Ausgang abhängen (was schon klingt, klingt kurz aus). */
     dispose() {
       gone = true;
-      const o = out;
-      out = null;
-      if (o) setTimeout(() => { try { o.disconnect(); } catch { /* schon ab */ } }, 2500);
+      for (const v of [...pool]) if (v.loop) stop(v, 0.3);
+      const s = sum;
+      if (s) setTimeout(() => { try { s.disconnect(); } catch { /* schon ab */ } }, 2500);
     },
   };
   return S;
@@ -5587,7 +5613,7 @@ function createApp(win) {
     stage.append(el('sz-err', h('b', 'Sperrzone braucht WebGL 2'), h('span', 'Dieser Browser oder diese Grafikkarte stellt es gerade nicht bereit.')));
     return { onClose() {} };
   }
-  const S = createSound(() => prefs.volume);
+  const S = createSound(() => prefs);
 
   // ---------- Zustand ----------
   let M = null, paused = false, closed = false, locked = false, menuWorld = null, menuT = Math.random() * 50;
@@ -6345,6 +6371,10 @@ function createApp(win) {
     fresh: (name, v = 0) => klangOut(klangMake(name, v)),
     meta: (name) => { const { make, ...m } = KLANG[name]; return { ...m, lvl: BANK.get(name)?.map((d) => d?.lvl) || [] }; },
     get bakeMs() { return KBAKE.ms; },
+    voices: () => S.voices(),
+    play: (name, o) => !!S.play(name, o),
+    stats: () => S.stats(),
+    tap: () => S.out(),
   };
 
   return {
