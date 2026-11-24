@@ -5762,6 +5762,7 @@ function createMatch(cfg, hooks) {
     s.hp = 100; s.alive = true; s.protect = 1.6; s.crouching = false; s.crouchK = 0; s.h = STAND_H; s.ads = 0; s.sprinting = false;
     s.fireT = 0.25; s.reloadT = 0; s.switchT = 0; s.meleeT = 0; s.nadeT = 0; s.bloomK = 0; s.mantle = null; s.ground = true; s.stepOff = 0;
     s.damagers.clear(); s.spawnAt = M.time;
+    if (s.sliding) slideHush(s);
     s.sliding = false; s.slideCd = 0;              // Rutschen
     Object.assign(s.in, { swap: -1, nade: false, melee: false, reload: false });      // nichts ausführen, was vor dem Einstieg gedrückt wurde
     guns = (Array.isArray(guns) ? guns : []).filter((id) => WEAPONS[id]).slice(0, 2);
@@ -6086,11 +6087,10 @@ function createMatch(cfg, hooks) {
   }
 
   // ---------- Rutschen: Untergrund und Staub (auch für Figuren, die anderswo gerechnet werden) ----------
-  /** Untergrund unter einer Figur: Einschlag-Art des Materials ('concrete', 'metal', 'wood', 'sand', 'cloth') */
-  function groundKind(s) {
-    phys.raycast(s.x, s.y + 0.2, s.z, 0, -1, 0, 0.6);
-    return (RAY.i >= 0 && MAT_DEF[world.colMat[RAY.i]]?.hit) || world.groundHit;
-  }
+  /** Untergrund unter einer Figur: Einschlag-Art des Materials ('concrete', 'metal', 'wood', 'sand', 'cloth') – wie bei Schritten über phys.surface */
+  function groundKind(s) { return phys.surface(s.x, s.y + 0.05, s.z, s.r); }
+  /** Rutsch-Klang ausblenden, wenn das Rutschen vor seinem Ende abbricht (Sprung, Anstoß, Kante, neuer Einstieg) */
+  function slideHush(s) { if (s.slideV) { s.slideV.stop?.(0.08); s.slideV = null; } }
   function slideDust(s, dt) {
     if ((s.slideFx -= dt) > 0) return;
     s.slideFx = SLIDE.dust;
@@ -6205,7 +6205,7 @@ function createMatch(cfg, hooks) {
       const sp = Math.hypot(s.vx, s.vz);
       s.sliding = true; s.slideT = 0; s.slideFx = 0; s.sprinting = false; s.sprintOut = 0;      // Schießen ist erlaubt
       s.slideDx = sp > 1 ? s.vx / sp : Math.sin(s.yaw); s.slideDz = sp > 1 ? s.vz / sp : -Math.cos(s.yaw);
-      S.slide?.(L, s.x, s.y, s.z, s.me, groundKind(s));
+      s.slideV = S.slide?.(L, s.x, s.y, s.z, s.me, groundKind(s)) || null;
     }
     if (s.sliding) inp.crouch = true;              // Trefferfläche und Augenhöhe wie geduckt, solange gerutscht wird
 
@@ -6237,7 +6237,7 @@ function createMatch(cfg, hooks) {
       const q = Math.min(1, s.slideT / SLIDE.dur), v = lerp(SLIDE.v0, SLIDE.v1, q * q) * w.move;
       s.vx = s.slideDx * v; s.vz = s.slideDz * v;
       if (inp.jump && !s.jumpHeld && s.ground && !frozen && !phys.bodyBlocked(s.x, s.y, s.z, s.r, STAND_H)) {
-        s.sliding = false; s.slideCd = SLIDE.cd; s.crouching = false; s.h = STAND_H;
+        s.sliding = false; s.slideCd = SLIDE.cd; s.crouching = false; s.h = STAND_H; slideHush(s);
         s.vx *= SLIDE.keep; s.vz *= SLIDE.keep; s.vy = 6.4; s.ground = false; s.jumpHeld = true;
       }
     }
@@ -6259,7 +6259,7 @@ function createMatch(cfg, hooks) {
     if (!s.alive) return;
     s.speed = Math.hypot(s.vx, s.vz);
     // Rutschen: Ende nach 0,75 s, unter 3,2 m/s, beim Anstoßen oder ohne Boden – danach 0,6 s Sperre; Staub statt Schritten
-    if (s.sliding && (s.slideT >= SLIDE.dur || s.speed < SLIDE.min || s.bump || !s.ground || frozen)) { s.sliding = false; s.slideCd = SLIDE.cd; }
+    if (s.sliding && (s.slideT >= SLIDE.dur || s.speed < SLIDE.min || s.bump || !s.ground || frozen)) { if (s.slideT < SLIDE.dur - 0.05) slideHush(s); s.sliding = false; s.slideCd = SLIDE.cd; s.slideV = null; }
     if (s.sliding) { s.stepAcc = 0; slideDust(s, dt); }
     s.phase += s.speed * dt * 2.4;
     if (s.ground && (s.stepAcc += s.speed * dt) > (s.sprinting ? 2.3 : 1.75)) { s.stepAcc = 0; S.step(L, s.x, s.y, s.z, s.me, s.sprinting ? 1.3 : s.crouching ? 0.35 : 1, phys.surface(s.x, s.y + 0.05, s.z, s.r)); }
@@ -6579,8 +6579,8 @@ function createMatch(cfg, hooks) {
     if (on && !s.sliding) {
       const dx = s.tx - s.x, dz = s.tz - s.z, d = Math.hypot(dx, dz);
       s.slideDx = d > 0.05 ? dx / d : Math.sin(s.yaw); s.slideDz = d > 0.05 ? dz / d : -Math.cos(s.yaw); s.slideFx = 0;
-      S.slide?.(L, s.x, s.y, s.z, false, groundKind(s));
-    }
+      s.slideV = S.slide?.(L, s.x, s.y, s.z, false, groundKind(s)) || null;
+    } else if (!on && s.sliding) slideHush(s);
     s.sliding = on;
   }
   /** Nachricht aus dem Netz. from = Absender (beim Mitspieler immer der Gastgeber). */
