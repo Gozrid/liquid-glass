@@ -2047,16 +2047,6 @@ function forge(sr = KSR) {
   return K;
 }
 
-const SHOT_SND = {
-  rifle: { cut: 5200, dur: 0.2, noise: 0.85, f: 170, body: 0.6, rate: 1 },
-  smg: { cut: 6500, dur: 0.13, noise: 0.7, f: 230, body: 0.4, rate: 1.3 },
-  shotgun: { cut: 3000, dur: 0.4, noise: 1.1, f: 105, body: 1, rate: 0.75 },
-  dmr: { cut: 4600, dur: 0.28, noise: 1, f: 150, body: 0.8, rate: 0.88 },
-  sniper: { cut: 4000, dur: 0.55, noise: 1.2, f: 92, body: 1.1, rate: 0.7 },
-  lmg: { cut: 4200, dur: 0.24, noise: 0.95, f: 135, body: 0.8, rate: 0.9 },
-  pistol: { cut: 5600, dur: 0.15, noise: 0.7, f: 250, body: 0.45, rate: 1.2 },
-};
-
 // --------------------------------------------------------------------------
 // 8b · Klangschmiede: Rezepte. Jedes Rezept beschreibt einen Klang mit Varianten; make(K, rnd, v) berechnet Variante v
 // mit der Saat hash(name) + v (gleiche Saat ergibt gleiche Samples) und liefert ein Float32Array oder { ch: [links, rechts] }.
@@ -2076,18 +2066,92 @@ const spread = (v, rnd, amt = 0.035) => 1 + amt * ([0, 1, -1][v % 3] + (rnd() - 
 /** Zufallswert aus lo … hi, je Variante aus einem eigenen Drittel (Varianten liegen nie zufällig aufeinander). */
 const pick = (v, rnd, lo, hi) => lo + ((hi - lo) * ((v % 3) + rnd())) / 3;
 
-for (const [kind, p] of Object.entries(SHOT_SND)) {
-  // Der alte Schuss aus nächster Nähe: Rauschen, Körper (Dreieck), Knall (Hochpass) und Nachhall-Rauschen
-  const make = (K, rnd, v) => {
-    const s = spread(v, rnd), a = K.buf(0.52 + p.dur);
-    K.burst(a, rnd, { f: p.cut * s, f2: Math.max(200, p.cut * 0.14), dur: p.dur, gain: p.noise, rate: p.rate });
-    K.tone(a, { type: 'triangle', f: p.f * s, f2: p.f * 0.32 * s, dur: p.dur * 0.7, gain: p.body });
-    K.burst(a, rnd, { type: 'highpass', f: 3500, dur: 0.035, gain: 0.4 });
-    K.burst(a, rnd, { f: 900, f2: 240, dur: 0.5 + p.dur, gain: p.noise * 0.14, attack: 0.03, rate: 0.6 });
-    return a;
-  };
-  rezept(`schuss.${kind}.ich`, { bus: 'waffe', gain: altDb(0.5, 'waffe'), prio: 9, cap: 10, send: 0.5, make });
-  rezept(`schuss.${kind}.nah`, { bus: 'welt', gain: altDb(0.42, 'welt'), prio: 7, cap: 6, reach: 110, send: 0.4, sendD: 0.5, make });
+/**
+ * Schüsse im Schichtmodell (Phase 2): Knall (Klick), Druckwelle (Friedlander), Körper (gleitender Sinus, gesättigt), Rauschfahne
+ * (tiefes rosa und hohes weißes Rauschen, die Höhen klingen schneller ab), Mechanik (Resonanzen), Sub. T Puls, crack Knall, f → f2 Körper,
+ * body Körper-Dauer, drive Sättigung, cut0 → cut1 Tiefpass des Rauschens, noise Rausch-Dauer, tauLo/tauHi Abklingzeiten, mech/mechAt Mechanik
+ * (s), sub Pegel des Subs, db Pegel des eigenen Schusses (dB vor dem Bus). Alle Zeiten in s.
+ */
+const SCHUSS = {
+  rifle: { T: 0.0035, crack: 0.0015, f: 170, f2: 58, body: 0.09, drive: 2.5, cut0: 7000, cut1: 600, noise: 0.18, tauLo: 0.055, tauHi: 0.014, mech: 'bolt', mechAt: [0.038, 0.078], sub: 0.5, db: -6, mix: { body: 0.35, sub: 0.6, lo: 1.5, hi: 3 } },
+  smg: { T: 0.0025, crack: 0.001, f: 230, f2: 90, body: 0.06, drive: 2, cut0: 8000, cut1: 900, noise: 0.11, tauLo: 0.035, tauHi: 0.01, mech: 'bolt', mechAt: [0.028, 0.058], sub: 0.3, db: -7, mix: { body: 0.35, sub: 1, lo: 1.5, hi: 3 } },
+  shotgun: { T: 0.006, crack: 0.0025, f: 110, f2: 42, body: 0.16, drive: 3.5, cut0: 4500, cut1: 300, noise: 0.38, tauLo: 0.11, tauHi: 0.022, mech: null, mechAt: [], sub: 0.9, db: -4.5, mix: { body: 0.3, sub: 0.5, lo: 4, hi: 8 } },
+  dmr: { T: 0.0045, crack: 0.0018, f: 150, f2: 52, body: 0.12, drive: 3, cut0: 6000, cut1: 450, noise: 0.26, tauLo: 0.075, tauHi: 0.016, mech: 'bolt', mechAt: [0.045, 0.095], sub: 0.7, db: -5, mix: { body: 0.35, sub: 0.6, lo: 3, hi: 6 } },
+  sniper: { T: 0.0055, crack: 0.002, f: 95, f2: 38, body: 0.18, drive: 3.5, cut0: 5000, cut1: 350, noise: 0.5, tauLo: 0.14, tauHi: 0.02, mech: null, mechAt: [], sub: 1, db: -4, mix: { body: 0.3, sub: 0.5, lo: 4, hi: 8 } },
+  lmg: { T: 0.0042, crack: 0.0016, f: 135, f2: 50, body: 0.11, drive: 3, cut0: 5500, cut1: 500, noise: 0.22, tauLo: 0.065, tauHi: 0.015, mech: 'heavy', mechAt: [0.04, 0.085], sub: 0.7, db: -5.5, mix: { body: 0.3, sub: 0.5, lo: 2.5, hi: 6 } },
+  pistol: { T: 0.0022, crack: 0.001, f: 250, f2: 95, body: 0.05, drive: 2, cut0: 7500, cut1: 1000, noise: 0.1, tauLo: 0.03, tauHi: 0.009, mech: 'slide', mechAt: [0.022, 0.048], sub: 0.2, db: -7.5, mix: { body: 0.6, sub: 1, lo: 1.2, hi: 2.5 } },
+};
+/**
+ * Pegel der Schichten im Schuss (Startwerte aus dem Plan); jede Art überschreibt einzelne in SCHUSS[art].mix. sub: Faktor auf P.sub,
+ * loF: Tiefpass der tiefen Rauschfahne beginnt bei cut0 · loF, loHp: Hochpass der tiefen Rauschfahne (0 = keiner).
+ * Abgestimmt auf die Tore (mindestens 18 % der Energie unter 150 Hz, Schwerpunkt 900–3500 Hz): Mit den Startwerten trugen Körper, Sub und
+ * Druckwelle 80–96 % der Energie (Schwerpunkt 75–990 Hz). Deshalb ist die Rauschfahne lauter und ohne Tiefen (Hochpass 150 Hz, Tiefpass
+ * ab cut0 wie in der Tabelle), Körper und Sub sind leiser.
+ */
+const SCHICHT = { click: 0.9, fried: 1, body: 0.9, lo: 0.8, hi: 0.6, sub: 1, loF: 1, loHp: 150 };
+/** Resonanzen der Mechanik: [Hz, tau ms, Pegel] */
+const MECH = {
+  bolt: [[1850, 9, 1], [3120, 6, 0.7], [4780, 4, 0.5], [640, 14, 0.6]],
+  heavy: [[1320, 12, 1], [2450, 8, 0.7], [3900, 5, 0.4], [420, 20, 0.8]],
+  slide: [[2300, 7, 1], [3650, 5, 0.6], [5400, 3, 0.4], [900, 10, 0.5]],
+};
+/** Resonanzen umrechnen: Pegel mal g, Frequenzen mal fk. */
+const modesOf = (modes, g = 1, fk = 1) => modes.map(([f, t, p]) => [f * fk, t, p * g]);
+/** Streuung je Variante: 1 ± amt, die Varianten über den Bereich verteilt (v von n), dazu etwas Zufall aus der Saat. */
+const vary = (v, n, rnd, amt) => 1 + amt * Math.max(-1, Math.min(1, (n > 1 ? ((2 * v) / (n - 1) - 1) * 0.8 : 0) + (rnd() - 0.5) * 0.4));
+/** Frühe Echos: Kopien mit Tiefpass f, [Zeit s, dB] (alles, was über das Feld hinausreicht, fällt weg). */
+function echoes(K, a, list, f) {
+  const src = K.lp(Float32Array.from(a), { f });
+  for (const [t, db] of list) K.mix(a, src, { at: t, gain: 10 ** (db / 20) });
+  return a;
+}
+/**
+ * Ein Schuss in einer Perspektive: 'ich' (alle Schichten), 'nah' (ohne Sub, Mechanik mal 0,4, Tiefpass 9 kHz, zwei frühe Echos),
+ * 'fern' (ohne Knall und Mechanik, dumpf, ein Echo nach 120–220 ms). Generator: gibt zwischen den Schichten ab.
+ */
+function* makeShot(K, rnd, v, P, persp) {
+  const fk = vary(v, 4, rnd, 0.04), tk = vary((v + 2) % 4, 4, rnd, 0.08), fern = persp === 'fern';
+  const noiseDur = P.noise * tk, bodyDur = P.body * tk, X = { ...SCHICHT, ...P.mix };
+  const a = K.buf(noiseDur + 0.06 + (fern ? 0.35 : 0));
+  if (!fern) K.click(a, rnd, { at: 0, dur: P.crack * tk, gain: X.click });
+  K.friedlander(a, { at: 0, T: P.T * tk, b: 1.2, gain: X.fried });
+  const body = K.buf(bodyDur);                                     // Körper getrennt sättigen
+  K.sine(body, { f: P.f * fk, f2: P.f2 * fk, dur: bodyDur, gain: 1 });
+  K.decay(body, { attack: 0.001, tau: bodyDur / 3 });
+  K.fade(body, { outT: 0.01 });
+  K.drive(body, P.drive);
+  K.dc(body);                                                      // Gleichanteil gleich hier (sonst zöge ihn K.dc später über den ganzen Puffer ab)
+  K.mix(a, body, { gain: X.body });
+  yield;
+  const lo = K.noise(K.buf(noiseDur), rnd, 'pink'), hi = K.noise(K.buf(noiseDur), rnd, 'white');
+  if (X.loHp) K.hp(lo, { f: X.loHp });
+  K.lp(lo, { f: P.cut0 * X.loF * fk, f2: P.cut1 * fk });
+  K.decay(lo, { tau: P.tauLo * tk });
+  K.fade(lo, { outT: noiseDur * 0.25 });
+  K.hp(hi, { f: 2500 });
+  K.lp(hi, { f: P.cut0 * fk, f2: P.cut0 * 0.5 * fk });
+  K.decay(hi, { tau: P.tauHi * tk });
+  K.mix(a, lo, { gain: X.lo });
+  K.mix(a, hi, { gain: X.hi });
+  yield;
+  if (P.mech && !fern) for (const t of P.mechAt) K.modal(a, { at: t * tk, modes: modesOf(MECH[P.mech], persp === 'ich' ? 0.35 : 0.35 * 0.4, fk) });
+  if (persp === 'ich') {
+    const sub = K.sine(K.buf(0.08), { f: 55 * fk, f2: 45 * fk, dur: 0.08, gain: 1 });
+    K.decay(sub, { attack: 0.003, tau: 0.035 });
+    K.fade(sub, { outT: 0.01 });
+    K.dc(sub);
+    K.mix(a, sub, { gain: P.sub * X.sub });
+  }
+  if (persp === 'nah') { K.lp(a, { f: 9000 }); echoes(K, a, [[rnd() * 0.008 + 0.011, -9], [rnd() * 0.014 + 0.023, -13]], 3000); }
+  if (fern) { K.lp(a, { f: 1800, f2: P.cut1 * 0.5 }); K.hp(a, { f: 60 }); echoes(K, a, [[rnd() * 0.1 + 0.12, -8]], 900); }
+  K.drive(a, 1.6);
+  K.fade(a, { outT: 0.02 });
+  return K.norm(a, 0.98);
+}
+for (const [kind, P] of Object.entries(SCHUSS)) {
+  rezept(`schuss.${kind}.ich`, { n: 4, bus: 'waffe', gain: P.db, prio: 9, cap: 10, send: 0.5, make: (K, rnd, v) => makeShot(K, rnd, v, P, 'ich') });
+  rezept(`schuss.${kind}.nah`, { n: 4, bus: 'welt', gain: P.db + 1.5, prio: 7, cap: 6, reach: 110, send: 0.4, sendD: 0.5, make: (K, rnd, v) => makeShot(K, rnd, v, P, 'nah') });
+  rezept(`schuss.${kind}.fern`, { n: 4, bus: 'welt', gain: P.db + 1.5, prio: 6, cap: 6, reach: 110, send: 0.4, sendD: 0.5, make: (K, rnd, v) => makeShot(K, rnd, v, P, 'fern') });
 }
 rezept('explosion.nah', {
   bus: 'welt', gain: altDb(0.9, 'welt'), prio: 8, cap: 4, reach: 140, send: 0.9,
@@ -2389,7 +2453,7 @@ function raumIR(sr, zone) {
 function createSound(getPrefs) {
   let ctx = null, sum = null, gone = false, phys = null, LL = { x: 0, y: 1.6, z: 0, yaw: 0 };
   let lsend = null, zoneL = 'hof', shown = 'hof', zoneT = 0, forced = null, shownVol = -1;
-  const bus = {}, pool = [], last = {}, stat = { plays: 0, steals: 0, drops: 0, max: 0 }, st = { hp: 100, boom: 0 };
+  const bus = {}, pool = [], last = {}, stat = { plays: 0, steals: 0, drops: 0, max: 0, by: {} }, st = { hp: 100, boom: 0 };
   const hallIn = {}, lzone = {}, zcache = new Map();
   const vol = () => getPrefs().volume;
   const ok = () => !gone && sfx.enabled && audioReady() && vol() > 0;
@@ -2599,6 +2663,7 @@ function createSound(getPrefs) {
     src.start(t);
     pool.push(v);
     stat.plays++;
+    stat.by[name] = (stat.by[name] || 0) + 1;
     stat.max = Math.max(stat.max, pool.length);
     return v;
   }
@@ -2619,18 +2684,21 @@ function createSound(getPrefs) {
     zone: () => forced || zoneL,
     voices() { purge(performance.now()); return pool.length; },
     state(o) { Object.assign(st, o); },
-    stats: () => ({ ...stat, voices: pool.length }),
+    stats: () => ({ ...stat, by: { ...stat.by }, voices: pool.length }),
     /** Alle Rezepte in Scheiben berechnen (siehe klangBake); first: Namen, die nach der Oberfläche zuerst drankommen. */
     bake: (onProgress, first) => klangBake(first, onProgress),
     ready: () => KBAKE.done,
     tap: null,
     /** Summe hinter Begrenzer und Ausgleich (für Mitschnitte in Prüfungen). */
     out() { graph(); return S.tap; },
-    /** Schuss. L = Hörer {x, y, z, yaw}; own = die eigene Waffe. magK (Füllstand des Magazins) nutzt erst Phase 2. */
+    /** Schuss. L = Hörer {x, y, z, yaw}; own = die eigene Waffe. */
     shot(kind, L, x, y, z, own = false) {
-      const k = SHOT_SND[kind] ? kind : 'rifle';
-      if (own) play(`schuss.${k}.ich`, { own: true });
-      else play(`schuss.${k}.nah`, { L, x, y, z });
+      const k = SCHUSS[kind] ? kind : 'rifle';
+      if (own) { play(`schuss.${k}.ich`, { own: true }); return; }
+      // fremd: nah und fern zugleich, übergeblendet zwischen 25 und 60 m
+      const kf = sstep(25, 60, Math.hypot(x - L.x, y - L.y, z - L.z));
+      if (kf < 1) play(`schuss.${k}.nah`, { L, x, y, z, gain: 1 - kf });
+      if (kf > 0) play(`schuss.${k}.fern`, { L, x, y, z, gain: kf });
     },
     explosion(L, x, y, z) { play('explosion.nah', { L, x, y, z }); },
     impact(L, x, y, z, kind) { play(`einschlag.${IMPACT_SND[kind] || 'beton'}`, { L, x, y, z }); },
