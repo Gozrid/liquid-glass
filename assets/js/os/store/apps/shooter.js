@@ -2973,11 +2973,11 @@ const MUZZLE = {
   shotgun: { s: 0.14, side: 0, sparks: 6, light: 10, smoke: 0.09 },
 };
 /**
- * Effekte einer Partie. prefs: Einstellungen der App (quality für die Obergrenze, blood), phys: Kollision (Boden unter Trümmern,
- * Strahl für Blutflecken). Partikel: puff(x, y, z, vx, vy, vz, o) mit o = { life, s, grow, c, a, k, grav, drag, frames, seed, damp }
+ * Effekte einer Partie. prefs: Einstellungen der App (quality für Obergrenze und Schwebstaub, blood), phys: Kollision (Boden unter Trümmern,
+ * Strahl für Blutflecken), world: Karte (Sandschleier auf Sandböden). Partikel: puff(x, y, z, vx, vy, vz, o) mit o = { life, s, grow, c, a, k, grav, drag, frames, seed, damp }
  * (frames: höchstens so viele Bilder sichtbar, seed: Saat des Rauschens im Shader, sonst zufällig, damp: das Wachsen klingt mit dieser Rate ab).
  */
-function createFx(prefs = null, phys = null) {
+function createFx(prefs = null, phys = null, world = null) {
   const quads = new Float32Array(MAX_QUADS * 4 * QSTRIDE);
   const parts = [], tracers = [], decals = [], lights = [], chunks = [], blood = [], booms = [], columns = [];
   const counts = new Int32Array(12);                 // Vierecke je Art im letzten Bild (Prüfungen, etwa Q_BLOOD)
@@ -3057,6 +3057,37 @@ function createFx(prefs = null, phys = null) {
   const F = {
     quads, lights,
     light(x, y, z, r, col, life) { if (lights.length > 5) lights.shift(); lights.push({ x, y, z, r, c: col, life, max: life }); },
+  /**
+   * Schwebstaub (TIERS.dust): 160 Teilchen in einem 12-m-Würfel um die Kamera, Orte aus einer festen Streufolge mit Umlauf (das Feld
+   * wandert mit, ohne neu zu entstehen), am Würfelrand ausgeblendet. Sie sind beleuchtet wie Staub – sichtbar also vor allem im Licht
+   * (Sonne, Lampen). Auf Sandböden zusätzlich 18 große, flache Sandschleier knapp über dem Boden in 40 m um die Kamera.
+   */
+  const MOTES = new Float32Array(160 * 6), VEILS = new Float32Array(18 * 5);
+  {
+    let sd = 7;
+    const r = () => ((sd = (Math.imul(sd, 1664525) + 1013904223) >>> 0) / 4294967296);
+    for (let i = 0; i < 160; i++) MOTES.set([r() * 12, r() * 12, r() * 12, r() * TAU, 0.014 + r() * 0.016, 0.25 + r() * 0.2], i * 6);
+    for (let i = 0; i < 18; i++) VEILS.set([r() * 40, r() * 40, 0.35 + r() * 0.45, 1.6 + r() * 1.6, r()], i * 5);
+  }
+  const sandy = world?.groundHit === 'sand', moteCol = sandy ? [0.86, 0.76, 0.6] : [0.82, 0.8, 0.76];
+  let clock = 0;
+  const wrap = (v, c, n) => c - n / 2 + ((((v - (c - n / 2)) % n) + n) % n);
+  function motes() {
+    if (!(TIERS[prefs?.quality] || TIERS.medium).dust) return;
+    for (let i = 0, o = 0; i < 160; i++, o += 6) {
+      const ph = MOTES[o + 3], t = clock * 0.35 + ph;
+      const x = wrap(MOTES[o] + clock * 0.12 + Math.sin(t) * 0.25, cx, 12), y = wrap(MOTES[o + 1] + Math.sin(t * 0.7) * 0.3, cy, 12), z = wrap(MOTES[o + 2] + clock * 0.05 + Math.cos(t) * 0.25, cz, 12);
+      const e = Math.max(Math.abs(x - cx), Math.abs(y - cy), Math.abs(z - cz)), a = MOTES[o + 5] * (1 - sstep(4.2, 6, e));
+      if (a > 0.004 && y > 0.02) bill(x, y, z, MOTES[o + 4], moteCol[0], moteCol[1], moteCol[2], a, Q_DUST, (i & 63) + 0.5);
+    }
+    if (!sandy) return;
+    for (let i = 0, o = 0; i < 18; i++, o += 5) {
+      const x = wrap(VEILS[o] + clock * 0.6, cx, 40), z = wrap(VEILS[o + 1] + clock * 0.25, cz, 40), d = Math.hypot(x - cx, z - cz);
+      const a = (0.12 + 0.08 * VEILS[o + 4]) * (1 - sstep(14, 20, d)) * sstep(1.5, 4, d);
+      const w = VEILS[o + 3], l = Math.hypot(rx, rz) || 1;            // zur Kamera gedreht, aber aufrecht
+      if (a > 0.004) quad(x, VEILS[o + 2], z, (rx / l) * w, 0, (rz / l) * w, 0, w * 0.3, 0, 0.84, 0.72, 0.54, a, Q_DUST, (i * 7) & 63, 0.5);
+    }
+  }
     tracer(x0, y0, z0, x1, y1, z1, thin) {
       const len = Math.hypot(x1 - x0, y1 - y0, z1 - z0);
       if (len < 1.5) return;
@@ -3215,6 +3246,7 @@ function createFx(prefs = null, phys = null) {
         if ((c.t += dt) > c.dur) { columns.splice(i, 1); continue; }
         if ((c.next -= dt) > 0) continue;
         c.next = 0.15;
+      clock += dt;
         const k = 1 - c.t / c.dur;
         puff(c.x + rnd(-0.4, 0.4), c.y + rnd(0, 0.5), c.z + rnd(-0.4, 0.4), rnd(-0.3, 0.3), rnd(1.2, 2), rnd(-0.3, 0.3),
           { life: rnd(2.5, 3.5), s: rnd(0.5, 0.8), grow: 0.7, c: [0.55, 0.53, 0.5], a: 0.5 * k + 0.1, k: Q_SMOKE, drag: 0.6, grav: -0.25 });
@@ -3265,6 +3297,7 @@ function createFx(prefs = null, phys = null) {
       }
       for (const t of tracers) {
         const k = t.t / t.dur, dx = (t.x1 - t.x0) / t.len, dy = (t.y1 - t.y0) / t.len, dz = (t.z1 - t.z0) / t.len;
+      motes();
         const head = k * t.len, tail = Math.max(0, head - Math.min(10, t.len * 0.5));
         const mx = t.x0 + dx * (head + tail) / 2, my = t.y0 + dy * (head + tail) / 2, mz = t.z0 + dz * (head + tail) / 2;
         const w = t.w * (1 + Math.hypot(cx - mx, cy - my, cz - mz) * 0.03);       // Breite quer zur Blickrichtung, in der Ferne breiter
@@ -3495,7 +3528,7 @@ function createMatch(cfg, hooks) {
   if (!client && !navCache.has(world)) navCache.set(world, buildNav(world, phys));
   const nav = client ? null : navCache.get(world);
   const teams = MODES[cfg.mode].teams, skill = SKILLS[cfg.skill];
-  const fx = createFx(hooks.prefs, phys), I = instWriter(MAX_INST), V = instWriter(160);
+  const fx = createFx(hooks.prefs, phys, world), I = instWriter(MAX_INST), V = instWriter(160);
   const soldiers = [], corpses = [], nades = [], packs = [], feed = [];
   const S = hooks.snd, emit = hooks.emit;
   const L = { x: 0, y: 1.6, z: 0, yaw: 0 };          // Hörer (= Kamera)
