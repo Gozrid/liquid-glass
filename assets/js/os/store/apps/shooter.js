@@ -553,21 +553,32 @@ layout(location=3) in vec4 aTint; layout(location=4) in float aH;
 uniform mat4 uVP;
 out vec3 vPos, vNor, vUV; out vec4 vTint; out float vH;
 void main() { vPos = aPos; vNor = aNor; vUV = aUV; vTint = aTint; vH = aH; gl_Position = uVP * vec4(aPos, 1.); }`;
+// Welt: Detail-Texturen, Großvariation der Farbe, Schmutz an Wandfüßen; Nässe (env.wet) nur auf Asphalt als Pfützen.
 const FS_WORLD = `#version 300 es
 precision highp float; precision highp sampler2DArray;
 #define EMIS_K 2.4
+#define ASPHALT ${MAT.asphalt}.
 uniform sampler2DArray uTex, uDetail;
+uniform float uWet;
 ${GLSL_LIGHT}
 ${GLSL_TBN}
 in vec3 vPos, vNor, vUV; in vec4 vTint; in float vH;
 out vec4 o;
+float h2(vec2 p) { vec3 q = fract(vec3(p.xyx) * .1031); q += dot(q, q.yzx + 33.33); return fract((q.x + q.y) * q.z); }
+float vn(vec2 p) { vec2 i = floor(p), f = fract(p); f = f * f * (3. - 2. * f);
+  return mix(mix(h2(i), h2(i + vec2(1, 0)), f.x), mix(h2(i + vec2(0, 1)), h2(i + vec2(1, 1)), f.x), f.y); }
 void main() {
   vec4 t = texture(uTex, vUV), d = texture(uDetail, vUV);         // d: Normale x, y · Rauheit · Vertiefung
   vec3 ng = normalize(vNor);
   vec2 q = d.rg * 2. - 1.;
   vec3 n = normalize(tbn(ng, vPos, vUV.xy) * vec3(q, sqrt(max(0., 1. - dot(q, q)))));
-  float ao = mix(.62, 1., smoothstep(0., .75, vH));
-  o = vec4(shadeS(t.rgb * vTint.rgb, n, ng, vPos, t.a, d.b, clamp(d.a * 2., 0., 1.), ao, vTint.a), 1.);
+  float ao = mix(.62, 1., smoothstep(0., .75, vH)), spec = t.a, rough = d.b, occ = clamp(d.a * 2., 0., 1.);
+  vec3 alb = t.rgb * vTint.rgb * (.9 + .2 * vn(vPos.xz * .07)) * mix(.78, 1., smoothstep(0., .6, vH));   // Großvariation, Schmutz am Wandfuß
+  if (uWet > 0. && abs(vUV.z - ASPHALT) < .5) {                   // Pfützen: glatt, eben, dunkler
+    float m = smoothstep(.55, .7, vn(vPos.xz * .12) * .65 + vn(vPos.xz * .324 + 5.3) * .35) * uWet;
+    rough = mix(rough, .05, m); n = normalize(mix(n, ng, m)); alb *= 1. - .4 * m; occ = mix(occ, 1., m); spec *= 1. - m;
+  }
+  o = vec4(shadeS(alb, n, ng, vPos, spec, rough, occ, ao, vTint.a), 1.);
 }`;
 const VS_INST = `#version 300 es
 layout(location=0) in vec3 aPos; layout(location=1) in vec3 aNor;
@@ -1212,6 +1223,7 @@ function createRenderer(canvas, { shadowSize = 2048, ldr: forceLdr = false } = {
     gl.uniformMatrix4fv(P.world.u.uVP, false, vp);
     gl.uniform1i(P.world.u.uTex, 0);
     gl.uniform1i(P.world.u.uDetail, 7);
+    gl.uniform1f(P.world.u.uWet, env.wet || 0);
     gl.bindVertexArray(worldVao);
     gl.drawElements(gl.TRIANGLES, worldCount, gl.UNSIGNED_INT, 0);
 
@@ -1553,7 +1565,7 @@ function mapFrachthof(W) {
   W.bounds = { x0: -37, x1: 37, z0: -31, z1: 31, y1: 12 };
   W.env = {
     sunDir: norm3(-0.5, 0.6, 0.62), sunCol: [2.9, 2.25, 1.55], skyCol: [0.42, 0.52, 0.7], gndCol: [0.3, 0.26, 0.22],
-    fogCol: [0.74, 0.64, 0.53], fogDen: 0.004, zenith: [0.15, 0.31, 0.6], cloud: 0.5, exposure: 0.8,
+    fogCol: [0.74, 0.64, 0.53], fogDen: 0.004, zenith: [0.15, 0.31, 0.6], cloud: 0.5, exposure: 0.8, wet: 0.8,      // wet: Pfützen auf Asphalt
     grade: { shadow: [0.96, 1.0, 1.06], light: [1.06, 1.0, 0.94], sat: 1.05, contrast: 1.06, rays: 0.5 },     // Farbstimmung im Schlussschritt
   };
   const BRICK = { tint: [0.92, 0.9, 0.88] }, CRANE = { tint: [0.9, 0.6, 0.08] };
@@ -1773,7 +1785,7 @@ function mapOase(W) {
   W.bounds = { x0: -33, x1: 33, z0: -33, z1: 33, y1: 11 };
   W.env = {
     sunDir: norm3(0.42, 0.95, 0.36), sunCol: [3.0, 2.8, 2.4], skyCol: [0.46, 0.58, 0.8], gndCol: [0.44, 0.37, 0.27],
-    fogCol: [0.83, 0.82, 0.76], fogDen: 0.003, zenith: [0.1, 0.29, 0.68], cloud: 0.25, exposure: 0.62,
+    fogCol: [0.83, 0.82, 0.76], fogDen: 0.003, zenith: [0.1, 0.29, 0.68], cloud: 0.25, exposure: 0.62, wet: 0,
     grade: { shadow: [1.0, 0.98, 1.04], light: [1.08, 1.02, 0.92], sat: 1.10, contrast: 1.04, rays: 0.8 },
   };
   const OCK = { tint: OASE_OCKER }, HEL = { tint: OASE_HELL }, TER = { tint: OASE_TERRA }, KAL = { tint: OASE_KALK }, STEIN = { tint: OASE_STEIN };
