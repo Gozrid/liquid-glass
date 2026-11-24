@@ -410,7 +410,7 @@ vec3 shade(vec3 albedo, vec3 n, vec3 wp, float spec, float ao, float emis) {
   vec3 view = uCam - wp;
   float dist = length(view);
   col += uSunCol * spec * sh * pow(max(dot(n, normalize(uSunDir + view / dist)), 0.), 48.);
-  col = mix(col, albedo * 2.4, emis);
+  col = mix(col, albedo * EMIS_K, emis);
   col = mix(col, uFogCol, clamp(1. - exp(-dist * uFogDen), 0., 1.));
   return uLdr > .5 ? tonemap(col) : col;
 }`;
@@ -423,6 +423,7 @@ out vec3 vPos, vNor, vUV; out vec4 vTint; out float vH;
 void main() { vPos = aPos; vNor = aNor; vUV = aUV; vTint = aTint; vH = aH; gl_Position = uVP * vec4(aPos, 1.); }`;
 const FS_WORLD = `#version 300 es
 precision highp float; precision highp sampler2DArray;
+#define EMIS_K 2.4
 uniform sampler2DArray uTex;
 ${GLSL_LIGHT}
 in vec3 vPos, vNor, vUV; in vec4 vTint; in float vH;
@@ -447,6 +448,7 @@ void main() {
 }`;
 const FS_INST = `#version 300 es
 precision highp float;
+#define EMIS_K 1.4
 ${GLSL_LIGHT}
 in vec3 vPos, vNor, vLocal; in vec4 vCol;
 out vec4 o;
@@ -544,6 +546,7 @@ void main() {
   a *= vCol.a;
   if (uTest > .5 && !flach && (k == 0. || k == 1. || k == 5.)) a *= clamp((szene - ich) / .4, 0., 1.);   // Rauch, Staub, Glühen: weiche Kante an Flächen
   if (uLdr > .5) o = vec4(vCol.rgb * a, add > .5 ? 0. : a);
+  else if (add > .5 && !flach) o = vec4(pow(vCol.rgb, vec3(2.2)) * a * (k == 4. ? 8. : k == 2. ? 5. : 3.), 0.);   // Leuchtendes als HDR: Mündungsfeuer ×8, Leuchtspur ×5, Glühen ×3
   else o = add > .5 ? vec4(lin(vCol.rgb * a), 0.) : vec4(lin(vCol.rgb) * a, a);
 }`;
 // Bildschirmfüllendes Dreieck (Puffer des Himmels) für alle Schritte nach der Szene
@@ -551,16 +554,51 @@ const VS_POST = `#version 300 es
 layout(location=0) in vec2 aPos;
 out vec2 vUV;
 void main() { vUV = aPos * .5 + .5; gl_Position = vec4(aPos, 0., 1.); }`;
-// Schlussschritt: HDR-Zwischenbild → Belichtung → ACES → Gamma → Bildfläche
+// Glühen: Vorfilter bei halber Auflösung (4 Proben über 4×4 Pixel, weiche Schwelle auf dem belichteten Wert), dann je Stufe halbieren
+// (13 Proben), mit 3×3-Zelt wieder hoch (additiv in die größere Stufe). Ergebnis in Stufe 0, schon belichtet.
+const FS_GLOW_PRE = `#version 300 es
+precision highp float;
+uniform sampler2D uQuelle;
+uniform vec2 uPx;
+uniform float uExposure, uSchwelle, uKnie;
+in vec2 vUV; out vec4 o;
+void main() {
+  vec3 c = (texture(uQuelle, vUV + vec2(-1., -1.) * uPx).rgb + texture(uQuelle, vUV + vec2(1., -1.) * uPx).rgb
+          + texture(uQuelle, vUV + vec2(-1., 1.) * uPx).rgb + texture(uQuelle, vUV + vec2(1., 1.) * uPx).rgb) * .25;
+  c = min(c * uExposure, vec3(64.));
+  float br = max(c.r, max(c.g, c.b)), q = clamp(br - uSchwelle + uKnie, 0., 2. * uKnie);
+  o = vec4(c * max(q * q / (4. * uKnie + 1e-5), br - uSchwelle) / max(br, 1e-4), 1.);
+}`;
+const FS_GLOW_DOWN = `#version 300 es
+precision highp float;
+uniform sampler2D uQuelle;
+uniform vec2 uPx;
+in vec2 vUV; out vec4 o;
+vec3 t(float x, float y) { return texture(uQuelle, vUV + vec2(x, y) * uPx).rgb; }
+void main() {
+  o = vec4((t(-1., -1.) + t(1., -1.) + t(-1., 1.) + t(1., 1.)) * .125 + (t(-2., -2.) + t(2., -2.) + t(-2., 2.) + t(2., 2.)) * .03125
+         + (t(0., -2.) + t(-2., 0.) + t(2., 0.) + t(0., 2.)) * .0625 + t(0., 0.) * .125, 1.);
+}`;
+const FS_GLOW_UP = `#version 300 es
+precision highp float;
+uniform sampler2D uQuelle;
+uniform vec2 uPx;
+in vec2 vUV; out vec4 o;
+vec3 t(float x, float y) { return texture(uQuelle, vUV + vec2(x, y) * uPx).rgb; }
+void main() {
+  o = vec4((t(0., 0.) * 4. + (t(-1., 0.) + t(1., 0.) + t(0., -1.) + t(0., 1.)) * 2. + t(-1., -1.) + t(1., -1.) + t(-1., 1.) + t(1., 1.)) / 16., 1.);
+}`;
+// Schlussschritt: HDR-Zwischenbild → Belichtung → Glühen → ACES → Gamma → Bildfläche
 const FS_FINAL = `#version 300 es
 precision highp float;
-uniform sampler2D uFarbe;
-uniform float uExposure, uLdr;
+uniform sampler2D uFarbe, uGlow;
+uniform float uExposure, uLdr, uGlowK;
 in vec2 vUV; out vec4 o;
 ${GLSL_ACES}
 void main() {
-  vec3 c = texture(uFarbe, vUV).rgb;
-  if (uLdr < .5) c = pow(clamp(aces(c * uExposure), 0., 1.), vec3(1. / 2.2));
+  vec3 c = texture(uFarbe, vUV).rgb, g = texture(uGlow, vUV).rgb * uGlowK;
+  if (uLdr < .5) c = pow(clamp(aces(c * uExposure + g), 0., 1.), vec3(1. / 2.2));
+  else c = min(c + g, 1.);
   o = vec4(c, 1.);
 }`;
 // Kantenglättung ohne Mehrfachabtastung (FXAA nach Lottes, schlanke Fassung): liest das fertige RGBA8-Bild, schreibt auf die Bildfläche
@@ -615,6 +653,7 @@ function createRenderer(canvas, { shadowSize = 2048, ldr: forceLdr = false } = {
     shadow: program(VS_SHADOW, FS_EMPTY), shadowInst: program(VS_SHADOW_INST, FS_EMPTY),
     sky: program(VS_SKY, FS_SKY), quad: program(VS_QUAD, FS_QUAD),
     final: program(VS_POST, FS_FINAL), fxaa: program(VS_POST, FS_FXAA),
+    glowPre: program(VS_POST, FS_GLOW_PRE), glowDown: program(VS_POST, FS_GLOW_DOWN), glowUp: program(VS_POST, FS_GLOW_UP),
   };
 
   // ---------- Texturen ----------
@@ -715,7 +754,9 @@ function createRenderer(canvas, { shadowSize = 2048, ldr: forceLdr = false } = {
   let ldr = !floatOk || forceLdr, tW = 0, tH = 0, msaa = 0;
   let tier = { msaa: true };                     // gewünschte Merkmale der Qualitätsstufe (setTier)
   // szene: Ziel der Szene (bei Mehrfachabtastung: ms, danach Auflösen in auf); fx: nur farbe; ldr/ldrF: fertiges Bild vor FXAA
-  const T = { farbe: null, tiefe: null, szene: null, fx: null, msFarbe: null, msTiefe: null, ms: null, ldr: null, ldrF: null };
+  // glow/glowF: Stufen des Glühens (Textur und Framebuffer je Stufe, Größe in glowW/glowH)
+  const T = { farbe: null, tiefe: null, szene: null, fx: null, msFarbe: null, msTiefe: null, ms: null, ldr: null, ldrF: null, glow: [], glowF: [] };
+  const glowW = [], glowH = [];
   const samplesOf = (fmt) => { try { return [...(gl.getInternalformatParameter(gl.RENDERBUFFER, fmt, gl.SAMPLES) || [])]; } catch { return []; } };
   function rbTarget(w, h, fmt) {
     const r = gl.createRenderbuffer();
@@ -744,12 +785,13 @@ function createRenderer(canvas, { shadowSize = 2048, ldr: forceLdr = false } = {
     return f;
   }
   function freeTargets() {
-    for (const k of Object.keys(T)) {
-      const o = T[k];
+    const del = (o) => {
       if (o instanceof WebGLTexture) gl.deleteTexture(o);
       else if (o instanceof WebGLFramebuffer) gl.deleteFramebuffer(o);
       else if (o instanceof WebGLRenderbuffer) gl.deleteRenderbuffer(o);
-      T[k] = null;
+    };
+    for (const k of Object.keys(T)) {
+      if (Array.isArray(T[k])) { T[k].forEach(del); T[k] = []; } else { del(T[k]); T[k] = null; }
     }
   }
   function allocTargets(w, h) {
@@ -778,8 +820,16 @@ function createRenderer(canvas, { shadowSize = 2048, ldr: forceLdr = false } = {
     if (!msaa) {
       T.ldr = texTarget(w, h, gl.RGBA8);
       T.ldrF = fboOf(T.ldr, null);
-      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     }
+    // Glühen: Stufe 0 in halber Auflösung, jede weitere halb so groß
+    glowW.length = glowH.length = 0;
+    for (let i = 0, gw = w, gh = h; i < (tier.glow || 5); i++) {
+      gw = Math.max(1, Math.ceil(gw / 2)); gh = Math.max(1, Math.ceil(gh / 2));
+      glowW.push(gw); glowH.push(gh);
+      T.glow.push(texTarget(gw, gh, fmt));
+      T.glowF.push(fboOf(T.glow[i], null));
+    }
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
   }
   /** Ein Schritt nach der Szene: bildschirmfüllendes Dreieck in fbo (null = Bildfläche). */
   function post(pr, fbo, w, h) {
@@ -1001,14 +1051,45 @@ function createRenderer(canvas, { shadowSize = 2048, ldr: forceLdr = false } = {
     }
     gl.depthRange(0, 1);
     gl.depthMask(true);
-
-    // --- Schluss: Belichtung, Tonwertkurve, Gamma → Bildfläche ---
-    gl.disable(gl.DEPTH_TEST);
     gl.disable(gl.BLEND);
+
+    // --- Glühen: Vorfilter, Stufen hinab, mit Zelt wieder hinauf ---
+    const nG = T.glow.length;
+    bindTex(2, T.farbe);
+    gl.useProgram(P.glowPre.p);
+    gl.uniform1i(P.glowPre.u.uQuelle, 2);
+    gl.uniform2f(P.glowPre.u.uPx, 1 / W, 1 / H);
+    gl.uniform1f(P.glowPre.u.uExposure, ldr ? 1 : env.exposure);
+    gl.uniform1f(P.glowPre.u.uSchwelle, ldr ? 0.8 : 1);         // im Rückfall liegen die Werte schon im Anzeigeraum
+    gl.uniform1f(P.glowPre.u.uKnie, ldr ? 0.1 : 0.5);
+    post(P.glowPre, T.glowF[0], glowW[0], glowH[0]);
+    gl.useProgram(P.glowDown.p);
+    gl.uniform1i(P.glowDown.u.uQuelle, 2);
+    for (let i = 1; i < nG; i++) {
+      bindTex(2, T.glow[i - 1]);
+      gl.uniform2f(P.glowDown.u.uPx, 1 / glowW[i - 1], 1 / glowH[i - 1]);
+      post(P.glowDown, T.glowF[i], glowW[i], glowH[i]);
+    }
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.ONE, gl.ONE);
+    gl.useProgram(P.glowUp.p);
+    gl.uniform1i(P.glowUp.u.uQuelle, 2);
+    for (let i = nG - 1; i > 0; i--) {
+      bindTex(2, T.glow[i]);
+      gl.uniform2f(P.glowUp.u.uPx, 1 / glowW[i], 1 / glowH[i]);
+      post(P.glowUp, T.glowF[i - 1], glowW[i - 1], glowH[i - 1]);
+    }
+    gl.disable(gl.BLEND);
+
+    // --- Schluss: Belichtung, Glühen, Tonwertkurve, Gamma → Bildfläche ---
+    gl.disable(gl.DEPTH_TEST);
     gl.disable(gl.CULL_FACE);
     bindTex(2, T.farbe);
+    bindTex(3, T.glow[0]);
     gl.useProgram(P.final.p);
     gl.uniform1i(P.final.u.uFarbe, 2);
+    gl.uniform1i(P.final.u.uGlow, 3);
+    gl.uniform1f(P.final.u.uGlowK, 0.1);
     gl.uniform1f(P.final.u.uExposure, env.exposure);
     gl.uniform1f(P.final.u.uLdr, ldr ? 1 : 0);
     post(P.final, msaa ? null : T.ldrF, W, H);
@@ -1042,10 +1123,10 @@ function createRenderer(canvas, { shadowSize = 2048, ldr: forceLdr = false } = {
     gl, render, setWorld, project, resize,
     setShadowSize(size) { if (Math.min(size, maxShadow) !== shadowRes) allocShadow(size); },
     /** Merkmale der Qualitätsstufe (siehe TIERS); Zwischenbilder entstehen beim nächsten Bild neu, wenn sich etwas ändert. */
-    setTier(t) { if (!!t.msaa !== !!tier.msaa) tW = 0; tier = { ...t }; },
+    setTier(t) { if (!!t.msaa !== !!tier.msaa || t.glow !== tier.glow) tW = 0; tier = { ...t }; },
     /** Rückfall ohne Float-Ziele erzwingen (Prüfhaken); ohne Float-Unterstützung bleibt er immer an. */
     setLdr(on) { const v = !!on || !floatOk; if (v !== ldr) { ldr = v; tW = 0; } },
-    stats: () => ({ hdr: !ldr, msaa, fxaa: !msaa, floatOk, drawMs: Math.round(drawMs * 100) / 100, w: tW, h: tH }),
+    stats: () => ({ hdr: !ldr, msaa, fxaa: !msaa, glow: T.glow.length, floatOk, drawMs: Math.round(drawMs * 100) / 100, w: tW, h: tH }),
     dispose() { gl.getExtension('WEBGL_lose_context')?.loseContext(); },
   };
 }
