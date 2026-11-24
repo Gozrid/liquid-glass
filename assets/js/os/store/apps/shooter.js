@@ -3743,7 +3743,7 @@ function createSound(getPrefs) {
     ambStop(1.2);
     const want = (amb.want = (w && AMB_KARTE[w.name]) || null);
     amb.ready = false;
-    amb.t = 5 + 8 * Math.random();
+    amb.t = 6 + 14 * Math.random();                 // erster Einzelklang wie alle weiteren nach 6 – 20 s
     if (want) klangLater([...want.loops, ...want.einzel]).then(() => { if (amb.want === want) amb.ready = true; });
   }
   /** Beide Schleifen starten, die zweite um 5 s versetzt; sanft eingeblendet. */
@@ -4004,11 +4004,14 @@ function createSound(getPrefs) {
       play('pfeifen', { pan, when: sup ? 0.02 : 0 });
     },
     bounce(L, x, y, z, surf) { play(`granate.aufprall.${GRUND[surf] || 'stein'}`, { L, x, y, z }); },
-    /** Rutschen (0,75 s); kind = Trefferart des Bodens. Die eigene Figur lauter und nicht ortsgebunden (Bus foley). */
+    /**
+     * Rutschen (0,75 s, einmal je Beginn); kind = Trefferart des Bodens. Die eigene Figur lauter und nicht ortsgebunden (Bus foley).
+     * Liefert die Stimme: endet das Rutschen früher (Sprung, Anstoß), kann der Aufrufer sie mit stop(0.08) ausblenden.
+     */
     slide(L, x, y, z, own, kind) {
       const name = `rutschen.${GRUND[kind] || 'stein'}`;
-      if (own) play(name, { own: true, bus: 'foley', gain: 10 ** ((BUSSE.welt - BUSSE.foley + 3) / 20) });
-      else play(name, { L, x, y, z });
+      if (own) return play(name, { own: true, bus: 'foley', gain: 10 ** ((BUSSE.welt - BUSSE.foley + 3) / 20) });
+      return play(name, { L, x, y, z });
     },
     /** Zischen eines Fasses kurz vor der Explosion: dur 0,12 – 0,22 s, ansteigend; endet mit dur (dann kommt die Explosion). */
     fuse(L, x, y, z, dur = 0.18) { play('zischen', { L, x, y, z, dur: clamp(dur, 0.05, 0.25) }); },
