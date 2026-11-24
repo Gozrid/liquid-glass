@@ -775,12 +775,13 @@ void main() {
     float n = fbm(q * 1.35 + saat * .37 + vec2(0., alter * .9));
     a = smoothstep(1., .15, d + (n - .5) * .85) * (.55 + .55 * n); wrap = .35;
   }
-  else if (k < 2.5) { a = (1. - abs(p.y)) * smoothstep(0., .15, vUV.x) * smoothstep(1., .6, vUV.x); hdr = 5.; }   // Leuchtspur
+  else if (k < 2.5) { a = pow(1. - abs(p.y), 1.5) * vUV.x * vUV.x * smoothstep(1., .9, vUV.x); hdr = 6.; }        // Leuchtspur: heller Kopf
   else if (k < 3.5) { a = smoothstep(1., .35, d + .25 * vn(vUV * 9. + saat)); c *= .5 + .5 * vn(p * 4. + saat); wrap = 0.; }   // Brandfleck
-  else if (k < 4.5) {                                                                      // Mündungsfeuer: unregelmäßiger Stern, weißer Kern
-    float w = atan(p.y, p.x), r = max(.14, .42 + .2 * sin(w * 5. + saat * 1.7) + .15 * sin(w * 3. - saat * 2.9) + .1 * sin(w * 8. + saat * .7));
-    a = pow(max(0., 1. - d / r), 1.3) * (.75 + .5 * vn(q * 6. + saat));
-    c = mix(c, vec3(1., .94, .84), pow(max(0., 1. - d * 1.7), 2.)); hdr = 5.;
+  else if (k < 4.5) {                                                                      // Mündungsfeuer: Kern und ungleich lange, spitze Zacken
+    vec2 u = p / max(d, 1e-4);
+    float z = pow(vn(u * 3.1 + saat * 1.37), 3.) * 1.6 + pow(vn(u * 7.3 - saat * .71), 4.) * .9, r = .2 + .8 * min(z, 1.);
+    a = pow(max(0., 1. - d / r), 2.) * (.7 + .6 * vn(q * 9. + saat)) + pow(max(0., 1. - d * 3.2), 1.5);
+    c = mix(c, vec3(1., .93, .82), pow(max(0., 1. - d * 2.2), 1.5)); hdr = 3.;
   }
   else if (k < 5.5) { a = smoothstep(1., .15, d + (vn(q * 2.5 + saat) - .5) * .55) * .8; wrap = .6; }                 // Staub
   else if (k < 6.5) {                                                                      // Funke: in Flugrichtung gestreckt, heller Kopf
@@ -2936,6 +2937,19 @@ function createSound(getVolume) {
 // ==========================================================================
 // ---------- 9a · Effekte: Funken, Staub, Rauch, Feuer, Leuchtspuren, Einschusslöcher, Trümmer, Blut, Lichtblitze ----------
 /**
+ * Mündungsfeuer je Waffenart (WEAPONS[…].snd): s = Größe des Sterns in m, side = Seitenflammen, sparks = Funken nach vorn,
+ * dust = Staubstoß am Boden unter der Mündung, light = Radius des Lichts, smoke = Größe der Rauchwolke danach.
+ */
+const MUZZLE = {
+  pistol: { s: 0.06, side: 0, sparks: 0, light: 5, smoke: 0.045 },
+  smg: { s: 0.07, side: 0, sparks: 0, light: 6, smoke: 0.05 },
+  rifle: { s: 0.085, side: 2, sparks: 0, light: 7, smoke: 0.06 },
+  lmg: { s: 0.095, side: 2, sparks: 0, light: 8, smoke: 0.065 },
+  dmr: { s: 0.1, side: 2, sparks: 0, light: 8, smoke: 0.07 },
+  sniper: { s: 0.12, side: 2, sparks: 0, dust: true, light: 10, smoke: 0.085 },
+  shotgun: { s: 0.14, side: 0, sparks: 6, light: 10, smoke: 0.09 },
+};
+/**
  * Effekte einer Partie. prefs: Einstellungen der App (quality für die Obergrenze, blood), phys: Kollision (Boden unter Trümmern,
  * Strahl für Blutflecken). Partikel: puff(x, y, z, vx, vy, vz, o) mit o = { life, s, grow, c, a, k, grav, drag, frames, seed }
  * (frames: höchstens so viele Bilder sichtbar, seed: Saat des Rauschens im Shader, sonst zufällig).
@@ -2985,7 +2999,12 @@ function createFx(prefs = null, phys = null) {
   function puff(x, y, z, vx, vy, vz, o) {
     if (parts.length >= capOf(FX_MAX.parts)) parts.shift();
     parts.push({ x, y, z, vx, vy, vz, life: o.life, max: o.life, s: o.s, grow: o.grow || 0, r: o.c[0], g: o.c[1], b: o.c[2], a: o.a ?? 1, k: o.k,
-      grav: o.grav || 0, drag: o.drag || 0, frames: o.frames || 0, seed: o.seed ?? seedOf() });
+      grav: o.grav || 0, drag: o.drag || 0, frames: o.frames || 0, seed: o.seed ?? seedOf(), dir: o.dir || null, len: o.len || 0 });
+  }
+  let own = { kind: 'rifle', seed: 0 };              // letzter eigener Schuss: Art und Saat des Mündungsfeuers in der Hand
+  /** Seitenflammen und Flamme nach vorn eines fremden Mündungsfeuers: gestreckt, der helle Kopf sitzt an der Mündung */
+  function flame(x, y, z, dx, dy, dz, len, w, life, seed) {
+    puff(x + dx * len / 2, y + dy * len / 2, z + dz * len / 2, 0, 0, 0, { life, s: w, c: [1, 0.72, 0.38], k: Q_SPARK, dir: [-dx, -dy, -dz], len, seed });
   }
   const DUST = { concrete: [0.62, 0.6, 0.57], sand: [0.72, 0.6, 0.42], wood: [0.5, 0.36, 0.2], cloth: [0.7, 0.7, 0.7], metal: [0.45, 0.45, 0.47] };
 
@@ -3025,8 +3044,42 @@ function createFx(prefs = null, phys = null) {
       for (let i = 0; i < 10; i++) { const a = rnd(TAU); puff(x, y + 0.15, z, Math.cos(a) * rnd(3, 7), rnd(0.2, 1), Math.sin(a) * rnd(3, 7), { life: rnd(0.7, 1.3), s: 0.5, grow: 2.2, c: [0.5, 0.45, 0.38], a: 0.5, k: Q_DUST, drag: 2.6 }); }
       if (y < 0.4) decals.push({ x, y: 0, z, axis: 1, sign: 1, s: rnd(1.5, 2.1), life: 60, k: Q_DECAL, c: [0.015, 0.015, 0.015], seed: seedOf() });
     },
-    /** Mündungsfeuer einer fremden Waffe */
-    muzzle(x, y, z) { puff(x, y, z, 0, 0, 0, { life: 0.05, s: rnd(0.2, 0.3), c: [1, 0.8, 0.45], k: Q_FLASH }); },
+    /**
+     * Schuss an der Mündung (x, y, z) in Richtung (dx, dy, dz), kind = Waffenart (MUZZLE): Licht, Rauchwolke, bei fremden Waffen das
+     * Mündungsfeuer (Stern, Seitenflammen, Flamme nach vorn), Funken der Schrotflinte, Staubstoß des Scharfschützengewehrs.
+     * Das eigene Mündungsfeuer zeichnet flash() mit der Waffe in der Hand.
+     */
+    shot(x, y, z, dx, dy, dz, kind, mine) {
+      const m = MUZZLE[kind] || MUZZLE.rifle, seed = seedOf();
+      F.light(x, y, z, m.light, [2.6, 1.8, 0.8], 0.05);
+      if (mine) own = { kind, seed };
+      else {
+        const s = m.s * rnd(3, 3.8), life = 0.05;
+        puff(x, y, z, 0, 0, 0, { life, s, c: [1, 0.8, 0.5], k: Q_FLASH, seed });
+        puff(x, y, z, 0, 0, 0, { life, s: s * 2, c: [1, 0.7, 0.4], a: 0.35, k: Q_GLOW });
+        flame(x, y, z, dx, dy, dz, s * 2.2, s * 0.3, life, seed);
+        if (m.side) {
+          const l = Math.hypot(dx, dz) || 1, sx = -dz / l, sz = dx / l;
+          for (const k of [-1, 1]) flame(x, y, z, sx * k * 0.8 + dx * 0.6, 0.1, sz * k * 0.8 + dz * 0.6, s * 0.95, s * 0.18, life, seed);
+        }
+      }
+      for (let i = 0; i < m.sparks; i++) {
+        const v = rnd(9, 17);
+        puff(x, y, z, dx * v + rnd(-1.5, 1.5), dy * v + rnd(-1, 1.5), dz * v + rnd(-1.5, 1.5), { life: rnd(0.1, 0.22), s: 0.008, c: [1, 0.72, 0.38], k: Q_SPARK, grav: 6, drag: 1.5 });
+      }
+      puff(x + dx * 0.08, y + dy * 0.08, z + dz * 0.08, dx * 0.7 + rnd(-0.1, 0.1), dy * 0.7 + rnd(0.1, 0.35), dz * 0.7 + rnd(-0.1, 0.1),
+        { life: rnd(0.4, 0.7), s: m.smoke, grow: m.smoke * 4, c: [0.78, 0.77, 0.75], a: 0.26, k: Q_SMOKE, drag: 2.2, grav: -0.35 });
+      if (m.dust && phys) {
+        const f = phys.floorBelow(x, y, z, 0.05);
+        if (y - f < 1.8) for (let i = 0; i < 6; i++) {
+          const a = rnd(TAU);
+          puff(x + dx * 0.5, f + 0.06, z + dz * 0.5, Math.cos(a) * rnd(1, 2.5) + dx * 1.5, rnd(0.1, 0.5), Math.sin(a) * rnd(1, 2.5) + dz * 1.5,
+            { life: rnd(0.5, 0.9), s: 0.12, grow: 0.8, c: [0.62, 0.58, 0.52], a: 0.3, k: Q_DUST, drag: 3 });
+        }
+      }
+    },
+    /** Mündungsfeuer einer fremden Waffe ohne Richtung (älterer Aufruf) */
+    muzzle(x, y, z, kind = 'rifle') { F.shot(x, y, z, 0, 0, -1, kind, false); },
     /** Leuchtende Scheibe am Boden (nur während build(): markiert Stellungen) */
     disc(x, y, z, r, c, a) { quad(x, y, z, r, 0, 0, 0, 0, r, c[0], c[1], c[2], a, Q_GLOW + Q_FLAT, 0, 3); },
     /**
@@ -3078,7 +3131,8 @@ function createFx(prefs = null, phys = null) {
         if (p.k === Q_SMOKE || p.k === Q_DUST || p.k === Q_BLOOD) continue;
         const t = p.life / p.max, e0 = p.seed + Math.min(0.999, 1 - t);
         if (p.frames && --p.frames <= 0) p.life = 0;              // nur so viele Bilder sichtbar (Blitz)
-        if (p.k === Q_SPARK) {
+        if (p.len) streak(p.x, p.y, p.z, p.dir[0], p.dir[1], p.dir[2], p.len, p.s, p.r, p.g, p.b, p.a * t, Q_SPARK, e0);
+        else if (p.k === Q_SPARK) {
           const v = Math.hypot(p.vx, p.vy, p.vz) || 1, len = Math.min(0.25, v * 0.03);
           streak(p.x, p.y, p.z, p.vx / v, p.vy / v, p.vz / v, len, p.s, p.r, p.g, p.b, p.a * Math.min(1, t * 2.5), Q_SPARK, e0);
         } else if (p.k === Q_RING) {
@@ -3095,11 +3149,15 @@ function createFx(prefs = null, phys = null) {
       }
       return qn;
     },
-    /** Mündungsfeuer der eigenen Waffe: wird mit der Waffe gezeichnet (hinter den Welt-Effekten im Puffer). */
-    flash(x, y, z, size) {
-      const before = qn;
-      bill(x, y, z, size, 1, 0.82, 0.5, 1, Q_FLASH, seedOf());
-      bill(x, y, z, size * 1.9, 1, 0.6, 0.25, 0.35, Q_GLOW);
+    /**
+     * Mündungsfeuer der eigenen Waffe: wird mit der Waffe gezeichnet (hinter den Welt-Effekten im Puffer). Art und Saat vom letzten
+     * eigenen Schuss (shot), also bleibt die Form über die paar Bilder gleich; die Seitenflammen liegen quer im Bild.
+     */
+    flash(x, y, z) {
+      const before = qn, m = MUZZLE[own.kind] || MUZZLE.rifle, s = m.s * (1.05 + 0.25 * ((own.seed * 0.618) % 1)), l = s * 0.85;
+      bill(x, y, z, s, 1, 0.82, 0.55, 1, Q_FLASH, own.seed);
+      bill(x, y, z, s * 2, 1, 0.72, 0.45, 0.2, Q_GLOW);
+      if (m.side) for (const k of [-1, 1]) streak(x + rx * k * l / 2, y + ry * k * l / 2, z + rz * k * l / 2, -rx * k, -ry * k, -rz * k, l, s * 0.16, 1, 0.74, 0.42, 0.8, Q_SPARK, own.seed);
       return qn - before;
     },
     clear() { parts.length = 0; tracers.length = 0; decals.length = 0; lights.length = 0; },
@@ -3571,8 +3629,8 @@ function createMatch(cfg, hooks) {
       s.kickY += rnd(-1, 1) * w.kickH * DEG;
     }
     s.kickAnim = Math.min(1.6, s.kickAnim + (w.pellets > 1 || w.scope ? 1.5 : w.auto ? 0.75 : 1.1));
-    fx.light(s.mx, s.my, s.mzz, 7, [2.6, 1.8, 0.8], 0.05);
-    if (s.me) M.flashT = 0.04; else fx.muzzle(s.mx, s.my, s.mzz);
+    fx.shot(s.mx, s.my, s.mzz, fwx, fwy, fwz, w.snd, s.me);
+    if (s.me) M.flashT = 0.04;
     S.shot(w.snd, L, s.x, s.y + 1.4, s.z, s.me);
     if (net) {
       const e = end.map((v) => Math.round(v * 100) / 100);
@@ -3586,8 +3644,8 @@ function createMatch(cfg, hooks) {
     if (!w || !s || !Array.isArray(e)) return;
     s.shotAt = M.time; s.kickAnim = Math.min(1.6, s.kickAnim + 0.8);
     fx.tracer(s.mx, s.my, s.mzz, e[0], e[1], e[2], false);
-    fx.light(s.mx, s.my, s.mzz, 7, [2.6, 1.8, 0.8], 0.05);
-    fx.muzzle(s.mx, s.my, s.mzz);
+    basis(s.yaw, s.pitch);
+    fx.shot(s.mx, s.my, s.mzz, B[6], B[7], B[8], w.snd, false);
     S.shot(w.snd, L, s.x, s.y + 1.4, s.z, false);
     if (k >= 0) { const kind = HIT_KINDS[Math.floor(k / 6)] || 'concrete'; fx.impact(e[0], e[1], e[2], (k % 6) >> 1, k % 2 ? 1 : -1, kind); S.impact(L, e[0], e[1], e[2], kind); }
   }
@@ -4242,7 +4300,7 @@ function createMatch(cfg, hooks) {
       }
       for (const l of world.lamps) fx.lamp(l, l[7] ? lampFlicker(M.time) : 1);
     });
-    const vmQuadCount = me.alive && M.flashT > 0 && V.count ? fx.flash(me.vmx, me.vmy, me.vmz, 0.085 + Math.random() * 0.03) : 0;
+    const vmQuadCount = me.alive && M.flashT > 0 && V.count ? fx.flash(me.vmx, me.vmy, me.vmz) : 0;
     lightsOut.length = 0;
     for (const l of fx.lights) { const k = l.life / l.max; lightsOut.push([l.x, l.y, l.z, l.r, l.c[0] * k, l.c[1] * k, l.c[2] * k]); }
     const lamps = world.lamps.length > MAX_LIGHTS - lightsOut.length
