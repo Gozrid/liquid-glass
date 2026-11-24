@@ -369,6 +369,9 @@ const TIERS = {
   medium: { scale: 0.8, msaa: false, glow: 5, ssao: 6, shadowTaps: 9, rays: true, detail: 256, particles: 1, dust: true },
   high: { scale: 1, msaa: true, glow: 5, ssao: 10, shadowTaps: 16, rays: true, detail: 512, particles: 1, dust: true },
 };
+/** Belichtungsanpassung: Zielwert des Mittels, Grenzen um env.exposure, Zeiten in s (Bild wird heller → hell, dunkler → dunkel). */
+const BEL = { key: 0.18, lo: 0.66, hi: 1.5, hell: 0.35, dunkel: 1.2 };
+const GRADE_NEUTRAL = { shadow: [1, 1, 1], light: [1, 1, 1], sat: 1, contrast: 1, rays: 0 };
 const Q_FLAT = 0.25;     // zur Art addiert: flach auf einer Fläche (Zeichen am Boden) – harter Tiefentest wie Einschusslöcher statt weicher Kante
 
 // Bildkette: die Szene entsteht als linearer HDR-Wert in einem Zwischenbild; Belichtung, Tonwertkurve (ACES) und Gamma
@@ -558,14 +561,14 @@ void main() { vUV = aPos * .5 + .5; gl_Position = vec4(aPos, 0., 1.); }`;
 // (13 Proben), mit 3×3-Zelt wieder hoch (additiv in die größere Stufe). Ergebnis in Stufe 0, schon belichtet.
 const FS_GLOW_PRE = `#version 300 es
 precision highp float;
-uniform sampler2D uQuelle;
+uniform sampler2D uQuelle, uBel;
 uniform vec2 uPx;
-uniform float uExposure, uSchwelle, uKnie;
+uniform float uLdr, uSchwelle, uKnie;
 in vec2 vUV; out vec4 o;
 void main() {
   vec3 c = (texture(uQuelle, vUV + vec2(-1., -1.) * uPx).rgb + texture(uQuelle, vUV + vec2(1., -1.) * uPx).rgb
           + texture(uQuelle, vUV + vec2(-1., 1.) * uPx).rgb + texture(uQuelle, vUV + vec2(1., 1.) * uPx).rgb) * .25;
-  c = min(c * uExposure, vec3(64.));
+  c = min(c * (uLdr > .5 ? 1. : texelFetch(uBel, ivec2(0), 0).r), vec3(64.));
   float br = max(c.r, max(c.g, c.b)), q = clamp(br - uSchwelle + uKnie, 0., 2. * uKnie);
   o = vec4(c * max(q * q / (4. * uKnie + 1e-5), br - uSchwelle) / max(br, 1e-4), 1.);
 }`;
@@ -588,18 +591,70 @@ vec3 t(float x, float y) { return texture(uQuelle, vUV + vec2(x, y) * uPx).rgb; 
 void main() {
   o = vec4((t(0., 0.) * 4. + (t(-1., 0.) + t(1., 0.) + t(0., -1.) + t(0., 1.)) * 2. + t(-1., -1.) + t(1., -1.) + t(-1., 1.) + t(1., 1.)) / 16., 1.);
 }`;
-// Schlussschritt: HDR-Zwischenbild → Belichtung → Glühen → ACES → Gamma → Bildfläche
+// Belichtung: mittlere Leuchtdichte (geometrisches Mittel, ohne die Waffe in der Hand) in 64×64, Mip-Kette bis 1×1.
+// R = Logarithmus mal Gewicht, G = Gewicht; die oberste Stufe liefert das gewichtete Mittel. Keine Rücklesung auf die CPU.
+const FS_LUM = `#version 300 es
+precision highp float;
+uniform sampler2D uQuelle;
+uniform highp sampler2D uTiefe;
+in vec2 vUV; out vec4 o;
+void main() {
+  vec2 s = vec2(textureSize(uTiefe, 0));
+  float r = 0., w = 0.;
+  for (int i = 0; i < 4; i++) {
+    vec2 uv = vUV + (vec2(i & 1, i >> 1) - .5) * (.5 / 64.);
+    float k = texelFetch(uTiefe, ivec2(uv * s), 0).r < .1 ? 0. : 1.;              // Waffe in der Hand zählt nicht
+    r += log(dot(texture(uQuelle, uv).rgb, vec3(.2126, .7152, .0722)) + 1e-4) * k; w += k;
+  }
+  o = vec4(r * .25, w * .25, 0., 1.);
+}`;
+// Anpassung im Wechsel zweier 1×1-Bilder: ziel = clamp(0,18 / mittel, 0,66 … 1,5) · env.exposure, mittel gemessen am mit env.exposure
+// belichteten Bild – so bleibt ein gewöhnlicher Blick bei der Grundbelichtung der Karte, nur deutlich Helleres oder Dunkleres wird ausgeglichen.
+// Wird das Bild heller, folgt die Belichtung in 0,35 s, wird es dunkler, in 1,2 s (wie das Auge: Blenden geht schneller als Gewöhnen ans Dunkel).
+const FS_ADAPT = `#version 300 es
+precision highp float;
+uniform sampler2D uLum, uAlt;
+uniform float uDt, uKey;
+uniform vec4 uBelK;      // Zielwert, untere und obere Grenze, Zeit zum Abdunkeln (BEL)
+uniform float uBelDunkel;
+in vec2 vUV; out vec4 o;
+void main() {
+  vec2 m = textureLod(uLum, vec2(.5), 6.).rg;
+  float mittel = (m.g > 1e-3 ? exp(m.r / m.g) : uBelK.x / uKey) * uKey, ziel = clamp(uBelK.x / (mittel + 1e-4), uBelK.y, uBelK.z) * uKey;
+  float alt = texelFetch(uAlt, ivec2(0), 0).r;
+  o = vec4(alt + (ziel - alt) * (1. - exp(-uDt / (ziel < alt ? uBelK.w : uBelDunkel))), mittel, 0., 1.);
+}`;
+// Korn (bewegt, im Dunkeln stärker) und Rasterung ±0,5/255 – ganz am Ende, bei FXAA erst nach der Kantenglättung
+const GLSL_KORN = `
+uniform float uKorn, uZeit;
+float hk(vec2 p) { vec3 q = fract(vec3(p.xyx) * .1031); q += dot(q, q.yzx + 33.33); return fract((q.x + q.y) * q.z); }
+vec3 korn(vec3 c) {
+  vec2 p = gl_FragCoord.xy;
+  float l = clamp(dot(c, vec3(.2126, .7152, .0722)), 0., 1.);
+  c += (hk(p + uZeit) - .5) * 2. * uKorn * (1. - .7 * l);
+  return c + (hk(p * 1.31 + 57.3 + uZeit * .37) - .5) / 255.;
+}`;
+// Schlussschritt: HDR-Zwischenbild → Belichtung → Glühen → ACES → Gamma → Farbstimmung → Vignette → Korn → Bildfläche.
+// Plätze für spätere Phasen: Verzerrung (Bildwellen) vor dem Lesen von uFarbe, SSAO und Sonnenstrahlen vor der Belichtung,
+// Bildwirkungen aus f.post nach der Farbstimmung.
 const FS_FINAL = `#version 300 es
 precision highp float;
-uniform sampler2D uFarbe, uGlow;
-uniform float uExposure, uLdr, uGlowK;
+uniform sampler2D uFarbe, uGlow, uBel;
+uniform float uLdr, uGlowK, uSatt, uKontrast, uVig, uKornHier;
+uniform vec3 uTonS, uTonL;
 in vec2 vUV; out vec4 o;
 ${GLSL_ACES}
+${GLSL_KORN}
 void main() {
   vec3 c = texture(uFarbe, vUV).rgb, g = texture(uGlow, vUV).rgb * uGlowK;
-  if (uLdr < .5) c = pow(clamp(aces(c * uExposure + g), 0., 1.), vec3(1. / 2.2));
+  if (uLdr < .5) c = pow(clamp(aces(c * texelFetch(uBel, ivec2(0), 0).r + g), 0., 1.), vec3(1. / 2.2));
   else c = min(c + g, 1.);
-  o = vec4(c, 1.);
+  float l = dot(c, vec3(.2126, .7152, .0722));
+  c *= mix(uTonS, uTonL, smoothstep(.15, .85, l));                       // Farbstimmung: Schatten und Lichter getönt
+  c = clamp((mix(vec3(l), c, uSatt) - .5) * uKontrast + .5, 0., 1.);    // Sättigung, Kontrast
+  vec2 q = vUV - .5;
+  c *= 1. - uVig * pow(dot(q, q) * 2., 1.5);                             // Vignette
+  o = vec4(uKornHier > .5 ? korn(c) : c, 1.);
 }`;
 // Kantenglättung ohne Mehrfachabtastung (FXAA nach Lottes, schlanke Fassung): liest das fertige RGBA8-Bild, schreibt auf die Bildfläche
 const FS_FXAA = `#version 300 es
@@ -607,6 +662,7 @@ precision highp float;
 uniform sampler2D uBild;
 uniform vec2 uPx;
 in vec2 vUV; out vec4 o;
+${GLSL_KORN}
 void main() {
   const vec3 L = vec3(.299, .587, .114);
   vec3 m = texture(uBild, vUV).rgb;
@@ -619,7 +675,7 @@ void main() {
   vec3 a = .5 * (texture(uBild, vUV - dir / 6.).rgb + texture(uBild, vUV + dir / 6.).rgb);
   vec3 b = a * .5 + .25 * (texture(uBild, vUV - dir * .5).rgb + texture(uBild, vUV + dir * .5).rgb);
   float lb = dot(b, L);
-  o = vec4(lb < lo || lb > hi ? a : b, 1.);
+  o = vec4(korn(lb < lo || lb > hi ? a : b), 1.);
 }`;
 
 function createRenderer(canvas, { shadowSize = 2048, ldr: forceLdr = false } = {}) {
@@ -653,6 +709,7 @@ function createRenderer(canvas, { shadowSize = 2048, ldr: forceLdr = false } = {
     shadow: program(VS_SHADOW, FS_EMPTY), shadowInst: program(VS_SHADOW_INST, FS_EMPTY),
     sky: program(VS_SKY, FS_SKY), quad: program(VS_QUAD, FS_QUAD),
     final: program(VS_POST, FS_FINAL), fxaa: program(VS_POST, FS_FXAA),
+    lum: program(VS_POST, FS_LUM), adapt: program(VS_POST, FS_ADAPT),
     glowPre: program(VS_POST, FS_GLOW_PRE), glowDown: program(VS_POST, FS_GLOW_DOWN), glowUp: program(VS_POST, FS_GLOW_UP),
   };
 
@@ -755,7 +812,10 @@ function createRenderer(canvas, { shadowSize = 2048, ldr: forceLdr = false } = {
   let tier = { msaa: true };                     // gewünschte Merkmale der Qualitätsstufe (setTier)
   // szene: Ziel der Szene (bei Mehrfachabtastung: ms, danach Auflösen in auf); fx: nur farbe; ldr/ldrF: fertiges Bild vor FXAA
   // glow/glowF: Stufen des Glühens (Textur und Framebuffer je Stufe, Größe in glowW/glowH)
-  const T = { farbe: null, tiefe: null, szene: null, fx: null, msFarbe: null, msTiefe: null, ms: null, ldr: null, ldrF: null, glow: [], glowF: [] };
+  const T = { farbe: null, tiefe: null, szene: null, fx: null, msFarbe: null, msTiefe: null, ms: null, ldr: null, ldrF: null, glow: [], glowF: [],
+    lum: null, lumF: null, bel: [], belF: [] };
+  let belCur = 0, belReset = true, lastT = 0, frameNo = 0;
+  const lastCam = [0, -1e9, 0];
   const glowW = [], glowH = [];
   const samplesOf = (fmt) => { try { return [...(gl.getInternalformatParameter(gl.RENDERBUFFER, fmt, gl.SAMPLES) || [])]; } catch { return []; } };
   function rbTarget(w, h, fmt) {
@@ -829,6 +889,17 @@ function createRenderer(canvas, { shadowSize = 2048, ldr: forceLdr = false } = {
       T.glow.push(texTarget(gw, gh, fmt));
       T.glowF.push(fboOf(T.glow[i], null));
     }
+    // Belichtung (nur mit Float-Zielen): 64×64 mit Mip-Kette, zwei 1×1 im Wechsel
+    if (!ldr) {
+      T.lum = gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_2D, T.lum);
+      gl.texStorage2D(gl.TEXTURE_2D, 7, gl.RGBA16F, 64, 64);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+      T.lumF = fboOf(T.lum, null);
+      for (let i = 0; i < 2; i++) { T.bel.push(texTarget(1, 1, gl.RGBA16F, gl.NEAREST)); T.belF.push(fboOf(T.bel[i], null)); }
+      belReset = true;
+    }
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
   }
   /** Ein Schritt nach der Szene: bildschirmfüllendes Dreieck in fbo (null = Bildfläche). */
@@ -849,6 +920,7 @@ function createRenderer(canvas, { shadowSize = 2048, ldr: forceLdr = false } = {
   function setWorld(world) {
     if (worldVao) { gl.deleteVertexArray(worldVao); gl.deleteBuffer(worldVbo); gl.deleteBuffer(worldIbo); }
     env = world.env;
+    belReset = true;
     worldVao = gl.createVertexArray(); worldVbo = gl.createBuffer(); worldIbo = gl.createBuffer();
     gl.bindVertexArray(worldVao);
     gl.bindBuffer(gl.ARRAY_BUFFER, worldVbo);
@@ -1053,13 +1125,44 @@ function createRenderer(canvas, { shadowSize = 2048, ldr: forceLdr = false } = {
     gl.depthMask(true);
     gl.disable(gl.BLEND);
 
+    // --- Belichtung: Leuchtdichte → 64×64 → Mip-Kette → Anpassung im Wechsel (springt bei Kameraschnitt oder neuer Karte sofort) ---
+    const now = performance.now(), dt = f.post?.dt ?? Math.min(0.25, lastT ? (now - lastT) / 1000 : 0);
+    lastT = now;
+    frameNo++;
+    if (Math.hypot(cam.x - lastCam[0], cam.y - lastCam[1], cam.z - lastCam[2]) > 3) belReset = true;
+    lastCam[0] = cam.x; lastCam[1] = cam.y; lastCam[2] = cam.z;
+    if (!ldr) {
+      bindTex(2, T.farbe);
+      bindTex(3, T.tiefe);
+      gl.useProgram(P.lum.p);
+      gl.uniform1i(P.lum.u.uQuelle, 2);
+      gl.uniform1i(P.lum.u.uTiefe, 3);
+      post(P.lum, T.lumF, 64, 64);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      bindTex(5, T.lum);
+      gl.generateMipmap(gl.TEXTURE_2D);
+      bindTex(6, T.bel[belCur]);
+      belCur ^= 1;
+      gl.useProgram(P.adapt.p);
+      gl.uniform1i(P.adapt.u.uLum, 5);
+      gl.uniform1i(P.adapt.u.uAlt, 6);
+      gl.uniform1f(P.adapt.u.uDt, belReset ? 1e6 : dt);
+      gl.uniform1f(P.adapt.u.uKey, env.exposure);
+      gl.uniform4f(P.adapt.u.uBelK, BEL.key, BEL.lo, BEL.hi, BEL.hell);
+      gl.uniform1f(P.adapt.u.uBelDunkel, BEL.dunkel);
+      post(P.adapt, T.belF[belCur], 1, 1);
+      bindTex(4, T.bel[belCur]);
+      belReset = false;
+    }
+
     // --- Glühen: Vorfilter, Stufen hinab, mit Zelt wieder hinauf ---
     const nG = T.glow.length;
     bindTex(2, T.farbe);
     gl.useProgram(P.glowPre.p);
     gl.uniform1i(P.glowPre.u.uQuelle, 2);
+    gl.uniform1i(P.glowPre.u.uBel, 4);
     gl.uniform2f(P.glowPre.u.uPx, 1 / W, 1 / H);
-    gl.uniform1f(P.glowPre.u.uExposure, ldr ? 1 : env.exposure);
+    gl.uniform1f(P.glowPre.u.uLdr, ldr ? 1 : 0);
     gl.uniform1f(P.glowPre.u.uSchwelle, ldr ? 0.8 : 1);         // im Rückfall liegen die Werte schon im Anzeigeraum
     gl.uniform1f(P.glowPre.u.uKnie, ldr ? 0.1 : 0.5);
     post(P.glowPre, T.glowF[0], glowW[0], glowH[0]);
@@ -1090,14 +1193,25 @@ function createRenderer(canvas, { shadowSize = 2048, ldr: forceLdr = false } = {
     gl.uniform1i(P.final.u.uFarbe, 2);
     gl.uniform1i(P.final.u.uGlow, 3);
     gl.uniform1f(P.final.u.uGlowK, 0.1);
-    gl.uniform1f(P.final.u.uExposure, env.exposure);
+    gl.uniform1i(P.final.u.uBel, 4);
     gl.uniform1f(P.final.u.uLdr, ldr ? 1 : 0);
+    const gr = env.grade || GRADE_NEUTRAL;
+    gl.uniform3fv(P.final.u.uTonS, gr.shadow);
+    gl.uniform3fv(P.final.u.uTonL, gr.light);
+    gl.uniform1f(P.final.u.uSatt, gr.sat);
+    gl.uniform1f(P.final.u.uKontrast, gr.contrast);
+    gl.uniform1f(P.final.u.uVig, 0.22);
+    gl.uniform1f(P.final.u.uKorn, 0.018);
+    gl.uniform1f(P.final.u.uZeit, (frameNo % 997) * 7.31);
+    gl.uniform1f(P.final.u.uKornHier, msaa ? 1 : 0);
     post(P.final, msaa ? null : T.ldrF, W, H);
     if (!msaa) {                                 // ohne Mehrfachabtastung: FXAA auf dem fertigen Bild
       bindTex(2, T.ldr);
       gl.useProgram(P.fxaa.p);
       gl.uniform1i(P.fxaa.u.uBild, 2);
       gl.uniform2f(P.fxaa.u.uPx, 1 / W, 1 / H);
+      gl.uniform1f(P.fxaa.u.uKorn, 0.018);
+      gl.uniform1f(P.fxaa.u.uZeit, (frameNo % 997) * 7.31);
       post(P.fxaa, null, W, H);
     }
     gl.activeTexture(gl.TEXTURE0);
@@ -1126,7 +1240,17 @@ function createRenderer(canvas, { shadowSize = 2048, ldr: forceLdr = false } = {
     setTier(t) { if (!!t.msaa !== !!tier.msaa || t.glow !== tier.glow) tW = 0; tier = { ...t }; },
     /** Rückfall ohne Float-Ziele erzwingen (Prüfhaken); ohne Float-Unterstützung bleibt er immer an. */
     setLdr(on) { const v = !!on || !floatOk; if (v !== ldr) { ldr = v; tW = 0; } },
-    stats: () => ({ hdr: !ldr, msaa, fxaa: !msaa, glow: T.glow.length, floatOk, drawMs: Math.round(drawMs * 100) / 100, w: tW, h: tH }),
+    stats() {
+      let exposure = null, mean = null;
+      if (!ldr && T.belF.length && !gl.isContextLost()) {             // nur für Prüfungen: einmal zurücklesen
+        const px = new Float32Array(4);
+        gl.bindFramebuffer(gl.FRAMEBUFFER, T.belF[belCur]);
+        gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.FLOAT, px);
+        gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+        exposure = Math.round(px[0] * 1000) / 1000; mean = Math.round(px[1] * 1000) / 1000;
+      }
+      return { hdr: !ldr, msaa, fxaa: !msaa, glow: T.glow.length, floatOk, exposure, mean, drawMs: Math.round(drawMs * 100) / 100, w: tW, h: tH };
+    },
     dispose() { gl.getExtension('WEBGL_lose_context')?.loseContext(); },
   };
 }
@@ -1265,6 +1389,7 @@ function mapFrachthof(W) {
   W.env = {
     sunDir: norm3(-0.5, 0.6, 0.62), sunCol: [2.9, 2.25, 1.55], skyCol: [0.42, 0.52, 0.7], gndCol: [0.3, 0.26, 0.22],
     fogCol: [0.74, 0.64, 0.53], fogDen: 0.004, zenith: [0.15, 0.31, 0.6], cloud: 0.5, exposure: 0.8,
+    grade: { shadow: [0.96, 1.0, 1.06], light: [1.06, 1.0, 0.94], sat: 1.05, contrast: 1.06, rays: 0.5 },     // Farbstimmung im Schlussschritt
   };
   const BRICK = { tint: [0.92, 0.9, 0.88] }, CRANE = { tint: [0.9, 0.6, 0.08] };
 
@@ -1484,6 +1609,7 @@ function mapOase(W) {
   W.env = {
     sunDir: norm3(0.42, 0.95, 0.36), sunCol: [3.0, 2.8, 2.4], skyCol: [0.46, 0.58, 0.8], gndCol: [0.44, 0.37, 0.27],
     fogCol: [0.83, 0.82, 0.76], fogDen: 0.003, zenith: [0.1, 0.29, 0.68], cloud: 0.25, exposure: 0.62,
+    grade: { shadow: [1.0, 0.98, 1.04], light: [1.08, 1.02, 0.92], sat: 1.10, contrast: 1.04, rays: 0.8 },
   };
   const OCK = { tint: OASE_OCKER }, HEL = { tint: OASE_HELL }, TER = { tint: OASE_TERRA }, KAL = { tint: OASE_KALK }, STEIN = { tint: OASE_STEIN };
   const rand = oaseDeko(shadeOf(OASE_OCKER, 0.82));
