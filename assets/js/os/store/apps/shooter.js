@@ -323,16 +323,19 @@ function detailTextures(size) {
   const k0 = (size / 256) * 4, S = size, m = S - 1;
   detailCache[size] = MAT_DEF.map((def, l) => {
     const H = src.height[l], R = src.rough[l], k = k0 * MAT_BUMP[def.name], px = new Uint8Array(S * S * 4);
-    const row = new Float32Array(S * S), soft = new Float32Array(S * S);
+    const row = new Float32Array(S * S), soft = new Float32Array(S * S), G = new Float32Array(S * S);
     for (let y = 0; y < S; y++) for (let x = 0; x < S; x++) {             // 5×5-Mittel, getrennt nach Zeilen und Spalten
       let a = 0; for (let d = -2; d <= 2; d++) a += H[y * S + ((x + d) & m)]; row[y * S + x] = a / 5;
     }
     for (let y = 0; y < S; y++) for (let x = 0; x < S; x++) {
       let a = 0; for (let d = -2; d <= 2; d++) a += row[((y + d) & m) * S + x]; soft[y * S + x] = a / 5;
     }
+    // Für die Normale die Höhe mit einem 3×3-Zelt glätten: Kanten von einem Texel würden sonst als Lichtpunkte flimmern
+    for (let y = 0; y < S; y++) for (let x = 0; x < S; x++) row[y * S + x] = (H[y * S + ((x - 1) & m)] + 2 * H[y * S + x] + H[y * S + ((x + 1) & m)]) / 4;
+    for (let y = 0; y < S; y++) for (let x = 0; x < S; x++) G[y * S + x] = (row[((y - 1) & m) * S + x] + 2 * row[y * S + x] + row[((y + 1) & m) * S + x]) / 4;
     for (let y = 0, i = 0, j = 0; y < S; y++) {
       for (let x = 0; x < S; x++, i += 4, j++) {
-        const dx = (H[y * S + ((x + 1) & m)] - H[y * S + ((x - 1) & m)]) * 0.5 * k, dy = (H[((y + 1) & m) * S + x] - H[((y - 1) & m) * S + x]) * 0.5 * k;
+        const dx = (G[y * S + ((x + 1) & m)] - G[y * S + ((x - 1) & m)]) * 0.5 * k, dy = (G[((y + 1) & m) * S + x] - G[((y - 1) & m) * S + x]) * 0.5 * k;
         const il = 1 / Math.hypot(dx, dy, 1);
         px[i] = (-dx * il * 0.5 + 0.5) * 255; px[i + 1] = (-dy * il * 0.5 + 0.5) * 255;
         px[i + 2] = R[j] * 255; px[i + 3] = clamp(0.5 + (H[j] - soft[j]) * 4, 0, 1) * 255;
@@ -443,6 +446,7 @@ const QSTRIDE = 10;      // je Effekt-Ecke: Position 3 · UV 2 · Farbe 4 · Art
 const MAX_INST = 1400, MAX_QUADS = 1600;
 const K_MATTE = 0, K_CAMO = 1, K_METAL = 2, K_GLOW = 3;
 const Q_GLOW = 0, Q_SMOKE = 1, Q_BEAM = 2, Q_DECAL = 3, Q_FLASH = 4, Q_DUST = 5;
+const Q_CONE = 9;        // Lichtkegel einer Lampe (6 bis 8 sind für die Effekte der Phase 5 vorgesehen)
 /**
  * Qualitätsstufen (Vertrag V4). scale = Auflösung, msaa = 4-fach abgetastet (sonst FXAA), glow = Stufen des Glühens,
  * ssao = Proben (0 = aus), shadowTaps = Schatten-Abtastungen, rays = Sonnenstrahlen, detail = Kantenlänge der Detail-Texturen,
@@ -533,14 +537,15 @@ vec3 shadeS(vec3 albedo, vec3 n, vec3 ng, vec3 wp, float spec, float rough, floa
   float sh = ndg > 0. ? sunShadow(wp, ng, ndg) : 0.;
   float F0 = mix(.04, .6, spec), ndv = max(dot(n, V), 1e-3);
   vec3 light = mix(uGndCol, uSkyCol, n.y * .5 + .5) * ao * mix(.8, 1., occ) + uSunCol * ndl * sh, gl = vec3(0.);
-  float e = clamp(2. / max(rough * rough * rough * rough, 1e-4) - 2., 1., 256.);
+  float e = clamp(2. / max(rough * rough * rough * rough, 1e-4) - 2., 1., 24.);
+  vec3 nb = normalize(n + ng);                     // Punktlichter glänzen auf halb geglätteter Normale (feine Kanten flimmern sonst)
   for (int i = 0; i < ${MAX_LIGHTS}; i++) {
     float r = uLights[i].w;
     if (r <= 0.) continue;
     vec3 d = uLights[i].xyz - wp, l = normalize(d);
     float a = max(0., 1. - dot(d, d) / (r * r)), nl = max(dot(n, l), 0.);
     light += uLightCol[i] * a * a * (.3 + .7 * nl);
-    gl += uLightCol[i] * a * a * nl * pow(max(dot(n, normalize(l + V)), 0.), e) * F0 * (e + 2.) * .125;
+    gl += uLightCol[i] * a * a * nl * pow(max(dot(nb, normalize(l + V)), 0.), e) * F0 * (e + 2.) * .125;
   }
   vec3 col = albedo * light + gl * occ;
   if (ndl > 0. && sh > 0.) {
@@ -591,6 +596,8 @@ void main() {
     float m = smoothstep(.55, .7, vn(vPos.xz * .12) * .65 + vn(vPos.xz * .324 + 5.3) * .35) * uWet;
     rough = mix(rough, .05, m); n = normalize(mix(n, ng, m)); alb *= 1. - .4 * m; occ = mix(occ, 1., m); spec *= 1. - m;
   }
+  vec3 dn = fwidth(n);                                             // Glanz ohne Flimmern: wo die Normale je Pixel stark wechselt, rauer
+  rough = sqrt(min(rough * rough + min(2. * dot(dn, dn), .25), 1.));
   o = vec4(shadeS(alb, n, ng, vPos, spec, rough, occ, ao, vTint.a), 1.);
 }`;
 const VS_INST = `#version 300 es
@@ -701,11 +708,12 @@ void main() {
   else if (k < 2.5) a = (1. - abs(p.y)) * smoothstep(0., .15, vUV.x) * smoothstep(1., .6, vUV.x);         // Leuchtspur
   else if (k < 3.5) { a = smoothstep(1., .35, d + .25 * vn(vUV * 9.)); add = 0.; }         // Einschussloch
   else if (k < 4.5) { float ang = atan(p.y, p.x); a = pow(max(0., 1. - d * (1.25 - .45 * cos(ang * 4.))), 1.6); }   // Mündungsfeuer
+  else if (k > 8.5) { float w = mix(1., .14, vUV.y); a = smoothstep(w, w * .2, abs(p.x)) * pow(vUV.y, 1.3) * smoothstep(1., .9, vUV.y); }   // Lichtkegel: oben schmal und hell
   else { a = smoothstep(1., .1, d) * .8; add = 0.; }                                       // Staub
   a *= vCol.a;
-  if (uTest > .5 && !flach && (k == 0. || k == 1. || k == 5.)) a *= clamp((szene - ich) / .4, 0., 1.);   // Rauch, Staub, Glühen: weiche Kante an Flächen
+  if (uTest > .5 && !flach && (k == 0. || k == 1. || k == 5. || k == 9.)) a *= clamp((szene - ich) / .4, 0., 1.);   // Rauch, Staub, Glühen, Lichtkegel: weiche Kante an Flächen
   if (uLdr > .5) o = vec4(vCol.rgb * a, add > .5 ? 0. : a);
-  else if (add > .5 && !flach) o = vec4(pow(vCol.rgb, vec3(2.2)) * a * (k == 4. ? 8. : k == 2. ? 5. : 3.), 0.);   // Leuchtendes als HDR: Mündungsfeuer ×8, Leuchtspur ×5, Glühen ×3
+  else if (add > .5 && !flach) o = vec4(pow(vCol.rgb, vec3(2.2)) * a * (k == 4. ? 8. : k == 2. ? 5. : k == 9. ? 1. : 3.), 0.);   // Leuchtendes als HDR: Mündungsfeuer ×8, Leuchtspur ×5, Glühen ×3, Kegel ×1
   else o = add > .5 ? vec4(lin(vCol.rgb * a), 0.) : vec4(lin(vCol.rgb) * a, a);
 }`;
 // Bildschirmfüllendes Dreieck (Puffer des Himmels) für alle Schritte nach der Szene
@@ -1616,8 +1624,11 @@ function worldBuilder() {
     spawn(team, x, z, yaw) { W.spawns[team].push({ x, z, yaw }); return W; },
     poi(x, z) { W.pois.push({ x, z: W.flip ? -z : z }); return W; },
     flag(name, x, z) { W.flags.push({ name, x, z }); return W; },
-    /** Lichtquelle: leuchtet in der Nähe der Kamera wirklich (die nächsten gewinnen). */
-    lamp(x, y, z, r, col) { W.lamps.push([x, y, W.flip ? -z : z, r, col[0], col[1], col[2]]); return W; },
+    /**
+     * Lichtquelle: leuchtet in der Nähe der Kamera wirklich (die nächsten gewinnen). Eintrag [x, y, z, r, R, G, B, flackert, Fleckhöhe]:
+     * o.flicker = flackert (je Karte eine), o.spot = Höhe des leuchtenden Flecks unter der Leuchte (Vorgabe y).
+     */
+    lamp(x, y, z, r, col, o = {}) { W.lamps.push([x, y, W.flip ? -z : z, r, col[0], col[1], col[2], o.flicker ? 1 : 0, o.spot ?? y]); return W; },
     /** Beide Hälften bauen: einmal wie beschrieben, einmal gespiegelt. */
     mirror(fn) { fn(); W.flip = true; fn(); W.flip = false; return W; },
 
@@ -1672,6 +1683,11 @@ function truck(W, x, z, tint, trailerTint) {
   W.box(x + 2.8, 0, z, 9.2, 1.2, 2.6, 'plain', { clip: true });
   for (const wx of [0.6, 8.6, 10.0]) for (const wz of [0.02, 2.2]) W.box(x + wx, 0, z + wz, 1.0, 1.0, 0.38, 'plain', { tint: [0.05, 0.05, 0.055], ghost: true });
 }
+/** Helligkeit einer flackernden Lampe zur Zeit t: meist voll, in unregelmäßigen Stößen auf 60 % (stufiges Werte-Rauschen). */
+function lampFlicker(t) {
+  const u = t * 9, i = Math.floor(u), f = u - i, hs = (n) => { const x = Math.sin(n * 127.1 + 311.7) * 43758.5453; return x - Math.floor(x); };
+  return 0.6 + 0.4 * (hs(i) + (hs(i + 1) - hs(i)) * f * f * (3 - 2 * f) > 0.32 ? 1 : 0);
+}
 /** Mast mit Leuchtkopf */
 function lampPost(W, x, z, hgt, arm = 1) {
   W.cyl(x, 0, z, 0.09, hgt, 'plate', { tint: C_DARK, seg: 6 });
@@ -1703,7 +1719,7 @@ function mapFrachthof(W) {
   W.wall('z', -16.3, 16.3, -17.3, 0, 7, 0.3, 'brick', BRICK, [[-9.4, -7.9, 0, 2.3], [-5.6, -3.6, 1.1, 2.4], [-2.4, 2.4, 0, 3.6], [3.6, 5.6, 1.1, 2.4], [7.9, 9.4, 0, 2.3]]);
   W.box(-36, 7, -1.5, 9, 0.3, 3, 'roof', { noAO: true });
   W.box(-23, 7, -1.5, 6, 0.3, 3, 'roof', { noAO: true });
-  W.lamp(-26.5, 5.6, 0, 12, [1.5, 1.2, 0.8]);
+  W.lamp(-26.5, 5.6, 0, 12, [1.5, 1.2, 0.8], { spot: 6.24 });
   W.box(-26.9, 6.3, -0.2, 0.8, 0.12, 0.4, 'plain', { tint: [1, 0.9, 0.7], emis: 1, ghost: true, noAO: true });
   // Gabelstapler
   W.box(-31.2, 0.25, 3.2, 1.2, 0.9, 2.0, 'plate', { tint: C_YEL, noAO: true });
@@ -1729,7 +1745,8 @@ function mapFrachthof(W) {
   W.wall('z', -4, 4, 32.4, 1.1, 2.7, 0.2, 'plaster', {}, [[-3.2, -1.7, 1, 2], [-0.6, 0.6, 0, 2.1], [1.7, 3.2, 1, 2]]);
   W.box(32.2, 3.8, -4.2, 3.9, 0.2, 8.4, 'roof', { noAO: true });
   W.box(34.6, 1.1, -0.9, 1.0, 0.8, 1.8, 'planks', { noAO: true });
-  W.lamp(34, 3.2, 0, 6, [1.2, 1.1, 0.9]);
+  W.lamp(34, 3.2, 0, 6, [1.2, 1.1, 0.9], { flicker: true, spot: 3.62 });           // flackert
+  W.box(33.75, 3.68, -0.2, 0.5, 0.12, 0.4, 'plain', { tint: [1, 0.95, 0.85], emis: 1, ghost: true, noAO: true });
 
   W.mirror(() => {
     W.box(-36.6, 0, -30.6, 73.2, 5, 0.6, 'concrete');
@@ -1741,7 +1758,8 @@ function mapFrachthof(W) {
     W.box(-26, 7, -11, 9, 0.3, 3, 'roof', { noAO: true });
     W.box(-36, 7, -8, 19, 0.3, 6.5, 'roof', { noAO: true });
     for (const z of [-12, -6]) W.box(-36, 6.5, z, 18.7, 0.3, 0.2, 'plate', { tint: C_DARK, ghost: true, noAO: true });
-    W.lamp(-26.5, 5.6, -10, 12, [1.5, 1.2, 0.8]);
+    W.lamp(-26.5, 5.6, -10, 12, [1.5, 1.2, 0.8], { spot: 6.24 });
+    W.box(-26.9, 6.3, -10.2, 0.8, 0.12, 0.4, 'plain', { tint: [1, 0.9, 0.7], emis: 1, ghost: true, noAO: true });
     W.box(-36, 3, -16, 7.5, 0.25, 8, 'planks', { noAO: true });
     W.box(-28.8, 0, -8.3, 0.3, 3, 0.3, 'plate', { tint: C_DARK });
     W.box(-28.8, 0, -16, 0.3, 3, 0.3, 'plate', { tint: C_DARK });
@@ -1895,9 +1913,9 @@ function oaseKarren(W, x, z, along) {
 }
 const oaseKrug = (W, x, z, r = 0.24, hh = 0.52) => W.cyl(x, 0, z, r, hh, 'plain', { tint: [0.72, 0.36, 0.2], ghost: true, seg: 8 });
 /** Wandleuchte im Haus: kleines Leuchtkästchen unter der Decke und das Licht dazu. */
-function oaseLicht(W, x, y, z, r) {
+function oaseLicht(W, x, y, z, r, flicker = false) {
   W.box(x - 0.18, y + 0.2, z - 0.18, 0.36, 0.12, 0.36, 'plain', { tint: [1, 0.82, 0.55], emis: 1, ghost: true, noAO: true });
-  W.lamp(x, y, z, r, [1.35, 1.0, 0.58]);
+  W.lamp(x, y, z, r, [1.35, 1.0, 0.58], { flicker, spot: y + 0.14 });
 }
 
 function mapOase(W) {
@@ -1969,7 +1987,7 @@ function mapOase(W) {
     W.box(8.6, 0, -24.5, 2.2, 1.9, 0.6, 'planks', { tint: OASE_DUNKEL });
     barrel(W, 13.9, -24.1, OASE_BLAU); barrel(W, 13.2, -24.2, OASE_TERRA);
     W.box(17, 0.02, -24, 3.2, 0.02, 2.2, 'cloth', oaseDeko([0.2, 0.3, 0.5]));
-    oaseLicht(W, 17, 2.6, -22, 8);
+    oaseLicht(W, 17, 2.6, -22, 8, !W.flip);          // flackert (nur auf der ungespiegelten Seite)
 
     W.box(-4.5, 0, -25, 9, 4.4, 6, 'plaster', OCK);
     oaseKranz(W, -4.5, -25, 4.5, -19, 4.4, OASE_OCKER, 0.4);
@@ -2774,6 +2792,19 @@ function createFx() {
     muzzle(x, y, z) { puff(x, y, z, 0, 0, 0, { life: 0.05, s: rnd(0.2, 0.3), c: [1, 0.8, 0.45], k: Q_FLASH }); },
     /** Leuchtende Scheibe am Boden (nur während build(): markiert Stellungen) */
     disc(x, y, z, r, c, a) { quad(x, y, z, r, 0, 0, 0, 0, r, c[0], c[1], c[2], a, Q_GLOW + Q_FLAT); },
+    /**
+     * Lampe (Eintrag aus W.lamp, nur während build()): leuchtender Fleck unter der Leuchte, zur Kamera hin versetzt (sonst blendet ihn die
+     * Leuchte dahinter weich aus), und ein Lichtkegel aus zwei gekreuzten senkrechten Vierecken (Länge min(y, 4) m). Die Deckkraft der
+     * beiden Vierecke folgt dem Blickwinkel, damit keines von der Kante her gesehen wird und die Summe gleich bleibt. k = Helligkeit (Flackern).
+     */
+    lamp(l, k) {
+      const x = l[0], y = l[8] ?? l[1], z = l[2], m = Math.max(l[4], l[5], l[6]), r = l[4] / m, g = l[5] / m, b = l[6] / m;
+      const dx = cx - x, dy = cy - y, dz = cz - z, dl = Math.hypot(dx, dy, dz) || 1, off = Math.min(0.3, dl * 0.5) / dl;
+      bill(x + dx * off, y - 0.05 + dy * off, z + dz * off, 0.35, r, g, b, k, Q_GLOW);
+      const len = Math.min(y, 4), hw = 0.25 + len * 0.3, vl = Math.hypot(dx, dz) || 1, f1 = Math.abs(dz) / vl, f2 = Math.abs(dx) / vl, a = 0.11 * k / (f1 + f2 || 1);
+      quad(x, y - len / 2, z, hw, 0, 0, 0, len / 2, 0, r, g, b, a * f1, Q_CONE);
+      quad(x, y - len / 2, z, 0, 0, hw, 0, len / 2, 0, r, g, b, a * f2, Q_CONE);
+    },
     /** Rauchfaden an der Mündung nach langem Feuer */
     wisp(x, y, z) { puff(x, y, z, rnd(-0.2, 0.2), rnd(0.3, 0.7), rnd(-0.2, 0.2), { life: rnd(0.5, 0.9), s: 0.05, grow: 0.3, c: [0.7, 0.7, 0.7], a: 0.22, k: Q_SMOKE, drag: 1 }); },
 
@@ -3934,7 +3965,7 @@ function createMatch(cfg, hooks) {
 
   const FLAG_COL = { n: [0.85, 0.85, 0.85, K_MATTE], f: [0.1, 0.42, 1, K_GLOW], e: [1, 0.12, 0.06, K_GLOW] };
   const PACK = [0.2, 0.24, 0.14, K_MATTE], PACK_L = [1, 0.75, 0.2, K_GLOW], NADE_C = [0.13, 0.17, 0.1, K_MATTE], POLE = [0.1, 0.1, 0.11, K_METAL];
-  const lightsOut = [];
+  const lightsOut = [], flickOut = [0, 0, 0, 0, 0, 0, 0];
   /** Sammelt alles Bewegliche für den Renderer. */
   M.frame = (shadows) => {
     I.reset(); V.reset();
@@ -3961,13 +3992,20 @@ function createMatch(cfg, hooks) {
         const c = f.owner < 0 ? [0.9, 0.9, 0.9] : f.owner === me.team ? [0.2, 0.5, 1] : [1, 0.2, 0.12];
         fx.disc(f.x, f.y + 0.03, f.z, 3.4, c, 0.22 + (f.capBy >= 0 ? 0.12 * Math.sin(M.time * 8) : 0));
       }
+      for (const l of world.lamps) fx.lamp(l, l[7] ? lampFlicker(M.time) : 1);
     });
     const vmQuadCount = me.alive && M.flashT > 0 && V.count ? fx.flash(me.vmx, me.vmy, me.vmz, 0.085 + Math.random() * 0.03) : 0;
     lightsOut.length = 0;
     for (const l of fx.lights) { const k = l.life / l.max; lightsOut.push([l.x, l.y, l.z, l.r, l.c[0] * k, l.c[1] * k, l.c[2] * k]); }
     const lamps = world.lamps.length > MAX_LIGHTS - lightsOut.length
       ? [...world.lamps].sort((p, q) => Math.hypot(p[0] - cam.x, p[2] - cam.z) - Math.hypot(q[0] - cam.x, q[2] - cam.z)) : world.lamps;
-    for (const l of lamps) { if (lightsOut.length >= MAX_LIGHTS) break; lightsOut.push(l); }
+    for (const l of lamps) {
+      if (lightsOut.length >= MAX_LIGHTS) break;
+      if (!l[7]) { lightsOut.push(l); continue; }
+      const k = lampFlicker(M.time);                    // flackernde Lampe: Licht wie Fleck und Kegel
+      flickOut[0] = l[0]; flickOut[1] = l[1]; flickOut[2] = l[2]; flickOut[3] = l[3]; flickOut[4] = l[4] * k; flickOut[5] = l[5] * k; flickOut[6] = l[6] * k;
+      lightsOut.push(flickOut);
+    }
     return { cam, inst: I.buf, instCount, instShadowCount: I.count, vm: V.buf, vmCount: V.count, vmFov: VM_FOV, quads: fx.quads, quadCount, vmQuadCount, lights: lightsOut, time: M.time, shadows };
   };
 
