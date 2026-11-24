@@ -4843,6 +4843,19 @@ const MENU_CSS = `
 .szm-dlg p { font-size: .92em; color: var(--fg-2); text-wrap: pretty; }
 .szm-dlg div { display: flex; justify-content: flex-end; gap: .6em; margin-top: .7em; }
 
+/* ---------- Hörprobe ---------- */
+.szm-hear-dim { grid-template: minmax(0, 1fr) / minmax(0, 1fr); }
+.szm-hear { display: grid; grid-template-rows: auto auto minmax(0, 1fr) auto; gap: .7em; width: min(42em, 100%); max-height: min(40em, 100%); padding: 1.2em 1.3em 1.1em; border-radius: 1.1em;
+  background: rgba(14, 17, 26, .96); box-shadow: inset 0 0 0 .5px var(--glass-edge), 0 2em 5em -1.5em rgba(0, 0, 0, .9); animation: szm-rise .3s var(--ease-out) both; }
+.szm-hear > b { font-size: 1.15em; font-weight: 800; }
+.szm-hear-opts { display: flex; flex-wrap: wrap; align-items: center; gap: .5em 1.4em; font-size: .9em; color: var(--fg-2); }
+.szm-hear-opts > span { display: inline-flex; align-items: center; gap: .6em; }
+.szm-hear-list { min-height: 0; overflow: auto; overscroll-behavior: contain; padding-right: .3em; }
+.szm-hear-row { display: flex; align-items: center; gap: .5em; padding: .3em 0; border-top: .5px solid var(--line); }
+.szm-hear-row > span { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; font-size: .92em; }
+.szm-hear-row small { margin-left: .6em; color: var(--fg-3); }
+.szm-hear-foot { display: flex; align-items: center; justify-content: space-between; gap: .8em; font-size: .86em; color: var(--fg-3); }
+
 /* ---------- Auswertung ---------- */
 .szm-end { align-items: center; justify-content: center; padding: 1.5em; background: radial-gradient(120% 100% at 50% 0%, rgba(var(--szm-ink), .5), rgba(var(--szm-ink), .9)); }
 .szm-end .szm-panel { flex: none; width: min(100%, 66em); max-height: 100%; }
@@ -5179,6 +5192,39 @@ function createMenus(root, api) {
     root.append(el);
     bNo.focus({ preventScroll: true });
   }
+  /**
+   * Hörprobe: alle Rezepte aus dem Register, je Variante ein Knopf. Raum (Aus, Hof, Halle, Gasse, Raum) und Entfernung (direkt, 5, 30, 80 m)
+   * lassen sich umschalten; Entfernung gilt nur für ortsgebundene Klänge (mit Hörweite). Liegt wie eine Rückfrage über dem Menü (Esc schließt).
+   */
+  function hearing() {
+    const K = api.klang;
+    if (!K || dlg) return;
+    const before = document.activeElement;
+    let dist = 0;
+    const note = h('span', 'Knopf = Variante');
+    const off = () => K.room(null);
+    const close = () => { off(); dlg?.el.remove(); dlg = null; if (before?.isConnected) before.focus({ preventScroll: true }); };
+    const list = h('div.szm-hear-list', K.names().map((n) => {
+      const m = K.meta(n);
+      return h('div.szm-hear-row', h('span', n, h('small', [m.bus, m.reach ? `${m.reach} m` : '', m.loop ? 'Schleife' : ''].filter(Boolean).join(' · '))),
+        Array.from({ length: m.n }, (_, v) => btn('.small', String(v + 1), () => {
+          const ok = K.play(n, v, dist);
+          note.textContent = !ok ? `${n}: nicht zu hören (außer Hörweite oder Ton aus)` : `${n} · Variante ${v + 1}${dist && !m.reach ? ' · nicht ortsgebunden, direkt' : dist ? ` · ${dist} m` : ''}`;
+        })));
+    }));
+    const el = h('div.szm-dim.szm-hear-dim', { role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Hörprobe' },
+      h('div.szm-hear',
+        h('b', 'Hörprobe'),
+        h('div.szm-hear-opts',
+          h('span', 'Raum', seg('Raum', [['aus', 'Aus'], ['hof', 'Hof'], ['halle', 'Halle'], ['gasse', 'Gasse'], ['raum', 'Raum']], 'aus', (v) => K.room(v))),
+          h('span', 'Entfernung', seg('Entfernung', [[0, 'Direkt'], [5, '5 m'], [30, '30 m'], [80, '80 m']], 0, (v) => { dist = v; }))),
+        list,
+        h('div.szm-hear-foot', note, btn('', 'Schließen', () => { snd('back'); close(); }))));
+    dlg = { el, close, off };
+    root.append(el);
+    K.room('aus');
+    focusIn(el);
+  }
   function playerCard() {
     const xp = api.profile.xp || 0, lvl = levelOf(xp);
     return h('div.szm-me', { 'aria-label': 'Dein Profil' },
@@ -5381,7 +5427,8 @@ function createMenus(root, api) {
           row('Bildrate anzeigen', '', toggle('Bildrate anzeigen', P.fps, live('fps'))),
           row('Vollbild', 'Das Spiel füllt den ganzen Bildschirm', bFull)),
         sec('Ton',
-          row('Lautstärke', 'Zusätzlich zur Lautstärke des Systems', slider('Lautstärke', 0, 1, 0.05, P.volume, pct, live('volume')))),
+          row('Lautstärke', 'Zusätzlich zur Lautstärke des Systems', slider('Lautstärke', 0, 1, 0.05, P.volume, pct, live('volume'))),
+          row('Hörprobe', 'Jeden Klang einzeln anhören, mit Raum und Entfernung', btn('.small', 'Öffnen', () => { snd('ok'); hearing(); }, 'play'))),
         sec('Tastenbelegung', h('div.szm-keys', KEYS.map(([keys, what]) => h('div', keys.map((k) => h('kbd', k)), h('span', what))))),
         h('div.szm-sec', { style: { display: 'flex', justifyContent: 'flex-end' } },
           btn('.small', 'Standard wiederherstellen', () => { Object.assign(P, DEFAULTS); snd('ok'); clearTimeout(saveT); saveT = 0; api.save('prefs'); paint(); focusables(body).pop()?.focus({ preventScroll: true }); }, 'reload')));
@@ -5554,6 +5601,7 @@ function createMenus(root, api) {
   }
 
   function clearScreen() {
+    dlg?.off?.();
     dlg?.el.remove();
     dlg = null;
     closePage();
@@ -5854,6 +5902,13 @@ function createApp(win) {
     toggleFullscreen() { if (document.fullscreenElement) document.exitFullscreen?.(); else stage.requestFullscreen?.().catch(() => {}); },
     isFullscreen: () => document.fullscreenElement === stage,
     snd: (kind) => S.ui(kind),
+    /** Hörprobe: Register lesen und Varianten abspielen – dist 0 direkt, sonst so weit vor einem gedachten Hörer, ohne Verdeckung. */
+    klang: {
+      names: () => Object.keys(KLANG),
+      meta: (n) => KLANG[n],
+      room: (z) => S.room(z),
+      play: (n, v, dist = 0) => !!S.play(n, dist ? { v, L: { x: 0, y: 1.6, z: 0, yaw: 0 }, x: 0, y: 1.6, z: -dist, free: true } : { v }),
+    },
     inMatch: () => !!M && M.state !== 'over',
     /** Liegt dieses Fenster vorn? (Nur dann dürfen Menüs den Tastaturfokus an sich ziehen.) */
     active: () => mine(),
