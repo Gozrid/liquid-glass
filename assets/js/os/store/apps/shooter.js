@@ -456,6 +456,8 @@ const TIERS = {
 /** Belichtungsanpassung: Zielwert des Mittels, Grenzen um env.exposure, Zeiten in s (Bild wird heller → hell, dunkler → dunkel). */
 const BEL = { key: 0.18, lo: 0.66, hi: 1.5, hell: 0.35, dunkel: 1.2 };
 const GRADE_NEUTRAL = { shadow: [1, 1, 1], light: [1, 1, 1], sat: 1, contrast: 1, rays: 0 };
+/** Radius der Schatten-Abtastung in Texeln je Zahl der Abtastungen (Niedrig, Mittel, Hoch) */
+const SHADOW_RAD = { 4: 1.2, 9: 1.6, 16: 2.2 };
 const Q_FLAT = 0.25;     // zur Art addiert: flach auf einer Fläche (Zeichen am Boden) – harter Tiefentest wie Einschusslöcher statt weicher Kante
 
 // Bildkette: die Szene entsteht als linearer HDR-Wert in einem Zwischenbild; Belichtung, Tonwertkurve (ACES) und Gamma
@@ -481,20 +483,31 @@ mat3 tbn(vec3 N, vec3 p, vec2 uv) {
 const GLSL_LIGHT = `
 uniform vec3 uCam, uSunDir, uSunCol, uSkyCol, uGndCol, uFogCol, uZenith;
 uniform float uFogDen, uExposure, uShadowTexel, uShadowOn, uLdr;
+uniform float uShadowTaps, uShadowRad, uShadowShift;     // Abtastungen (4, 9, 16), Radius in Texeln, Versatz zur Sonne (Waffe in der Hand)
 uniform mat4 uShadowMat;
 uniform highp sampler2DShadow uShadow;
 uniform vec4 uLights[${MAX_LIGHTS}];
 uniform vec3 uLightCol[${MAX_LIGHTS}];
 
+// Poisson-Scheibe, schrittweise gefüllt: die ersten 4 und die ersten 9 Punkte sind für sich gleichmäßig verteilt
+const vec2 PD[16] = vec2[16](vec2(.910, -.387), vec2(-.897, .388), vec2(-.355, -.933), vec2(.412, .858), vec2(-.002, -.036), vec2(-.888, -.392),
+  vec2(-.372, .928), vec2(.320, -.761), vec2(.884, .359), vec2(-.344, .395), vec2(.504, -.010), vec2(-.353, -.401), vec2(-.629, -.007),
+  vec2(.241, .428), vec2(.274, -.345), vec2(-.003, .754));
+// Schatten der Sonne: Poisson-Scheibe, je Pixel gedreht (verschachteltes Gradientenrauschen). uShadowShift schiebt den Prüfpunkt zur Sonne hin:
+// die Waffe in der Hand liegt sonst im Schatten der eigenen Figur, die nur für die Schattenkarte gezeichnet wird.
 float sunShadow(vec3 wp, vec3 n, float ndl) {
   if (uShadowOn < .5) return 1.;
-  vec4 sp = uShadowMat * vec4(wp + n * (.05 + .12 * (1. - ndl)), 1.);
+  vec4 sp = uShadowMat * vec4(wp + n * (.05 + .12 * (1. - ndl)) + uSunDir * uShadowShift, 1.);
   vec3 c = sp.xyz;
   if (c.x < 0. || c.x > 1. || c.y < 0. || c.y > 1. || c.z > 1.) return 1.;
   c.z -= .0009;
-  float t = uShadowTexel * .8;
-  return (texture(uShadow, c + vec3(-t, -t, 0.)) + texture(uShadow, c + vec3(t, -t, 0.))
-        + texture(uShadow, c + vec3(-t, t, 0.)) + texture(uShadow, c + vec3(t, t, 0.))) * .25;
+  float a = 6.2831853 * fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(.06711056, .00583715))));
+  vec2 cs = vec2(cos(a), sin(a)) * uShadowTexel * uShadowRad;
+  mat2 rot = mat2(cs.x, cs.y, -cs.y, cs.x);
+  int nt = int(uShadowTaps);
+  float s = 0.;
+  for (int i = 0; i < 16; i++) { if (i >= nt) break; s += texture(uShadow, vec3(c.xy + rot * PD[i], c.z)); }
+  return s / float(nt);
 }
 // Eine Abtastung: liegt der Punkt im Sonnenlicht? (Maß dafür, ob der Weg zum Himmel offen ist)
 float sunLit(vec3 p) {
@@ -1131,6 +1144,9 @@ function createRenderer(canvas, { shadowSize = 2048, ldr: forceLdr = false } = {
     gl.uniform1f(u.uLdr, ldr ? 1 : 0);
     gl.uniform1f(u.uShadowTexel, 1 / shadowRes);
     gl.uniform1f(u.uShadowOn, shadowsOn ? 1 : 0);
+    gl.uniform1f(u.uShadowTaps, tier.shadowTaps || 4);
+    gl.uniform1f(u.uShadowRad, SHADOW_RAD[tier.shadowTaps] || 1.2);
+    gl.uniform1f(u.uShadowShift, 0);
     gl.uniformMatrix4fv(u.uShadowMat, false, shadowMat);
     gl.uniform1i(u.uShadow, 1);
     gl.uniform4fv(u.uLights, lightPos);
@@ -1260,6 +1276,7 @@ function createRenderer(canvas, { shadowSize = 2048, ldr: forceLdr = false } = {
       gl.depthMask(true);
       gl.useProgram(P.inst.p);
       gl.uniformMatrix4fv(P.inst.u.uVP, false, vmVP);
+      gl.uniform1f(P.inst.u.uShadowShift, 1.2);
       gl.bindVertexArray(instView.vao);
       gl.drawElementsInstanced(gl.TRIANGLES, 36, gl.UNSIGNED_SHORT, 0, f.vmCount);
       gl.depthRange(0.1, 1);
@@ -3831,6 +3848,9 @@ function createMatch(cfg, hooks) {
       part(I, TA, 0, 1.7, 0, 0.07, 3.4, 0.07, POLE);
       part(I, TA, 0.42, 3.05, 0, 0.78, 0.5, 0.03, col, 0, 0, Math.sin(M.time * 2 + f.x) * 0.04);
     }
+    // eigene Figur nur für die Schattenkarte (hinter instCount); vor drawView, weil beide die Mündung s.mx/my/mzz setzen
+    const instCount = I.count;
+    if (me.alive && !M.spec && !M.fixedCam) drawSoldier(I, me, PAL.friend);
     if (M.spec || M.fixedCam) { /* keine Waffe im Bild */ } else if (me.alive && !M.scoped) drawView(V, me, cam, view, cam.fov);
     else if (me.alive) { basis(cam.yaw, cam.pitch); me.mx = cam.x + B[6] * 0.9 - B[3] * 0.08; me.my = cam.y + B[7] * 0.9 - B[4] * 0.08; me.mzz = cam.z + B[8] * 0.9 - B[5] * 0.08; }
     const quadCount = fx.build(cam, () => {
@@ -3845,7 +3865,7 @@ function createMatch(cfg, hooks) {
     const lamps = world.lamps.length > MAX_LIGHTS - lightsOut.length
       ? [...world.lamps].sort((p, q) => Math.hypot(p[0] - cam.x, p[2] - cam.z) - Math.hypot(q[0] - cam.x, q[2] - cam.z)) : world.lamps;
     for (const l of lamps) { if (lightsOut.length >= MAX_LIGHTS) break; lightsOut.push(l); }
-    return { cam, inst: I.buf, instCount: I.count, vm: V.buf, vmCount: V.count, vmFov: VM_FOV, quads: fx.quads, quadCount, vmQuadCount, lights: lightsOut, time: M.time, shadows };
+    return { cam, inst: I.buf, instCount, instShadowCount: I.count, vm: V.buf, vmCount: V.count, vmFov: VM_FOV, quads: fx.quads, quadCount, vmQuadCount, lights: lightsOut, time: M.time, shadows };
   };
 
   /** Aufklärung einsetzen (ab drei Abschüssen in Folge): Gegner erscheinen eine Weile auf dem Radar. */
