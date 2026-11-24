@@ -756,7 +756,7 @@ const vec3 FACE[6] = vec3[6](vec3(-1., 0., 0.), vec3(1., 0., 0.), vec3(0., -1., 
 float riss(vec2 p, float w, float s) {
   vec2 r = vec2(cos(w), sin(w));
   float l = dot(p, r), q = abs(dot(p, vec2(-r.y, r.x)) + .05 * sin(l * 13. + s) * l);
-  return step(.05, l) * smoothstep(.95, .3, l) * smoothstep(.04, .012, q);
+  return step(.05, l) * smoothstep(.8, .25, l) * smoothstep(.035, .01, q);
 }
 void main() {
   float k = floor(vKind + .01), szene = 1e9, ich = 0., saat = floor(vE.x), alter = fract(vE.x);
@@ -817,7 +817,7 @@ void main() {
       float sp = smoothstep(f + .3, f, d) * (.45 + .55 * vn(vec2(w * 9., saat * 1.3)));
       c = mix(hell * 1.25, dunkel, loch); a = max(loch, sp * .85);
     } else if (v < 3.5) { a = smoothstep(1., .15, d + (n - .5) * .35) * .5; c *= .55; }    // Sand: flache dunkle Mulde
-    else { a = smoothstep(.55, .38, d + (n - .5) * .25) * .95; c = dunkel; }               // Stoff: kleines dunkles Loch
+    else { a = smoothstep(.5, .3, d + (n - .5) * .12) * .95; c = dunkel; }                 // Stoff: kleines dunkles Loch
     wrap = 0.;
   }
   a *= vCol.a;
@@ -2956,7 +2956,7 @@ const MUZZLE = {
  */
 function createFx(prefs = null, phys = null) {
   const quads = new Float32Array(MAX_QUADS * 4 * QSTRIDE);
-  const parts = [], tracers = [], decals = [], lights = [];
+  const parts = [], tracers = [], decals = [], lights = [], chunks = [];
   const counts = new Int32Array(12);                 // Vierecke je Art im letzten Bild (Prüfungen, etwa Q_BLOOD)
   let qn = 0, rx = 1, ry = 0, rz = 0, ux = 0, uy = 1, uz = 0, cx = 0, cy = 0, cz = 0;
   const seedOf = () => (Math.random() * 64) | 0;
@@ -3007,6 +3007,23 @@ function createFx(prefs = null, phys = null) {
     puff(x, y, z, 0, 0, 0, { life, s: w, c: [1, 0.72, 0.38], k: Q_SPARK, dir: [-dx, -dy, -dz], len, seed });
   }
   const DUST = { concrete: [0.62, 0.6, 0.57], sand: [0.72, 0.6, 0.42], wood: [0.5, 0.36, 0.2], cloth: [0.7, 0.7, 0.7], metal: [0.45, 0.45, 0.47] };
+  /**
+   * Einschlag je Material: v = Variante von Q_CRACK (Beton, Metall, Holz, Sand, Stoff), s = halbe Kantenlänge des Lochs, life/fade in s,
+   * n = Trümmerstücke [min, max] mit Größe [Breite, Höhe, Länge] und Farbe (linear, Art K_*).
+   */
+  const HOLE = {
+    concrete: { v: 0, s: [0.05, 0.07], life: 40, fade: 4, n: [3, 5], box: [0.018, 0.014, 0.022], col: [0.34, 0.33, 0.31, K_MATTE] },
+    metal: { v: 1, s: [0.03, 0.04], life: 40, fade: 4, n: [0, 0] },
+    wood: { v: 2, s: [0.045, 0.06], life: 40, fade: 4, n: [3, 4], box: [0.009, 0.009, 0.06], col: [0.55, 0.34, 0.13, K_MATTE] },
+    sand: { v: 3, s: [0.08, 0.1], life: 8, fade: 3, n: [0, 0] },
+    cloth: { v: 4, s: [0.012, 0.016], life: 40, fade: 4, n: [2, 2], box: [0.004, 0.004, 0.05], col: [0.45, 0.45, 0.43, K_MATTE] },
+  };
+  /** Trümmerstück: kleiner Quader mit Drall, Schwerkraft 14, ein Aufprall auf der Höhe, die beim Entstehen einmal bestimmt wird */
+  function chunk(x, y, z, vx, vy, vz, box, col, life) {
+    if (chunks.length >= capOf(FX_MAX.chunks)) chunks.shift();
+    const f = phys ? phys.floorBelow(x, y + 0.02, z, 0.02) : 0, k = rnd(0.7, 1.3);
+    chunks.push({ x, y, z, vx, vy, vz, rx: rnd(TAU), ry: rnd(TAU), wx: rnd(-25, 25), wy: rnd(-25, 25), sx: box[0] * k, sy: box[1] * k, sz: box[2] * k, col, life, floor: f, hit: 0 });
+  }
 
   const F = {
     quads, lights,
@@ -3017,19 +3034,33 @@ function createFx(prefs = null, phys = null) {
       if (tracers.length > 60) tracers.shift();
       tracers.push({ x0, y0, z0, x1, y1, z1, len, t: 0, dur: Math.max(0.035, len / 300), w: thin ? 0.018 : 0.03 });
     },
-    /** Einschlag in die Welt: Loch, Staub oder Funken. axis/sign beschreiben die getroffene Fläche. */
+    /** Einschlag in die Welt: Loch je Material (HOLE), Trümmer, Funken oder Staub. axis/sign beschreiben die getroffene Fläche. */
     impact(x, y, z, axis, sign, kind) {
+      const h = HOLE[kind] || HOLE.concrete, col = DUST[kind] || DUST.concrete;
       if (decals.length >= FX_MAX.decals) decals.shift();
-      decals.push({ x, y, z, axis, sign, s: rnd(0.014, 0.022), life: 40, k: Q_DECAL, c: [0.035, 0.035, 0.035], seed: seedOf() });
+      decals.push({ x, y, z, axis, sign, s: rnd(h.s[0], h.s[1]), life: h.life, fade: h.fade, a: 1, k: Q_CRACK, c: col, seed: h.v + 8 * ((Math.random() * 8) | 0), rot: rnd(TAU) });
       const n = [0, 0, 0];
       n[axis] = sign;
-      const col = DUST[kind] || DUST.concrete;
-      if (kind === 'metal') {
-        for (let i = 0; i < 5; i++) puff(x, y, z, n[0] * rnd(2, 6) + rnd(-2, 2), n[1] * rnd(2, 6) + rnd(-1, 3), n[2] * rnd(2, 6) + rnd(-2, 2), { life: rnd(0.12, 0.3), s: 0.025, c: [1, 0.75, 0.35], k: Q_GLOW, grav: 12 });
-        puff(x + n[0] * 0.03, y + n[1] * 0.03, z + n[2] * 0.03, 0, 0, 0, { life: 0.06, s: 0.22, c: [1, 0.8, 0.5], k: Q_GLOW });
+      const ox = x + n[0] * 0.04, oy = y + n[1] * 0.04, oz = z + n[2] * 0.04;
+      for (let i = 0, m = Math.round(rnd(h.n[0], h.n[1])); i < m; i++) {
+        const v = rnd(1.5, 3.5);
+        chunk(ox, oy, oz, n[0] * v + rnd(-1.2, 1.2), n[1] * v + rnd(0.3, 2.2), n[2] * v + rnd(-1.2, 1.2), h.box, h.col, rnd(0.6, 1.2));
       }
-      for (let i = 0; i < 3; i++) puff(x + n[0] * 0.05, y + n[1] * 0.05, z + n[2] * 0.05, n[0] * rnd(0.6, 2) + rnd(-0.5, 0.5), n[1] * rnd(0.6, 2) + rnd(-0.2, 0.9), n[2] * rnd(0.6, 2) + rnd(-0.5, 0.5),
-        { life: rnd(0.35, 0.7), s: rnd(0.05, 0.09), grow: rnd(0.5, 0.9), c: col, a: kind === 'metal' ? 0.25 : 0.55, k: Q_DUST, drag: 3, grav: -0.3 });
+      if (kind === 'metal') {
+        for (let i = 0, m = Math.round(rnd(6, 8)); i < m; i++) {
+          const v = rnd(3, 8);
+          puff(ox, oy, oz, n[0] * v + rnd(-2.5, 2.5), n[1] * v + rnd(-1, 3), n[2] * v + rnd(-2.5, 2.5), { life: rnd(0.15, 0.35), s: 0.006, c: [1, 0.72, 0.36], k: Q_SPARK, grav: 12, drag: 0.8 });
+        }
+        puff(x + n[0] * 0.03, y + n[1] * 0.03, z + n[2] * 0.03, 0, 0, 0, { life: 0.05, s: 0.16, c: [1, 0.8, 0.5], k: Q_GLOW });
+        puff(ox, oy, oz, n[0] * 0.8, n[1] * 0.8 + 0.3, n[2] * 0.8, { life: rnd(0.3, 0.5), s: 0.05, grow: 0.5, c: col, a: 0.25, k: Q_DUST, drag: 3, grav: -0.3 });
+      } else if (kind === 'sand') {                      // Sandfontäne
+        for (let i = 0; i < 5; i++) puff(ox, oy, oz, n[0] * rnd(0.3, 1) + rnd(-0.4, 0.4), rnd(1.5, 3.2), n[2] * rnd(0.3, 1) + rnd(-0.4, 0.4),
+          { life: rnd(0.45, 0.8), s: rnd(0.035, 0.055), grow: 0.25, c: col, a: 0.32, k: Q_DUST, drag: 1.5, grav: 4 });
+      } else {
+        const big = kind === 'concrete' ? 1.3 : 1;
+        for (let i = 0; i < 3; i++) puff(x + n[0] * 0.05, y + n[1] * 0.05, z + n[2] * 0.05, n[0] * rnd(0.6, 2) + rnd(-0.5, 0.5), n[1] * rnd(0.6, 2) + rnd(-0.2, 0.9), n[2] * rnd(0.6, 2) + rnd(-0.5, 0.5),
+          { life: rnd(0.3, 0.6) * big, s: rnd(0.04, 0.07) * big, grow: rnd(0.35, 0.6) * big, c: col, a: kind === 'cloth' ? 0.2 : 0.38, k: Q_DUST, drag: 3, grav: -0.3 });
+      }
     },
     /** Treffer an einer Figur */
     flesh(x, y, z, dx, dy, dz) {
@@ -3111,6 +3142,17 @@ function createFx(prefs = null, phys = null) {
       for (let i = tracers.length - 1; i >= 0; i--) if ((tracers[i].t += dt) > tracers[i].dur) tracers.splice(i, 1);
       for (let i = decals.length - 1; i >= 0; i--) if ((decals[i].life -= dt) <= 0) decals.splice(i, 1);
       for (let i = lights.length - 1; i >= 0; i--) if ((lights[i].life -= dt) <= 0) lights.splice(i, 1);
+      for (let i = chunks.length - 1; i >= 0; i--) {
+        const c = chunks[i];
+        if ((c.life -= dt) <= 0) { chunks.splice(i, 1); continue; }
+        if (c.hit > 1) continue;                         // liegt
+        c.vy -= 14 * dt; c.x += c.vx * dt; c.y += c.vy * dt; c.z += c.vz * dt; c.rx += c.wx * dt; c.ry += c.wy * dt;
+        if (c.y < c.floor + c.sy / 2 && c.vy < 0) {
+          c.y = c.floor + c.sy / 2;
+          if (c.hit++ || c.vy > -1.5) { c.hit = 2; c.rx = Math.round(c.rx / Math.PI) * Math.PI; }   // zweiter Aufprall: liegen bleiben
+          else { c.vy *= -0.3; c.vx *= 0.55; c.vz *= 0.55; c.wx *= 0.5; c.wy *= 0.5; }
+        }
+      }
     },
     /** Füllt den Puffer für dieses Bild. Liefert die Zahl der Vierecke. */
     build(cam, extra) {
@@ -3165,7 +3207,9 @@ function createFx(prefs = null, phys = null) {
       }
       return qn - before;
     },
-    clear() { parts.length = 0; tracers.length = 0; decals.length = 0; lights.length = 0; },
+    clear() { parts.length = 0; tracers.length = 0; decals.length = 0; lights.length = 0; chunks.length = 0; },
+    /** Trümmerstücke: zeichnet M.frame über den Instanz-Schreiber (Quader mit Drall, werfen Schatten) */
+    chunks,
     /** Zahl der Vierecke je Art im letzten Bild (Prüfungen) und der Partikel */
     counts, get partCount() { return parts.length; },
   };
@@ -4285,6 +4329,7 @@ function createMatch(cfg, hooks) {
       const k = Math.min(1, c.t / 0.5);
       drawSoldier(I, c.s, c.pal, 1 - (1 - k) * (1 - k), c.dir);
     }
+    for (const c of fx.chunks) { mIdent(TA); mTrans(TA, c.x, c.y, c.z); mRotY(TA, c.ry); mRotX(TA, c.rx); I.box(TA, c.sx, c.sy, c.sz, c.col); }
     for (const g of nades) { mIdent(TA); mTrans(TA, g.x, g.y, g.z); mRotY(TA, g.rot); mRotX(TA, g.rot * 0.7); I.box(TA, 0.085, 0.11, 0.085, NADE_C); part(I, TA, 0, 0.07, 0, 0.03, 0.04, 0.03, GUN.s); }
     for (const p of packs) { mIdent(TA); mTrans(TA, p.x, p.y + 0.16 + Math.sin(M.time * 2.5 + p.x) * 0.04, p.z); mRotY(TA, M.time * 1.3 + p.z); I.box(TA, 0.34, 0.2, 0.22, PACK); part(I, TA, 0, 0.04, 0, 0.35, 0.04, 0.23, PACK_L); }
     for (const f of M.flags) {
