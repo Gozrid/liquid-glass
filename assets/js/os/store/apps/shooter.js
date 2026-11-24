@@ -2506,17 +2506,42 @@ rezept('koerper.fall', {
     return K.norm(K.fade(a, { outT: 0.03 }), 1);
   },
 });
-rezept('explosion.nah', {
-  bus: 'welt', gain: altDb(0.9, 'welt'), prio: 8, cap: 4, reach: 140, send: 0.9,
-  make(K, rnd, v) {
-    const s = spread(v, rnd), a = K.buf(2.03);
-    K.burst(a, rnd, { f: 1800 * s, f2: 90, dur: 1.1, gain: 1.3, rate: 0.5 });
-    K.tone(a, { f: 82 * s, f2: 30 * s, dur: 0.75, gain: 1.3 });
-    K.burst(a, rnd, { type: 'highpass', f: 2200, dur: 0.07, gain: 0.5 });
-    K.burst(a, rnd, { f: 500, f2: 120, dur: 2, gain: 0.22, attack: 0.1, rate: 0.4 });
-    return a;
-  },
-});
+// ---------- Explosion in Schichten, nah und fern; Splint der Granate (Schritt 2.7) ----------
+/**
+ * Explosion. nah: Klick 3 ms, Druckwelle (Friedlander, T 12 ms, Drive 4), Körper 70 → 28 Hz über 600 ms, Rauschen Tiefpass 2500 → 90 Hz
+ * (tau 350 ms), Sub 38 Hz über 400 ms, Trümmerregen 0,3–1,4 s mit fallender Dichte. fern: ohne Klick und Trümmer, Tiefpass 600 Hz,
+ * tau 700 ms, Echo nach 250 ms. Generator: gibt zwischen den Schichten ab.
+ */
+function* makeBoom(K, rnd, v, fern) {
+  const fk = vary(v, 3, rnd, 0.06), a = K.buf(fern ? 2.4 : 1.8);
+  const p = K.friedlander(K.buf(0.06), { T: 0.012 * (2 - fk), b: 1.2, gain: 1 });
+  K.drive(p, 4); K.dc(p);
+  K.mix(a, p, { gain: 0.9 });
+  if (!fern) K.click(a, rnd, { dur: 0.003, gain: 0.8 });
+  const body = K.sine(K.buf(0.6), { f: 70 * fk, f2: 28 * fk, dur: 0.6, gain: 1 });
+  K.decay(body, { attack: 0.004, tau: 0.2 }); K.fade(body, { outT: 0.05 }); K.dc(body);
+  K.mix(a, body, { gain: 0.8 });
+  const sub = K.sine(K.buf(0.4), { f: 38 * fk, dur: 0.4, gain: 1 });
+  K.decay(sub, { attack: 0.01, tau: 0.14 }); K.fade(sub, { outT: 0.05 }); K.dc(sub);
+  K.mix(a, sub, { gain: 0.6 });
+  yield;
+  const n = K.noise(K.buf(fern ? 2.3 : 1.7), rnd, 'pink');
+  K.hp(n, { f: 40 });
+  K.lp(n, { f: (fern ? 600 : 2500) * fk, f2: 90 * fk });
+  K.decay(n, { attack: fern ? 0.03 : 0.004, tau: fern ? 0.7 : 0.35 });
+  K.mix(a, K.norm(n, 1), { gain: 0.9 });
+  yield;
+  if (!fern) {
+    grains(K, rnd, a, { n: 70, t0: 0.3, t1: 1.4, f0: 1500, f1: 5000, d0: 0.004, d1: 0.01, g: 0.12, dens: 2.2 });
+    yield;
+  } else {
+    K.lp(a, { f: 600 * fk });
+    echoes(K, a, [[0.25, -7]], 500);
+  }
+  return K.norm(K.fade(a, { outT: 0.1 }), 1);
+}
+rezept('explosion.nah', { bus: 'welt', gain: spitze(-1, 'welt'), prio: 8, cap: 4, reach: 140, send: 0.9, make: (K, rnd, v) => makeBoom(K, rnd, v, false) });
+rezept('explosion.fern', { bus: 'welt', gain: spitze(-1, 'welt'), prio: 8, cap: 4, reach: 140, send: 0.9, make: (K, rnd, v) => makeBoom(K, rnd, v, true) });
 rezept('leer', {
   n: 2, bus: 'foley', gain: spitze(-22, 'foley'), prio: 6, cap: 2, send: 0.1,
   make(K, rnd, v) { const a = K.buf(0.06); clank(K, rnd, a, 0, [[3300, 5, 1], [5200, 3, 0.5], [1400, 8, 0.4]], 1, v ? 1.07 : 0.95); return K.norm(K.fade(a, { outT: 0.005 }), 1); },
@@ -2531,12 +2556,12 @@ rezept('pfeifen', {
   },
 });
 rezept('granate.splint', {
-  bus: 'foley', gain: altDb(0.25, 'foley'), prio: 6, cap: 2, send: 0.1,
+  n: 2, bus: 'foley', gain: spitze(-20, 'foley'), prio: 6, cap: 2, send: 0.1,
   make(K, rnd, v) {
-    const s = spread(v, rnd), a = K.buf(0.28);
-    K.tone(a, { type: 'square', f: 2400 * s, f2: 1600 * s, dur: 0.03, gain: 0.3 });
-    K.burst(a, rnd, { type: 'bandpass', f: 800 * s, q: 1, dur: 0.2, gain: 0.5, at: 0.06, attack: 0.06 });
-    return a;
+    const fk = v ? 1.05 : 0.95, a = K.buf(0.3);
+    clank(K, rnd, a, 0, [[2400, 12, 1], [4100, 7, 0.5]], 1, fk);
+    clank(K, rnd, a, 0.06, [[3100, 90, 0.8], [4650, 60, 0.4]], 1, fk);
+    return K.norm(K.fade(a, { outT: 0.08 }), 1);
   },
 });
 for (const [name, o] of Object.entries({
@@ -2565,12 +2590,13 @@ const SIGNALE = {
 for (const [name, seq] of Object.entries(SIGNALE)) {
   rezept(`signal.${name}`, {
     bus: 'ui', gain: altDb(0.3, 'ui'), prio: 6, cap: 2,
-    make(K, rnd, v) {
+    *make(K, rnd, v) {                                // Generator: je Ton ein Rechenschritt (die Dreiecke sind teuer)
       const s = spread(v, rnd, 0.015), a = K.buf(seq[seq.length - 1][1] + 0.62);
-      seq.forEach(([f, at], i) => {
+      for (const [i, [f, at]] of seq.entries()) {
         K.tone(a, { type: 'triangle', f: f * s, dur: i === seq.length - 1 ? 0.6 : 0.24, gain: 0.4, at, attack: 0.01 });
         K.tone(a, { f: f * 2 * s, dur: 0.2, gain: 0.08, at, attack: 0.01 });
-      });
+        yield;
+      }
       return a;
     },
   });
@@ -2639,10 +2665,13 @@ function klangBake(first = [], onProgress = null) {
     /** Ein Rechenschritt; liefert seine Dauer in ms. */
     const step = () => {
       const a = performance.now(), [n, v] = todo[job.i];
-      if (job.gen) {
+      if (job.gen && !n) {                                          // Raumantwort, kanalweise
+        const r = job.gen.next();
+        if (r.done) { let m = RAUM_IR.get(KSR); if (!m) RAUM_IR.set(KSR, (m = {})); m[v] ||= r.value; job.gen = null; job.i++; }
+      } else if (job.gen) {
         if (klangHas(n, v)) { job.gen = null; job.i++; }          // inzwischen auf Verlangen berechnet
         else { const r = job.gen.next(); if (r.done) { klangPut(n, v, klangFinish(n, r.value)); job.gen = null; job.i++; } }
-      } else if (!n) { raumIR(KSR, v); job.i++; }
+      } else if (!n) { if (RAUM_IR.get(KSR)?.[v]) job.i++; else job.gen = raumAntwortGen(v, KSR); }
       else if (klangHas(n, v)) job.i++;
       else {
         const out = klangStart(n, v);
@@ -2650,7 +2679,8 @@ function klangBake(first = [], onProgress = null) {
       }
       const dt = performance.now() - a;
       KBAKE.ms += dt;
-      KBAKE.maxStep = Math.max(KBAKE.maxStep, dt);
+      if (dt > KBAKE.maxStep) { KBAKE.maxStep = dt; KBAKE.maxStepOf = n ? `${n}#${v}` : `raum.${v}`; }
+      if (dt > 4) (KBAKE.slow ||= []).push(`${n ? `${n}#${v}` : `raum.${v}`} ${dt.toFixed(1)}`);
       return dt;
     };
     job.promise = new Promise((resolve) => {
@@ -2721,7 +2751,9 @@ const RAUM_IR = new Map();
  * Stereo-Raumantwort: dünnes Impulsrauschen (±1 mit der Dichte der Tabelle) mal exp(−t/tau), tau = RT60/6,91, gefiltert,
  * auf Energie 1 gebracht (der Rückweg bestimmt die Lautstärke), dazu die frühen Echos. Links und rechts aus verschiedenen Saaten.
  */
-function raumAntwort(name, sr) {
+function raumAntwort(name, sr) { const g = raumAntwortGen(name, sr); let r; while (!(r = g.next()).done); return r.value; }
+/** Dasselbe als Generator: gibt nach jedem Kanal ab (für das Backen in Scheiben). */
+function* raumAntwortGen(name, sr) {
   const D = RAUM[name], K = forge(sr), tau = D.rt / 6.91, ch = [];
   const shape = (x) => { if (D.bp) { K.hp(x, { f: D.bp[0] }); K.lp(x, { f: D.bp[1] }); } else K.lp(x, { f: D.lp[0], f2: D.lp[1] }); return x; };
   for (let c = 0; c < 2; c++) {
@@ -2745,6 +2777,7 @@ function raumAntwort(name, sr) {
       K.mix(a, ea);
     }
     ch.push(a);
+    if (c === 0) yield;
   }
   return ch;
 }
@@ -3025,7 +3058,12 @@ function createSound(getPrefs) {
       if (kf < 1) play(`schuss.${k}.nah`, { L, x, y, z, gain: 1 - kf });
       if (kf > 0) play(`schuss.${k}.fern`, { L, x, y, z, gain: kf });
     },
-    explosion(L, x, y, z) { play('explosion.nah', { L, x, y, z }); },
+    /** Explosion: nah und fern zugleich, übergeblendet zwischen 30 und 70 m. */
+    explosion(L, x, y, z) {
+      const kf = sstep(30, 70, Math.hypot(x - L.x, y - L.y, z - L.z));
+      if (kf < 1) play('explosion.nah', { L, x, y, z, gain: 1 - kf });
+      if (kf > 0) play('explosion.fern', { L, x, y, z, gain: kf });
+    },
     impact(L, x, y, z, kind) {
       play(`einschlag.${IMPACT_SND[kind] || 'beton'}`, { L, x, y, z });
       if (kind === 'metal' && Math.random() < 0.15) play('querschlaeger', { L, x, y, z, when: 0.008 });       // Querschläger
